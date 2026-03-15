@@ -14,6 +14,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+import math
 
 ROOT = Path(__file__).resolve().parent
 TRAIN = ROOT / "train.py"
@@ -121,6 +122,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Stop early after this many accepted changes (0 disables)",
     )
     parser.add_argument(
+        "--schedule",
+        choices=["round_robin", "ucb"],
+        default="round_robin",
+        help="Target scheduling strategy across rounds",
+    )
+    parser.add_argument(
+        "--ucb-explore",
+        type=float,
+        default=0.75,
+        help="Exploration strength used when --schedule ucb",
+    )
+    parser.add_argument(
         "--target-overrides-json",
         default="",
         help="Optional JSON file with per-target acceptance overrides",
@@ -135,6 +148,8 @@ def write_reports(
     rounds: int,
     batch_iterations: int,
     batch_max_accepted: int,
+    schedule: str,
+    ucb_explore: float,
     target_overrides_json: str,
 ) -> None:
     REPORT_JSON.write_text(
@@ -143,6 +158,8 @@ def write_reports(
                 "rounds": rounds,
                 "batch_iterations": batch_iterations,
                 "batch_max_accepted": batch_max_accepted,
+                "schedule": schedule,
+                "ucb_explore": ucb_explore,
                 "target_overrides_json": target_overrides_json,
                 "totals": totals,
                 "rows": [
@@ -169,6 +186,9 @@ def write_reports(
     lines.append(f"- rounds: `{rounds}`")
     lines.append(f"- batch iterations: `{batch_iterations}`")
     lines.append(f"- batch max accepted: `{batch_max_accepted}`")
+    lines.append(f"- schedule: `{schedule}`")
+    if schedule == "ucb":
+        lines.append(f"- ucb explore: `{ucb_explore}`")
     if target_overrides_json:
         lines.append(f"- target overrides: `{target_overrides_json}`")
     lines.append("")
@@ -210,6 +230,16 @@ def write_reports(
     REPORT_MD.write_text("\n".join(lines) + "\n")
 
 
+def ucb_score(state: dict[str, Any], *, total_batches: int, explore: float) -> float:
+    batches = int(state.get("batches", 0))
+    accepted = int(state.get("accepted", 0))
+    if batches <= 0:
+        return float("inf")
+    mean_reward = accepted / batches
+    bonus = max(0.0, explore) * math.sqrt(math.log(max(2, total_batches)) / batches)
+    return mean_reward + bonus
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     targets = [t.strip() for t in args.targets.split(",") if t.strip()]
@@ -225,7 +255,15 @@ def main(argv: list[str] | None = None) -> int:
 
     for round_index in range(1, args.rounds + 1):
         made_progress = False
-        for target in targets:
+        active_targets = list(targets)
+        if args.schedule == "ucb":
+            total_batches = sum(int(item["batches"]) for item in totals.values()) + 1
+            active_targets.sort(
+                key=lambda t: ucb_score(totals[t], total_batches=total_batches, explore=args.ucb_explore),
+                reverse=True,
+            )
+
+        for target in active_targets:
             state = totals[target]
             if state["plateau_streak"] >= args.plateau_threshold:
                 continue
@@ -262,6 +300,8 @@ def main(argv: list[str] | None = None) -> int:
                     rounds=round_index,
                     batch_iterations=args.batch_iterations,
                     batch_max_accepted=args.batch_max_accepted,
+                    schedule=args.schedule,
+                    ucb_explore=args.ucb_explore,
                     target_overrides_json=args.target_overrides_json,
                 )
                 print(
@@ -270,6 +310,8 @@ def main(argv: list[str] | None = None) -> int:
                             "ok": True,
                             "rounds_executed": round_index,
                             "total_accepted": total_accepted,
+                            "schedule": args.schedule,
+                            "ucb_explore": args.ucb_explore,
                             "target_overrides_json": args.target_overrides_json,
                             "report_md": str(REPORT_MD),
                             "report_json": str(REPORT_JSON),
@@ -292,6 +334,8 @@ def main(argv: list[str] | None = None) -> int:
         rounds=args.rounds,
         batch_iterations=args.batch_iterations,
         batch_max_accepted=args.batch_max_accepted,
+        schedule=args.schedule,
+        ucb_explore=args.ucb_explore,
         target_overrides_json=args.target_overrides_json,
     )
 
@@ -301,6 +345,8 @@ def main(argv: list[str] | None = None) -> int:
                 "ok": True,
                 "rounds_executed": args.rounds,
                 "total_accepted": total_accepted,
+                "schedule": args.schedule,
+                "ucb_explore": args.ucb_explore,
                 "target_overrides_json": args.target_overrides_json,
                 "report_md": str(REPORT_MD),
                 "report_json": str(REPORT_JSON),
