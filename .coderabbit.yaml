@@ -1,0 +1,137 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: "en-US"
+tone_instructions: |
+  Be direct, technical, and thorough. Flag every potential issue.
+  Do not sugarcoat feedback. Prioritize correctness, security,
+  and performance. This is a Scarb replacement tool (uc) written
+  in Rust — treat every PR as if it could ship to production.
+early_access: true
+enable_free_tier: true
+reviews:
+  profile: "assertive"
+  request_changes_workflow: true
+  high_level_summary: true
+  high_level_summary_placeholder: "@coderabbitai summary"
+  auto_title_placeholder: "@coderabbitai"
+  review_status: true
+  commit_status: true
+  poem: false
+  collapse_walkthrough: false
+  sequence_diagrams: true
+  changed_files_summary: true
+  labeling_instructions: []
+  path_filters: []
+  path_instructions:
+    - path: "**/*.rs"
+      instructions: |
+        Review Rust code with extreme rigor. Check for:
+        - Unsafe code blocks and justify necessity
+        - Proper error handling (no unwrap in non-test code)
+        - Memory safety and lifetime correctness
+        - Clippy compliance at pedantic level
+        - Dead code and unused imports
+        - Performance: unnecessary allocations, clones, copies
+        - Concurrency safety if applicable
+        - Proper use of Result/Option types
+        - Documentation on all public items
+    - path: "**/*.toml"
+      instructions: |
+        Check dependency versions, features flags, and ensure
+        no unnecessary dependencies. Verify workspace config.
+    - path: "**/tests/**"
+      instructions: |
+        Ensure tests are comprehensive. Check edge cases,
+        error paths, and boundary conditions. Flag missing
+        test scenarios.
+    - path: "docs/**"
+      instructions: |
+        Check for accuracy, completeness, and consistency
+        with the codebase. Flag stale or misleading docs.
+    - path: "scripts/**"
+      instructions: |
+        Check for shellcheck compliance, proper error handling,
+        and portability. Flag hardcoded paths.
+    - path: "benchmarks/**"
+      instructions: |
+        Verify benchmark methodology is sound. Check for
+        measurement bias and ensure reproducibility.
+auto_review:
+  enabled: true
+  auto_incremental_review: true
+  ignore_title_keywords: []
+  drafts: true
+  base_branches: []
+tools:
+  shellcheck:
+    enabled: true
+  ruff:
+    enabled: true
+  markdownlint:
+    enabled: true
+  github-checks:
+    enabled: true
+    timeout_ms: 90000
+  languagetool:
+    enabled: true
+    enabled_rules: []
+    disabled_rules: []
+    enabled_categories: []
+    disabled_categories:
+      - "TYPOS"
+      - "TYPOGRAPHY"
+    level: "default"
+  biome:
+    enabled: true
+  hadolint:
+    enabled: true
+  swiftlint:
+    enabled: false
+  phpstan:
+    enabled: false
+  golangci-lint:
+    enabled: false
+  yamllint:
+    enabled: true
+  gitleaks:
+    enabled: true
+  checkov:
+    enabled: true
+  detekt:
+    enabled: false
+  eslint:
+    enabled: false
+  rubocop:
+    enabled: false
+  buf:
+    enabled: false
+  regal:
+    enabled: false
+  actionlint:
+    enabled: true
+  pmd:
+    enabled: false
+  cppcheck:
+    enabled: false
+  semgrep:
+    enabled: true
+  circleci:
+    enabled: false
+  ast-grep:
+    enabled: true
+    packages: []
+    rule_dirs: []
+    util_dirs: []
+chat:
+  auto_reply: true
+knowledge_base:
+  opt_out: false
+  learnings:
+    scope: "auto"
+  issues:
+    scope: "auto"
+  jira:
+    project_keys: []
+  linear:
+    team_keys: []
+  pull_requests:
+    scope: "auto"
