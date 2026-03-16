@@ -95,6 +95,35 @@
         "--log-n-perms",
         "11"
       ],
+      "benchmark_profiles": [
+        {
+          "name": "p10",
+          "benchmark_command": [
+            "cargo",
+            "run",
+            "--release",
+            "--",
+            "poseidon",
+            "--log-n-perms",
+            "10"
+          ],
+          "weight": 0.35
+        },
+        {
+          "name": "p11",
+          "benchmark_command": [
+            "cargo",
+            "run",
+            "--release",
+            "--",
+            "poseidon",
+            "--log-n-perms",
+            "11"
+          ],
+          "weight": 0.65
+        }
+      ],
+      "profiles_aggregate": "weighted_geomean",
       "warmup_runs": 1,
       "runs": 5,
       "aggregate": "median",
@@ -135,6 +164,35 @@
         "--log-n-perms",
         "11"
       ],
+      "benchmark_profiles": [
+        {
+          "name": "p10",
+          "benchmark_command": [
+            "cargo",
+            "run",
+            "--release",
+            "--",
+            "poseidon",
+            "--log-n-perms",
+            "10"
+          ],
+          "weight": 0.35
+        },
+        {
+          "name": "p11",
+          "benchmark_command": [
+            "cargo",
+            "run",
+            "--release",
+            "--",
+            "poseidon",
+            "--log-n-perms",
+            "11"
+          ],
+          "weight": 0.65
+        }
+      ],
+      "profiles_aggregate": "weighted_geomean",
       "warmup_runs": 1,
       "runs": 5,
       "aggregate": "median",
@@ -185,6 +243,35 @@
         "--log-n-perms",
         "11"
       ],
+      "benchmark_profiles": [
+        {
+          "name": "p10",
+          "benchmark_command": [
+            "cargo",
+            "run",
+            "--release",
+            "--",
+            "poseidon",
+            "--log-n-perms",
+            "10"
+          ],
+          "weight": 0.35
+        },
+        {
+          "name": "p11",
+          "benchmark_command": [
+            "cargo",
+            "run",
+            "--release",
+            "--",
+            "poseidon",
+            "--log-n-perms",
+            "11"
+          ],
+          "weight": 0.65
+        }
+      ],
+      "profiles_aggregate": "weighted_geomean",
       "warmup_runs": 1,
       "runs": 5,
       "trim_extremes": 1,
@@ -236,6 +323,35 @@
         "--log-n-perms",
         "11"
       ],
+      "benchmark_profiles": [
+        {
+          "name": "p10",
+          "benchmark_command": [
+            "cargo",
+            "run",
+            "--release",
+            "--",
+            "poseidon",
+            "--log-n-perms",
+            "10"
+          ],
+          "weight": 0.35
+        },
+        {
+          "name": "p11",
+          "benchmark_command": [
+            "cargo",
+            "run",
+            "--release",
+            "--",
+            "poseidon",
+            "--log-n-perms",
+            "11"
+          ],
+          "weight": 0.65
+        }
+      ],
+      "profiles_aggregate": "weighted_geomean",
       "warmup_runs": 1,
       "runs": 5,
       "trim_extremes": 1,
@@ -288,6 +404,35 @@
         "--log-n-perms",
         "11"
       ],
+      "benchmark_profiles": [
+        {
+          "name": "p10",
+          "benchmark_command": [
+            "cargo",
+            "run",
+            "--release",
+            "--",
+            "poseidon",
+            "--log-n-perms",
+            "10"
+          ],
+          "weight": 0.35
+        },
+        {
+          "name": "p11",
+          "benchmark_command": [
+            "cargo",
+            "run",
+            "--release",
+            "--",
+            "poseidon",
+            "--log-n-perms",
+            "11"
+          ],
+          "weight": 0.65
+        }
+      ],
+      "profiles_aggregate": "weighted_geomean",
       "warmup_runs": 1,
       "runs": 5,
       "trim_extremes": 1,
@@ -334,6 +479,35 @@
         "--log-n-perms",
         "11"
       ],
+      "benchmark_profiles": [
+        {
+          "name": "p10",
+          "benchmark_command": [
+            "cargo",
+            "run",
+            "--release",
+            "--",
+            "poseidon",
+            "--log-n-perms",
+            "10"
+          ],
+          "weight": 0.35
+        },
+        {
+          "name": "p11",
+          "benchmark_command": [
+            "cargo",
+            "run",
+            "--release",
+            "--",
+            "poseidon",
+            "--log-n-perms",
+            "11"
+          ],
+          "weight": 0.65
+        }
+      ],
+      "profiles_aggregate": "weighted_geomean",
       "warmup_runs": 1,
       "runs": 5,
       "trim_extremes": 1,

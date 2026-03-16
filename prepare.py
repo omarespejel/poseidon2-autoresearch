@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import math
 import os
 import re
 import shlex
@@ -324,6 +325,38 @@ def aggregate_metric(values: list[float], mode: str) -> float:
     raise ToolError(f"Unknown aggregate mode '{mode}'")
 
 
+def aggregate_weighted_metric(values: list[float], weights: list[float], mode: str) -> float:
+    if not values:
+        raise ToolError("No profile metrics to aggregate")
+    if len(values) != len(weights):
+        raise ToolError("values/weights length mismatch")
+
+    clean: list[tuple[float, float]] = []
+    for value, weight in zip(values, weights):
+        if not math.isfinite(value):
+            raise ToolError(f"Non-finite profile metric: {value}")
+        if not math.isfinite(weight) or weight <= 0.0:
+            raise ToolError(f"Invalid profile weight: {weight}")
+        clean.append((float(value), float(weight)))
+
+    total_weight = sum(weight for _, weight in clean)
+    if total_weight <= 0.0:
+        raise ToolError("Total profile weight must be positive")
+
+    if mode == "weighted_mean":
+        return sum(value * weight for value, weight in clean) / total_weight
+
+    if mode == "weighted_geomean":
+        log_sum = 0.0
+        for value, weight in clean:
+            if value <= 0.0:
+                raise ToolError("weighted_geomean requires all profile metrics to be > 0")
+            log_sum += weight * math.log(value)
+        return math.exp(log_sum / total_weight)
+
+    raise ToolError(f"Unknown profile aggregate mode '{mode}'")
+
+
 def resolve_cairo_artifact(project_dir: Path, target: dict[str, Any]) -> Path:
     explicit = target.get("artifact_file")
     if explicit:
@@ -563,37 +596,28 @@ def evaluate_cairo(target_name: str, target: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def evaluate_command(target_name: str, target: dict[str, Any]) -> dict[str, Any]:
-    benchmark_command = target["benchmark_command"]
-    metric_regex = target["metric_regex"]
-    project_dir = ROOT / target["project_dir"]
-    warmup_runs = int(target.get("warmup_runs", 0))
-    runs = int(target.get("runs", 1))
-    aggregate = str(target.get("aggregate", "median"))
-    trim_extremes = int(target.get("trim_extremes", 0))
-
-    if not project_dir.exists():
-        return {
-            "status": "failed",
-            "metric_name": target["metric_name"],
-            "metric_value": None,
-            "check_s": 0.0,
-            "info_or_bench_s": 0.0,
-            "execute_s": 0.0,
-            "notes": f"project dir not found: {project_dir}",
-            "debug": {},
-        }
-
+def evaluate_command_profile(
+    *,
+    metric_name: str,
+    project_dir: Path,
+    profile_name: str,
+    benchmark_command: list[str],
+    metric_regex: str,
+    warmup_runs: int,
+    runs: int,
+    aggregate: str,
+    trim_extremes: int,
+) -> dict[str, Any]:
     if runs < 1:
         return {
             "status": "failed",
-            "metric_name": target["metric_name"],
+            "metric_name": metric_name,
             "metric_value": None,
             "check_s": 0.0,
             "info_or_bench_s": 0.0,
             "execute_s": 0.0,
-            "notes": "runs must be >= 1",
-            "debug": {},
+            "notes": f"profile={profile_name} runs must be >= 1",
+            "debug": {"profile": profile_name},
         }
 
     total_seconds = 0.0
@@ -609,26 +633,37 @@ def evaluate_command(target_name: str, target: dict[str, Any]) -> dict[str, Any]
         if bench.code != 0:
             return {
                 "status": "failed",
-                "metric_name": target["metric_name"],
+                "metric_name": metric_name,
                 "metric_value": None,
                 "check_s": 0.0,
                 "info_or_bench_s": total_seconds,
                 "execute_s": 0.0,
-                "notes": f"benchmark command failed at run {invocation + 1}: {(bench.stderr or bench.stdout).strip()[:400]}",
-                "debug": {"bench_runs": bench_runs},
+                "notes": (
+                    f"profile={profile_name} benchmark command failed at run {invocation + 1}: "
+                    f"{(bench.stderr or bench.stdout).strip()[:400]}"
+                ),
+                "debug": {
+                    "profile": profile_name,
+                    "bench_runs": bench_runs,
+                    "benchmark_command": benchmark_command,
+                },
             }
 
         value = extract_metric(bench.stdout + "\n" + bench.stderr, metric_regex)
         if value is None:
             return {
                 "status": "failed",
-                "metric_name": target["metric_name"],
+                "metric_name": metric_name,
                 "metric_value": None,
                 "check_s": 0.0,
                 "info_or_bench_s": total_seconds,
                 "execute_s": 0.0,
-                "notes": f"metric regex did not match benchmark output at run {invocation + 1}",
-                "debug": {"bench_runs": bench_runs},
+                "notes": f"profile={profile_name} metric regex did not match output at run {invocation + 1}",
+                "debug": {
+                    "profile": profile_name,
+                    "bench_runs": bench_runs,
+                    "metric_regex": metric_regex,
+                },
             }
 
         if invocation >= warmup_runs:
@@ -639,13 +674,20 @@ def evaluate_command(target_name: str, target: dict[str, Any]) -> dict[str, Any]
         if len(metric_values_raw) <= trim_extremes * 2:
             return {
                 "status": "failed",
-                "metric_name": target["metric_name"],
+                "metric_name": metric_name,
                 "metric_value": None,
                 "check_s": 0.0,
                 "info_or_bench_s": total_seconds,
                 "execute_s": 0.0,
-                "notes": f"trim_extremes={trim_extremes} too large for runs={len(metric_values_raw)}",
-                "debug": {"bench_runs": bench_runs, "metric_values_raw": metric_values_raw},
+                "notes": (
+                    f"profile={profile_name} trim_extremes={trim_extremes} "
+                    f"too large for runs={len(metric_values_raw)}"
+                ),
+                "debug": {
+                    "profile": profile_name,
+                    "bench_runs": bench_runs,
+                    "metric_values_raw": metric_values_raw,
+                },
             }
         sorted_values = sorted(metric_values_raw)
         metric_values = sorted_values[trim_extremes : len(sorted_values) - trim_extremes]
@@ -655,38 +697,280 @@ def evaluate_command(target_name: str, target: dict[str, Any]) -> dict[str, Any]
     except ToolError as exc:
         return {
             "status": "failed",
-            "metric_name": target["metric_name"],
+            "metric_name": metric_name,
             "metric_value": None,
             "check_s": 0.0,
             "info_or_bench_s": total_seconds,
             "execute_s": 0.0,
-            "notes": str(exc),
+            "notes": f"profile={profile_name} {exc}",
             "debug": {
+                "profile": profile_name,
                 "bench_runs": bench_runs,
                 "metric_values": metric_values,
                 "metric_values_raw": metric_values_raw,
                 "trim_extremes": trim_extremes,
+                "aggregate": aggregate,
             },
         }
 
     values_s = ",".join(f"{v:.2f}" for v in metric_values)
     return {
         "status": "success",
-        "metric_name": target["metric_name"],
+        "metric_name": metric_name,
         "metric_value": metric_value,
         "check_s": 0.0,
         "info_or_bench_s": total_seconds,
         "execute_s": 0.0,
         "notes": (
-            f"ok runs={runs} warmup={warmup_runs} aggregate={aggregate} "
+            f"profile={profile_name} ok runs={runs} warmup={warmup_runs} aggregate={aggregate} "
             f"trim_extremes={trim_extremes} values=[{values_s}]"
         ),
         "debug": {
+            "profile": profile_name,
+            "benchmark_command": benchmark_command,
+            "metric_regex": metric_regex,
             "bench_runs": bench_runs,
             "metric_values": metric_values,
             "metric_values_raw": metric_values_raw,
             "aggregate": aggregate,
             "trim_extremes": trim_extremes,
+            "runs": runs,
+            "warmup_runs": warmup_runs,
+        },
+    }
+
+
+def evaluate_command(target_name: str, target: dict[str, Any]) -> dict[str, Any]:
+    project_dir = ROOT / target["project_dir"]
+    metric_name = str(target["metric_name"])
+
+    if not project_dir.exists():
+        return {
+            "status": "failed",
+            "metric_name": metric_name,
+            "metric_value": None,
+            "check_s": 0.0,
+            "info_or_bench_s": 0.0,
+            "execute_s": 0.0,
+            "notes": f"project dir not found: {project_dir}",
+            "debug": {},
+        }
+
+    default_command = target.get("benchmark_command")
+    default_regex = str(target.get("metric_regex", ""))
+    default_warmup = int(target.get("warmup_runs", 0))
+    default_runs = int(target.get("runs", 1))
+    default_aggregate = str(target.get("aggregate", "median"))
+    default_trim = int(target.get("trim_extremes", 0))
+
+    profiles_raw = target.get("benchmark_profiles")
+    if not isinstance(profiles_raw, list) or not profiles_raw:
+        if not isinstance(default_command, list) or not default_command:
+            return {
+                "status": "failed",
+                "metric_name": metric_name,
+                "metric_value": None,
+                "check_s": 0.0,
+                "info_or_bench_s": 0.0,
+                "execute_s": 0.0,
+                "notes": "benchmark_command must be a non-empty list",
+                "debug": {},
+            }
+        return evaluate_command_profile(
+            metric_name=metric_name,
+            project_dir=project_dir,
+            profile_name="default",
+            benchmark_command=default_command,
+            metric_regex=default_regex,
+            warmup_runs=default_warmup,
+            runs=default_runs,
+            aggregate=default_aggregate,
+            trim_extremes=default_trim,
+        )
+
+    profile_values: list[float] = []
+    profile_weights: list[float] = []
+    profile_reports: list[dict[str, Any]] = []
+    total_seconds = 0.0
+
+    for idx, profile_raw in enumerate(profiles_raw, start=1):
+        if not isinstance(profile_raw, dict):
+            return {
+                "status": "failed",
+                "metric_name": metric_name,
+                "metric_value": None,
+                "check_s": 0.0,
+                "info_or_bench_s": total_seconds,
+                "execute_s": 0.0,
+                "notes": f"benchmark_profiles[{idx}] must be an object",
+                "debug": {"profile_reports": profile_reports},
+            }
+
+        profile_name = str(profile_raw.get("name", f"profile_{idx}")).strip() or f"profile_{idx}"
+        command = profile_raw.get("benchmark_command", default_command)
+        metric_regex = str(profile_raw.get("metric_regex", default_regex))
+        warmup_runs = int(profile_raw.get("warmup_runs", default_warmup))
+        runs = int(profile_raw.get("runs", default_runs))
+        aggregate = str(profile_raw.get("aggregate", default_aggregate))
+        trim_extremes = int(profile_raw.get("trim_extremes", default_trim))
+        weight = float(profile_raw.get("weight", 1.0))
+
+        if not isinstance(command, list) or not command:
+            return {
+                "status": "failed",
+                "metric_name": metric_name,
+                "metric_value": None,
+                "check_s": 0.0,
+                "info_or_bench_s": total_seconds,
+                "execute_s": 0.0,
+                "notes": f"profile={profile_name} benchmark_command must be a non-empty list",
+                "debug": {"profile_reports": profile_reports},
+            }
+        if not metric_regex:
+            return {
+                "status": "failed",
+                "metric_name": metric_name,
+                "metric_value": None,
+                "check_s": 0.0,
+                "info_or_bench_s": total_seconds,
+                "execute_s": 0.0,
+                "notes": f"profile={profile_name} metric_regex must be non-empty",
+                "debug": {"profile_reports": profile_reports},
+            }
+
+        report = evaluate_command_profile(
+            metric_name=metric_name,
+            project_dir=project_dir,
+            profile_name=profile_name,
+            benchmark_command=command,
+            metric_regex=metric_regex,
+            warmup_runs=warmup_runs,
+            runs=runs,
+            aggregate=aggregate,
+            trim_extremes=trim_extremes,
+        )
+        total_seconds += float(report.get("info_or_bench_s", 0.0))
+
+        metric_value = report.get("metric_value")
+        if report.get("status") != "success" or metric_value is None:
+            debug_payload = report.get("debug", {})
+            profile_reports.append(
+                {
+                    "name": profile_name,
+                    "weight": weight,
+                    "status": report.get("status"),
+                    "metric_value": metric_value,
+                    "notes": report.get("notes"),
+                    "debug": debug_payload if isinstance(debug_payload, dict) else {},
+                }
+            )
+            return {
+                "status": "failed",
+                "metric_name": metric_name,
+                "metric_value": None,
+                "check_s": 0.0,
+                "info_or_bench_s": total_seconds,
+                "execute_s": 0.0,
+                "notes": str(report.get("notes", "profile evaluation failed")),
+                "debug": {"profile_reports": profile_reports},
+            }
+
+        if not math.isfinite(weight) or weight <= 0.0:
+            return {
+                "status": "failed",
+                "metric_name": metric_name,
+                "metric_value": None,
+                "check_s": 0.0,
+                "info_or_bench_s": total_seconds,
+                "execute_s": 0.0,
+                "notes": f"profile={profile_name} weight must be > 0",
+                "debug": {"profile_reports": profile_reports},
+            }
+
+        debug_payload = report.get("debug", {})
+        profile_reports.append(
+            {
+                "name": profile_name,
+                "weight": weight,
+                "status": "success",
+                "metric_value": float(metric_value),
+                "notes": report.get("notes"),
+                "debug": debug_payload if isinstance(debug_payload, dict) else {},
+            }
+        )
+        profile_values.append(float(metric_value))
+        profile_weights.append(weight)
+
+    profiles_aggregate = str(target.get("profiles_aggregate", "weighted_geomean")).strip().lower()
+    try:
+        combined_metric = aggregate_weighted_metric(profile_values, profile_weights, profiles_aggregate)
+    except ToolError as exc:
+        return {
+            "status": "failed",
+            "metric_name": metric_name,
+            "metric_value": None,
+            "check_s": 0.0,
+            "info_or_bench_s": total_seconds,
+            "execute_s": 0.0,
+            "notes": str(exc),
+            "debug": {"profile_reports": profile_reports, "profiles_aggregate": profiles_aggregate},
+        }
+
+    profile_series: list[list[float]] = []
+    for report in profile_reports:
+        debug_payload = report.get("debug", {})
+        values = debug_payload.get("metric_values") if isinstance(debug_payload, dict) else None
+        if not isinstance(values, list):
+            profile_series = []
+            break
+        parsed: list[float] = []
+        for item in values:
+            if not isinstance(item, (int, float)):
+                parsed = []
+                break
+            parsed.append(float(item))
+        if not parsed:
+            profile_series = []
+            break
+        profile_series.append(parsed)
+
+    composite_series: list[float]
+    if profile_series and len({len(series) for series in profile_series}) == 1:
+        composite_series = []
+        for idx in range(len(profile_series[0])):
+            step_values = [series[idx] for series in profile_series]
+            try:
+                composite_series.append(
+                    aggregate_weighted_metric(step_values, profile_weights, profiles_aggregate)
+                )
+            except ToolError:
+                composite_series = []
+                break
+    else:
+        composite_series = []
+
+    if not composite_series:
+        composite_series = [float(v) for v in profile_values]
+
+    profile_values_note = ",".join(
+        f"{report['name']}={float(report['metric_value']):.2f}" for report in profile_reports
+    )
+    return {
+        "status": "success",
+        "metric_name": metric_name,
+        "metric_value": combined_metric,
+        "check_s": 0.0,
+        "info_or_bench_s": total_seconds,
+        "execute_s": 0.0,
+        "notes": (
+            f"ok profiles={len(profile_reports)} aggregate={profiles_aggregate} "
+            f"values=[{profile_values_note}]"
+        ),
+        "debug": {
+            "profile_reports": profile_reports,
+            "profiles_aggregate": profiles_aggregate,
+            "metric_values": composite_series,
+            "metric_values_raw": profile_values,
         },
     }
 
