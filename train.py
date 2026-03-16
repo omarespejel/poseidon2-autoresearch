@@ -2536,6 +2536,7 @@ def run_loop(args: argparse.Namespace) -> int:
     if not source_path.exists():
         print(f"Source file not found: {source_path}", file=sys.stderr)
         return 2
+    initial_source = source_path.read_text()
 
     template = load_prompt_template()
     if "language" in target:
@@ -3183,6 +3184,25 @@ def run_loop(args: argparse.Namespace) -> int:
             raise
 
     elapsed_seconds = time.perf_counter() - loop_wall_start
+    restore_on_no_accept = bool(target.get("restore_source_on_no_accept", True))
+    if accepted == 0 and restore_on_no_accept:
+        current_source = source_path.read_text()
+        if current_source != initial_source:
+            source_path.write_text(initial_source)
+            train_log(
+                args,
+                "restored source to pre-run baseline because no mutations were accepted",
+                level=1,
+            )
+            prepare.append_log(
+                {
+                    "event": "loop_restore_source",
+                    "timestamp": prepare.now_iso(),
+                    "target": args.target,
+                    "run_label": run_label,
+                    "reason": "no_accepted_mutations",
+                }
+            )
     train_log(
         args,
         (

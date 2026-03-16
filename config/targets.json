@@ -126,6 +126,9 @@
       "profiles_aggregate": "weighted_geomean",
       "warmup_runs": 1,
       "runs": 5,
+      "trim_extremes": 1,
+      "sleep_between_runs_s": 0.05,
+      "sleep_after_warmup_s": 0.50,
       "aggregate": "median",
       "metric_regex": "([0-9]+) Poseidons / s",
       "bootstrap": {
@@ -196,6 +199,9 @@
       "profiles_aggregate": "weighted_geomean",
       "warmup_runs": 1,
       "runs": 5,
+      "trim_extremes": 1,
+      "sleep_between_runs_s": 0.05,
+      "sleep_after_warmup_s": 0.35,
       "aggregate": "median",
       "metric_regex": "([0-9]+) Poseidons / s",
       "bootstrap": {
@@ -277,6 +283,8 @@
       "warmup_runs": 1,
       "runs": 5,
       "trim_extremes": 1,
+      "sleep_between_runs_s": 0.05,
+      "sleep_after_warmup_s": 0.35,
       "aggregate": "median",
       "metric_regex": "([0-9]+) Poseidons / s",
       "bootstrap": {
@@ -358,6 +366,8 @@
       "warmup_runs": 1,
       "runs": 5,
       "trim_extremes": 1,
+      "sleep_between_runs_s": 0.05,
+      "sleep_after_warmup_s": 0.35,
       "aggregate": "median",
       "metric_regex": "([0-9]+) Poseidons / s",
       "bootstrap": {
@@ -440,6 +450,8 @@
       "warmup_runs": 1,
       "runs": 5,
       "trim_extremes": 1,
+      "sleep_between_runs_s": 0.05,
+      "sleep_after_warmup_s": 0.35,
       "aggregate": "median",
       "metric_regex": "([0-9]+) Poseidons / s",
       "bootstrap": {
@@ -516,6 +528,8 @@
       "warmup_runs": 1,
       "runs": 5,
       "trim_extremes": 1,
+      "sleep_between_runs_s": 0.05,
+      "sleep_after_warmup_s": 0.35,
       "aggregate": "median",
       "metric_regex": "([0-9]+) Poseidons / s",
       "bootstrap": {

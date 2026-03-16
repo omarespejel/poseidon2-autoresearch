@@ -608,6 +608,8 @@ def evaluate_command_profile(
     runs: int,
     aggregate: str,
     trim_extremes: int,
+    sleep_between_runs_s: float,
+    sleep_after_warmup_s: float,
 ) -> dict[str, Any]:
     if runs < 1:
         return {
@@ -620,10 +622,33 @@ def evaluate_command_profile(
             "notes": f"profile={profile_name} runs must be >= 1",
             "debug": {"profile": profile_name},
         }
+    if sleep_between_runs_s < 0.0 or not math.isfinite(sleep_between_runs_s):
+        return {
+            "status": "failed",
+            "metric_name": metric_name,
+            "metric_value": None,
+            "check_s": 0.0,
+            "info_or_bench_s": 0.0,
+            "execute_s": 0.0,
+            "notes": f"profile={profile_name} sleep_between_runs_s must be finite and >= 0",
+            "debug": {"profile": profile_name, "sleep_between_runs_s": sleep_between_runs_s},
+        }
+    if sleep_after_warmup_s < 0.0 or not math.isfinite(sleep_after_warmup_s):
+        return {
+            "status": "failed",
+            "metric_name": metric_name,
+            "metric_value": None,
+            "check_s": 0.0,
+            "info_or_bench_s": 0.0,
+            "execute_s": 0.0,
+            "notes": f"profile={profile_name} sleep_after_warmup_s must be finite and >= 0",
+            "debug": {"profile": profile_name, "sleep_after_warmup_s": sleep_after_warmup_s},
+        }
 
     total_seconds = 0.0
     metric_values_raw: list[float] = []
     bench_runs: list[dict[str, Any]] = []
+    sleep_events: list[dict[str, Any]] = []
     total_invocations = warmup_runs + runs
 
     for invocation in range(total_invocations):
@@ -669,6 +694,34 @@ def evaluate_command_profile(
 
         if invocation >= warmup_runs:
             metric_values_raw.append(value)
+
+        has_next = invocation + 1 < total_invocations
+        if has_next and warmup_runs > 0 and invocation == warmup_runs - 1 and sleep_after_warmup_s > 0.0:
+            sleep_start = time.perf_counter()
+            time.sleep(sleep_after_warmup_s)
+            sleep_elapsed = time.perf_counter() - sleep_start
+            total_seconds += sleep_elapsed
+            sleep_events.append(
+                {
+                    "after_invocation": invocation + 1,
+                    "kind": "after_warmup",
+                    "requested_seconds": sleep_after_warmup_s,
+                    "actual_seconds": sleep_elapsed,
+                }
+            )
+        elif has_next and sleep_between_runs_s > 0.0:
+            sleep_start = time.perf_counter()
+            time.sleep(sleep_between_runs_s)
+            sleep_elapsed = time.perf_counter() - sleep_start
+            total_seconds += sleep_elapsed
+            sleep_events.append(
+                {
+                    "after_invocation": invocation + 1,
+                    "kind": "between_runs",
+                    "requested_seconds": sleep_between_runs_s,
+                    "actual_seconds": sleep_elapsed,
+                }
+            )
 
     metric_values = metric_values_raw
     metric_values_series = list(metric_values_raw)
@@ -747,6 +800,9 @@ def evaluate_command_profile(
             "trim_extremes": trim_extremes,
             "runs": runs,
             "warmup_runs": warmup_runs,
+            "sleep_between_runs_s": sleep_between_runs_s,
+            "sleep_after_warmup_s": sleep_after_warmup_s,
+            "sleep_events": sleep_events,
         },
     }
 
@@ -776,6 +832,8 @@ def evaluate_command(target_name: str, target: dict[str, Any]) -> dict[str, Any]
         default_runs = int(target.get("runs", 1))
         default_aggregate = str(target.get("aggregate", "median"))
         default_trim = int(target.get("trim_extremes", 0))
+        default_sleep_between = float(target.get("sleep_between_runs_s", 0.0))
+        default_sleep_after_warmup = float(target.get("sleep_after_warmup_s", 0.0))
     except (TypeError, ValueError) as exc:
         return {
             "status": "failed",
@@ -822,6 +880,8 @@ def evaluate_command(target_name: str, target: dict[str, Any]) -> dict[str, Any]
             runs=default_runs,
             aggregate=default_aggregate,
             trim_extremes=default_trim,
+            sleep_between_runs_s=default_sleep_between,
+            sleep_after_warmup_s=default_sleep_after_warmup,
         )
 
     profile_values: list[float] = []
@@ -881,6 +941,12 @@ def evaluate_command(target_name: str, target: dict[str, Any]) -> dict[str, Any]
             aggregate = str(profile_raw.get("aggregate", default_aggregate))
             trim_extremes = int(profile_raw.get("trim_extremes", default_trim))
             weight = float(profile_raw.get("weight", 1.0))
+            sleep_between_runs_s = float(
+                profile_raw.get("sleep_between_runs_s", default_sleep_between)
+            )
+            sleep_after_warmup_s = float(
+                profile_raw.get("sleep_after_warmup_s", default_sleep_after_warmup)
+            )
         except (TypeError, ValueError) as exc:
             return {
                 "status": "failed",
@@ -937,6 +1003,8 @@ def evaluate_command(target_name: str, target: dict[str, Any]) -> dict[str, Any]
             runs=runs,
             aggregate=aggregate,
             trim_extremes=trim_extremes,
+            sleep_between_runs_s=sleep_between_runs_s,
+            sleep_after_warmup_s=sleep_after_warmup_s,
         )
         total_seconds += float(report.get("info_or_bench_s", 0.0))
 
