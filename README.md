@@ -130,6 +130,7 @@ Source-level command targets can additionally require distribution separation
 (`min_effect_sigma`, `ci_z`, `require_ci_separation`) before accepting a run.
 They can also run post-accept A/B replay (`ab_repeats`) to confirm patched vs original.
 Rejected mutations can be temporarily cooled down (`blocked_mutation_ttl`) to encourage broader exploration.
+If the search stalls with `no_change`, the loop can release the oldest blocked mutation and retry selection in-place (`recover_from_no_change`, default `true`).
 Optional runtime controls are supported during benchmark commands:
 
 - `AUTORESEARCH_NICE=<level>` (process niceness)

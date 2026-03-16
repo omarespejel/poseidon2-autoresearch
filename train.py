@@ -708,6 +708,17 @@ def heuristic_candidate(
     return generic_heuristic_candidate(source, iteration)
 
 
+def release_oldest_blocked_mutation(
+    blocked_mutations_until: dict[str, int],
+    active_blocked: set[str],
+) -> str | None:
+    if not active_blocked:
+        return None
+    oldest = min(active_blocked, key=lambda label: (blocked_mutations_until.get(label, 0), label))
+    blocked_mutations_until.pop(oldest, None)
+    return oldest
+
+
 def source_extension(language: str, source_path: Path) -> str:
     explicit = source_path.suffix.lstrip(".")
     if explicit:
@@ -1699,6 +1710,33 @@ def run_loop(args: argparse.Namespace) -> int:
                 target_config=target,
                 preferred_mutations=preferred_mutations,
             )
+
+        if (
+            not changed
+            and mutation in {"rust_no_change", "heuristic_no_change"}
+            and bool(target.get("recover_from_no_change", True))
+            and active_blocked
+        ):
+            released = release_oldest_blocked_mutation(blocked_mutations_until, active_blocked)
+            if released:
+                diagnostics["released_blocked_mutation"] = released
+                retry_blocked = {
+                    name for name, until in blocked_mutations_until.items() if until >= iteration
+                }
+                if retry_blocked:
+                    diagnostics["active_blocked_mutations"] = sorted(retry_blocked)
+                else:
+                    diagnostics.pop("active_blocked_mutations", None)
+                candidate, mutation, changed = heuristic_candidate(
+                    current_source,
+                    iteration,
+                    language,
+                    source_path,
+                    blocked_mutations=retry_blocked,
+                    mutation_attempts=mutation_attempts,
+                    target_config=target,
+                    preferred_mutations=preferred_mutations,
+                )
 
         if not changed:
             prepare.append_result_row(
