@@ -259,17 +259,29 @@ def write_report(
         )
     if readiness_payload is not None:
         readiness_ok = "yes"
-        checks = readiness_payload.get("checks")
-        if isinstance(checks, list):
-            required_failed = 0
-            for check in checks:
-                if not isinstance(check, dict):
-                    continue
-                name = str(check.get("name", ""))
-                ok = bool(check.get("ok", False))
-                if name != "recent_activity_24h" and not ok:
-                    required_failed += 1
-            readiness_ok = "yes" if required_failed == 0 else "no"
+        overall_ready = readiness_payload.get("overall_ready")
+        if isinstance(overall_ready, bool):
+            readiness_ok = "yes" if overall_ready else "no"
+        else:
+            checks = readiness_payload.get("checks")
+            informational_raw = readiness_payload.get("informational_checks")
+            informational_checks = {"recent_activity_24h"}
+            if isinstance(informational_raw, list):
+                informational_checks = {
+                    str(item).strip()
+                    for item in informational_raw
+                    if isinstance(item, str) and str(item).strip()
+                } or informational_checks
+            if isinstance(checks, list):
+                required_failed = 0
+                for check in checks:
+                    if not isinstance(check, dict):
+                        continue
+                    name = str(check.get("name", ""))
+                    ok = bool(check.get("ok", False))
+                    if name not in informational_checks and not ok:
+                        required_failed += 1
+                readiness_ok = "yes" if required_failed == 0 else "no"
         lines.append(
             "| readiness_check | {ok} | {report} |".format(
                 ok=readiness_ok,

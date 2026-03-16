@@ -7,6 +7,7 @@ import argparse
 import csv
 import datetime as dt
 import json
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,9 +26,9 @@ DEFAULT_REPORT = ROOT / "readiness_report.md"
 
 # Public Synthesis timeline marker observed on-site.
 DEFAULT_BUILD_CLOSE_UTC = dt.datetime(2026, 3, 22, 17, 0, 0, tzinfo=dt.timezone.utc)
-INFORMATIONAL_CHECKS = {"recent_activity_24h"}
-INFORMATIONAL_CHECKS.update(
+INFORMATIONAL_CHECKS: frozenset[str] = frozenset(
     {
+        "recent_activity_24h",
         "submission_multi_tool_orchestration",
         "submission_receipts_additional_evidence",
     }
@@ -86,9 +87,13 @@ def looks_like_onchain_receipt(value: str) -> bool:
     token = value.strip()
     if not token:
         return False
-    if token.startswith("0x") and len(token) >= 18:
+    if re.fullmatch(r"0x[0-9a-fA-F]{64}", token):
         return True
-    return token.startswith("https://") or token.startswith("http://")
+    return token.startswith("https://")
+
+
+def overall_ready_from_checks(checks: list[CheckResult], *, informational: frozenset[str] = INFORMATIONAL_CHECKS) -> bool:
+    return all(c.ok for c in checks if c.name not in informational)
 
 
 def retained_entry_path(item: dict[str, Any]) -> Path | None:
@@ -411,7 +416,7 @@ def build_checks(
 
 def write_markdown_report(path: Path, checks: list[CheckResult], *, build_close_utc: dt.datetime) -> None:
     # Fresh activity is informative but not a hard blocker once the evidence pack is assembled.
-    ready = all(c.ok for c in checks if c.name not in INFORMATIONAL_CHECKS)
+    ready = overall_ready_from_checks(checks)
     now = now_utc().isoformat()
 
     lines: list[str] = []
@@ -470,6 +475,7 @@ def main(argv: list[str] | None = None) -> int:
     portfolio = load_json(PORTFOLIO_JSON)
     rows = read_results_rows()
     checks = build_checks(manifest=manifest, portfolio=portfolio, rows=rows, build_close_utc=build_close_utc)
+    overall_ready = overall_ready_from_checks(checks)
 
     report_path = Path(args.report)
     write_markdown_report(report_path, checks, build_close_utc=build_close_utc)
@@ -479,6 +485,8 @@ def main(argv: list[str] | None = None) -> int:
         "generated_at": now_utc().isoformat(),
         "report": str(report_path),
         "build_close_utc": build_close_utc.isoformat(),
+        "overall_ready": overall_ready,
+        "informational_checks": sorted(INFORMATIONAL_CHECKS),
         "checks": [{"name": c.name, "ok": c.ok, "details": c.details} for c in checks],
     }
     print(json.dumps(payload, indent=2, sort_keys=True))

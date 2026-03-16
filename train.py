@@ -379,6 +379,27 @@ def rust_mutator_neon_internal_for_loop_both(source: str) -> tuple[str, str, boo
     return candidate, "rust_neon_internal_for_loop_both", True
 
 
+def rust_mutator_x86_internal_for_loop(source: str) -> tuple[str, str, bool]:
+    candidate, _, changed = rust_mutator_neon_internal_for_loop(source)
+    if not changed:
+        return source, "rust_x86_internal_for_loop:pattern_missing", False
+    return candidate, "rust_x86_internal_for_loop", True
+
+
+def rust_mutator_x86_internal_for_loop_w24(source: str) -> tuple[str, str, bool]:
+    candidate, _, changed = rust_mutator_neon_internal_for_loop_w24(source)
+    if not changed:
+        return source, "rust_x86_internal_for_loop_w24:pattern_missing", False
+    return candidate, "rust_x86_internal_for_loop_w24", True
+
+
+def rust_mutator_x86_internal_for_loop_both(source: str) -> tuple[str, str, bool]:
+    candidate, _, changed = rust_mutator_neon_internal_for_loop_both(source)
+    if not changed:
+        return source, "rust_x86_internal_for_loop_both:pattern_missing", False
+    return candidate, "rust_x86_internal_for_loop_both", True
+
+
 def rust_mutator_neon_add_sum_loops(source: str) -> tuple[str, str, bool]:
     rules = [
         (
@@ -748,9 +769,9 @@ def rust_heuristic_candidate(
     ):
         operators.extend(
             [
-                rust_mutator_neon_internal_for_loop,
-                rust_mutator_neon_internal_for_loop_w24,
-                rust_mutator_neon_internal_for_loop_both,
+                rust_mutator_x86_internal_for_loop,
+                rust_mutator_x86_internal_for_loop_w24,
+                rust_mutator_x86_internal_for_loop_both,
                 rust_mutator_avx_add_sum_loops,
                 rust_mutator_avx_sum_vec_hoist,
                 rust_mutator_avx_sum_vec_hoist_w24,
