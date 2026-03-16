@@ -23,6 +23,16 @@ LOG_FILE = ROOT / "agent_log.jsonl"
 ARTIFACTS_DIR = ROOT / "artifacts"
 DEFAULT_OUT = ROOT / "evidence"
 MAX_ARTIFACT_MATCH_AGE_S = 15 * 60
+REPRO_PY_COMPILE_FILES = [
+    "campaign.py",
+    "checkpoint_loop.py",
+    "evidence_pack.py",
+    "portfolio_loop.py",
+    "prepare.py",
+    "readiness_check.py",
+    "target_config.py",
+    "train.py",
+]
 
 
 @dataclass
@@ -52,6 +62,7 @@ class AcceptedRecord:
     ab_gain_pct: float | None
     confirm_n: int | None
     retained: bool
+    retained_artifact_dir: str | None
 
 
 def load_targets() -> dict[str, dict[str, Any]]:
@@ -161,6 +172,7 @@ def find_artifact_metadata(
         explicit = target_dir / run_label / iter_name / "metadata.json"
         if explicit.exists():
             return explicit.parent, explicit, 0.0
+        return None, None, None
 
     row_ts = parse_iso_timestamp(row_timestamp)
     candidates = list(target_dir.glob(f"**/{iter_name}/metadata.json"))
@@ -386,6 +398,7 @@ def collect_accepted_rows(targets: dict[str, dict[str, Any]], rows: list[dict[st
                 ab_gain_pct=diag_summary["ab_gain_pct"],
                 confirm_n=diag_summary["confirm_n"],
                 retained=retained,
+                retained_artifact_dir=None,
             )
         )
 
@@ -426,6 +439,7 @@ def write_manifest(*, out_dir: Path, accepted: list[AcceptedRecord], total_rows:
                 "ab_gain_pct": r.ab_gain_pct,
                 "confirm_n": r.confirm_n,
                 "retained": r.retained,
+                "retained_artifact_dir": r.retained_artifact_dir,
             }
             for r in accepted
         ],
@@ -526,8 +540,7 @@ def write_summary(*, out_dir: Path, accepted: list[AcceptedRecord], total_rows: 
     lines.append("## Reproduce")
     lines.append("")
     lines.append("```bash")
-    lines.append("cd research/autoposeidon")
-    lines.append("python3 -m py_compile prepare.py train.py portfolio_loop.py campaign.py evidence_pack.py")
+    lines.append(f"python3 -m py_compile {' '.join(REPRO_PY_COMPILE_FILES)}")
     lines.append("python3 portfolio_loop.py --rounds 4 --batch-iterations 6 --batch-max-accepted 1 --artifacts accepted")
     lines.append("python3 evidence_pack.py")
     lines.append("```")
@@ -556,6 +569,7 @@ def copy_retained_artifacts(*, out_dir: Path, accepted: list[AcceptedRecord]) ->
         if dst.exists():
             shutil.rmtree(dst)
         shutil.copytree(src, dst)
+        r.retained_artifact_dir = str(dst)
         copied.append(str(dst))
 
     return copied
@@ -576,9 +590,9 @@ def main(argv: list[str] | None = None) -> int:
     rows = read_results()
     accepted = collect_accepted_rows(targets, rows)
 
+    copied = copy_retained_artifacts(out_dir=out_dir, accepted=accepted)
     manifest = write_manifest(out_dir=out_dir, accepted=accepted, total_rows=len(rows))
     summary = write_summary(out_dir=out_dir, accepted=accepted, total_rows=len(rows))
-    copied = copy_retained_artifacts(out_dir=out_dir, accepted=accepted)
 
     payload = {
         "ok": True,

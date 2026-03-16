@@ -69,7 +69,17 @@ def run_cmd(argv: list[str], cwd: Path) -> CommandResult:
         final_argv = ["nice", "-n", nice_level, *final_argv]
 
     start = time.perf_counter()
-    proc = subprocess.run(final_argv, cwd=str(cwd), text=True, capture_output=True, check=False)
+    try:
+        proc = subprocess.run(final_argv, cwd=str(cwd), text=True, capture_output=True, check=False)
+    except OSError as exc:
+        return CommandResult(
+            argv=final_argv,
+            cwd=cwd,
+            code=127,
+            stdout="",
+            stderr=str(exc),
+            seconds=time.perf_counter() - start,
+        )
     return CommandResult(
         argv=final_argv,
         cwd=cwd,
@@ -143,10 +153,10 @@ def append_result_row(
     value_s = ""
     best_s = ""
     delta_s = ""
+    best_value = prev_best
 
     if metric_value is not None:
         value_s = f"{metric_value:.6f}"
-        best_value = metric_value if prev_best is None else prev_best
 
         if status == "success":
             if prev_best is None:
@@ -156,7 +166,8 @@ def append_result_row(
             else:
                 best_value = min(prev_best, metric_value)
 
-        best_s = f"{best_value:.6f}"
+        if best_value is not None:
+            best_s = f"{best_value:.6f}"
         if prev_best is not None:
             delta_s = f"{(metric_value - prev_best):.6f}"
 

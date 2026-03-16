@@ -72,6 +72,14 @@ def load_json(path: Path) -> dict[str, Any] | None:
     return None
 
 
+def retained_entry_path(item: dict[str, Any]) -> Path | None:
+    for key in ("retained_artifact_dir", "artifact_iter_dir", "metadata_file"):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            return Path(value)
+    return None
+
+
 def resolve_build_close_utc(raw: str) -> dt.datetime:
     parsed = parse_iso(raw)
     if parsed is None:
@@ -114,10 +122,17 @@ def build_checks(
 
     accepted_total = int(manifest.get("accepted_total", 0)) if manifest else 0
     retained_count = 0
+    retained_files_count = 0
+    missing_count = 0
     if manifest and isinstance(manifest.get("accepted"), list):
         for item in manifest["accepted"]:
             if isinstance(item, dict) and bool(item.get("retained")):
                 retained_count += 1
+                retained_path = retained_entry_path(item)
+                if retained_path is not None and retained_path.exists():
+                    retained_files_count += 1
+                else:
+                    missing_count += 1
 
     checks.append(
         CheckResult(
@@ -129,8 +144,8 @@ def build_checks(
     checks.append(
         CheckResult(
             name="retained_patch_exists",
-            ok=retained_count > 0,
-            details=f"retained_count={retained_count}",
+            ok=retained_files_count > 0,
+            details=f"retained_files={retained_files_count}, missing={missing_count}, flagged={retained_count}",
         )
     )
 
@@ -172,7 +187,8 @@ def write_markdown_report(path: Path, checks: list[CheckResult], *, build_close_
     for c in checks:
         lines.append(f"| {c.name} | {'yes' if c.ok else 'no'} | {c.details} |")
 
-    blockers = [c for c in checks if not c.ok]
+    blockers = [c for c in checks if not c.ok and c.name not in INFORMATIONAL_CHECKS]
+    warnings = [c for c in checks if not c.ok and c.name in INFORMATIONAL_CHECKS]
     lines.append("")
     lines.append("## Blockers")
     lines.append("")
@@ -181,6 +197,13 @@ def write_markdown_report(path: Path, checks: list[CheckResult], *, build_close_
     else:
         for b in blockers:
             lines.append(f"- `{b.name}`: {b.details}")
+
+    if warnings:
+        lines.append("")
+        lines.append("## Warnings")
+        lines.append("")
+        for warning in warnings:
+            lines.append(f"- `{warning.name}`: {warning.details}")
 
     path.write_text("\n".join(lines) + "\n")
 

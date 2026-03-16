@@ -47,6 +47,7 @@ fn permute(mut state: [Field; 8]) -> [Field; 8] {
 
 fn main(input: [Field; 8]) -> pub [Field; 8] {
     let mut state = permute(input);
+    // Deliberate mutation anchors for train.py, not benchmark constraints.
     assert(state[0] == state[0]); // AUTOCIRCUIT_NOP_ASSERT
     state[0] = state[0] + 0; // AUTOCIRCUIT_NOP_FINAL
     state

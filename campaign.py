@@ -152,6 +152,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    start_row_count = 0 if args.fresh or not RESULTS.exists() else len(parse_results())
 
     if args.fresh:
         reset_outputs()
@@ -173,10 +174,8 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         loop_payload = json.loads(loop_res.stdout.strip() or "{}")
-    except json.JSONDecodeError:
-        sys.stderr.write("Warning: train.py returned non-JSON stdout; continuing with results.tsv as source of truth\n")
-        if loop_res.stdout.strip():
-            sys.stderr.write(loop_res.stdout.strip()[-1000:] + "\n")
+    except json.JSONDecodeError as exc:
+        sys.stderr.write(f"Warning: failed to parse train.py stdout as JSON: {exc}; stdout={loop_res.stdout!r}\n")
         loop_payload = {}
 
     # Real targets (EF-adjacent stack).
@@ -194,10 +193,11 @@ def main(argv: list[str] | None = None) -> int:
         must_run([sys.executable, str(PREPARE), "baseline", "--target", target, "--notes", "campaign_real"])
 
     rows = parse_results()
-    accepts = count_accepts(rows, args.loop_target)
+    run_rows = rows[start_row_count:]
+    accepts = count_accepts(run_rows, args.loop_target)
     loop_accepts_reported = loop_payload.get("accepted")
     write_report(
-        rows=rows,
+        rows=run_rows,
         loop_target=args.loop_target,
         real_targets=real_targets,
         loop_iterations=args.loop_iterations,
@@ -209,7 +209,7 @@ def main(argv: list[str] | None = None) -> int:
             {
                 "ok": True,
                 "report": str(REPORT),
-                "rows": len(rows),
+                "rows": len(run_rows),
                 "accepted": accepts,
                 "loop_accepts_reported": loop_accepts_reported,
             },

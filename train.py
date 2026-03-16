@@ -1544,7 +1544,9 @@ def run_loop(args: argparse.Namespace) -> int:
                     notes = f"rejected_{confirm_reason}:{notes}"
             else:
                 source_path.write_text(current_source)
-                if success:
+                if notes.startswith("rejected_"):
+                    pass
+                elif success:
                     raw_better = is_better(
                         float(metric_value),
                         best_metric,
@@ -1562,7 +1564,7 @@ def run_loop(args: argparse.Namespace) -> int:
 
             should_write_artifact = args.artifacts == "all" or (args.artifacts == "accepted" and improved)
             if should_write_artifact:
-                artifact_source = candidate if improved else current_source
+                artifact_source = candidate if improved or args.artifacts == "all" else current_source
                 write_iteration_artifact(
                     target_name=args.target,
                     run_label=run_label,

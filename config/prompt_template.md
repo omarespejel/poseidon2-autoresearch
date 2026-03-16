@@ -15,8 +15,8 @@ Hard constraints:
 
 Current file:
 
-```text
+<current_file>
 ${source_code}
-```
+</current_file>
 
 Return ONLY the full replacement `${language}` file (no markdown fences, no commentary).

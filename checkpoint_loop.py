@@ -47,7 +47,7 @@ def run_cmd(argv: list[str], *, extra_env: dict[str, str] | None = None) -> CmdR
     return CmdResult(argv=argv, cwd=ROOT, code=proc.returncode, stdout=proc.stdout, stderr=proc.stderr)
 
 
-def must_json(argv: list[str], *, extra_env: dict[str, str] | None = None) -> tuple[dict[str, Any], CmdResult]:
+def must_run(argv: list[str], *, extra_env: dict[str, str] | None = None) -> CmdResult:
     result = run_cmd(argv, extra_env=extra_env)
     if result.code != 0:
         sys.stderr.write(f"Command failed ({result.code}): {' '.join(argv)}\n")
@@ -56,6 +56,11 @@ def must_json(argv: list[str], *, extra_env: dict[str, str] | None = None) -> tu
         if result.stderr:
             sys.stderr.write(result.stderr + "\n")
         raise SystemExit(result.code)
+    return result
+
+
+def must_json(argv: list[str], *, extra_env: dict[str, str] | None = None) -> tuple[dict[str, Any], CmdResult]:
+    result = must_run(argv, extra_env=extra_env)
     try:
         payload = json.loads(result.stdout.strip() or "{}")
     except json.JSONDecodeError:
@@ -237,6 +242,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.nice:
         extra_env["AUTORESEARCH_NICE"] = args.nice
     WORK_DIR.mkdir(parents=True, exist_ok=True)
+
+    bootstrap_targets = list(dict.fromkeys([*targets, args.cross_target.strip()] if args.cross_target.strip() else targets))
+    for target in bootstrap_targets:
+        must_run([sys.executable, str(PREPARE), "bootstrap", "--target", target], extra_env=extra_env)
 
     cycles: list[dict[str, Any]] = []
     total_accepted = 0
