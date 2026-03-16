@@ -758,6 +758,8 @@ def evaluate_command(target_name: str, target: dict[str, Any]) -> dict[str, Any]
         }
 
     default_command = target.get("benchmark_command")
+    if isinstance(default_command, list):
+        default_command = [str(part) for part in default_command]
     default_regex = str(target.get("metric_regex", ""))
     try:
         default_warmup = int(target.get("warmup_runs", 0))
@@ -849,6 +851,8 @@ def evaluate_command(target_name: str, target: dict[str, Any]) -> dict[str, Any]
             }
         seen_profile_names.add(profile_name)
         command = profile_raw.get("benchmark_command", default_command)
+        if isinstance(command, list):
+            command = [str(part) for part in command]
         metric_regex = str(profile_raw.get("metric_regex", default_regex))
         try:
             warmup_runs = int(profile_raw.get("warmup_runs", default_warmup))
@@ -988,7 +992,12 @@ def evaluate_command(target_name: str, target: dict[str, Any]) -> dict[str, Any]
             parsed.append(float(item))
         if not parsed:
             if series_parse_error is None:
-                series_parse_error = f"profile={report['name']} metric_values empty_after_parse"
+                if not values:
+                    series_parse_error = f"profile={report['name']} metric_values is empty"
+                else:
+                    series_parse_error = (
+                        f"profile={report['name']} metric_values did not yield numeric entries"
+                    )
             profile_series = []
             break
         profile_series.append(parsed)
@@ -1024,7 +1033,7 @@ def evaluate_command(target_name: str, target: dict[str, Any]) -> dict[str, Any]
             debug_payload["series_parse_error"] = series_parse_error
         elif composite_error:
             debug_payload["metric_values_series_status"] = "aggregation_failure"
-            debug_payload["series_parse_error"] = composite_error
+            debug_payload["aggregation_error"] = composite_error
         else:
             debug_payload["metric_values_series_status"] = "unaligned"
 
