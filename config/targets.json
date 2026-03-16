@@ -84,6 +84,8 @@
       "compound_every": 3,
       "compound_limit": 10,
       "compound_second_window": 6,
+      "mutation_schedule": "ucb",
+      "mutation_ucb_explore": 0.60,
       "benchmark_command": [
         "cargo",
         "run",
@@ -93,15 +95,48 @@
         "--log-n-perms",
         "11"
       ],
+      "benchmark_profiles": [
+        {
+          "name": "p10",
+          "benchmark_command": [
+            "cargo",
+            "run",
+            "--release",
+            "--",
+            "poseidon",
+            "--log-n-perms",
+            "10"
+          ],
+          "weight": 0.35
+        },
+        {
+          "name": "p11",
+          "benchmark_command": [
+            "cargo",
+            "run",
+            "--release",
+            "--",
+            "poseidon",
+            "--log-n-perms",
+            "11"
+          ],
+          "weight": 0.65
+        }
+      ],
+      "profiles_aggregate": "weighted_geomean",
       "warmup_runs": 1,
       "runs": 5,
+      "trim_extremes": 1,
+      "sleep_between_runs_s": 0.05,
+      "sleep_after_warmup_s": 0.50,
       "aggregate": "median",
       "metric_regex": "([0-9]+) Poseidons / s",
       "bootstrap": {
         "git_url": "https://github.com/leanEthereum/leanMultisig.git",
         "path": "work/leanMultisig",
         "ref": "6f06c021823c742697bf867bd53d0501b66289fe"
-      }
+      },
+      "require_metric_series_for_stats": true
     },
     "leanmultisig_poseidon16_table_src_fast": {
       "type": "command",
@@ -122,6 +157,8 @@
       "compound_every": 2,
       "compound_limit": 8,
       "compound_second_window": 5,
+      "mutation_schedule": "ucb",
+      "mutation_ucb_explore": 0.60,
       "benchmark_command": [
         "cargo",
         "run",
@@ -131,15 +168,48 @@
         "--log-n-perms",
         "11"
       ],
+      "benchmark_profiles": [
+        {
+          "name": "p10",
+          "benchmark_command": [
+            "cargo",
+            "run",
+            "--release",
+            "--",
+            "poseidon",
+            "--log-n-perms",
+            "10"
+          ],
+          "weight": 0.35
+        },
+        {
+          "name": "p11",
+          "benchmark_command": [
+            "cargo",
+            "run",
+            "--release",
+            "--",
+            "poseidon",
+            "--log-n-perms",
+            "11"
+          ],
+          "weight": 0.65
+        }
+      ],
+      "profiles_aggregate": "weighted_geomean",
       "warmup_runs": 1,
       "runs": 5,
+      "trim_extremes": 1,
+      "sleep_between_runs_s": 0.05,
+      "sleep_after_warmup_s": 0.35,
       "aggregate": "median",
       "metric_regex": "([0-9]+) Poseidons / s",
       "bootstrap": {
         "git_url": "https://github.com/leanEthereum/leanMultisig.git",
         "path": "work/leanMultisig",
         "ref": "6f06c021823c742697bf867bd53d0501b66289fe"
-      }
+      },
+      "require_metric_series_for_stats": true
     },
     "leanmultisig_poseidon2_neon_src_fast": {
       "type": "command",
@@ -149,7 +219,7 @@
       "language": "Rust",
       "metric_name": "poseidons_per_s",
       "higher_is_better": true,
-      "min_improvement_rel": 0.03,
+      "min_improvement_rel": 0.02,
       "min_improvement_rel_mode": "adaptive",
       "min_improvement_rel_sigma": 2.0,
       "min_improvement_rel_min": 0.003,
@@ -165,6 +235,13 @@
       "compound_every": 2,
       "compound_limit": 14,
       "compound_second_window": 10,
+      "mutation_schedule": "ucb",
+      "mutation_ucb_explore": 0.50,
+      "required_snippets": [
+        "add_rc_and_sbox::<FP, D>(&mut internal_state.s0, rc);",
+        "ILP::diagonal_mul(&mut internal_state.s_hi);",
+        "ILP::add_sum("
+      ],
       "benchmark_command": [
         "cargo",
         "run",
@@ -174,16 +251,293 @@
         "--log-n-perms",
         "11"
       ],
+      "benchmark_profiles": [
+        {
+          "name": "p10",
+          "benchmark_command": [
+            "cargo",
+            "run",
+            "--release",
+            "--",
+            "poseidon",
+            "--log-n-perms",
+            "10"
+          ],
+          "weight": 0.35
+        },
+        {
+          "name": "p11",
+          "benchmark_command": [
+            "cargo",
+            "run",
+            "--release",
+            "--",
+            "poseidon",
+            "--log-n-perms",
+            "11"
+          ],
+          "weight": 0.65
+        }
+      ],
+      "profiles_aggregate": "weighted_geomean",
       "warmup_runs": 1,
       "runs": 5,
       "trim_extremes": 1,
+      "sleep_between_runs_s": 0.05,
+      "sleep_after_warmup_s": 0.35,
       "aggregate": "median",
       "metric_regex": "([0-9]+) Poseidons / s",
       "bootstrap": {
         "git_url": "https://github.com/leanEthereum/leanMultisig.git",
         "path": "work/leanMultisig",
         "ref": "6f06c021823c742697bf867bd53d0501b66289fe"
-      }
+      },
+      "require_metric_series_for_stats": true
+    },
+    "leanmultisig_poseidon2_avx2_src_fast": {
+      "type": "command",
+      "description": "Lean Poseidon2 AVX2 backend throughput target (Rust source)",
+      "project_dir": "work/leanMultisig",
+      "source_file": "work/leanMultisig/crates/backend/koala-bear/src/monty_31/x86_64_avx2/poseidon2.rs",
+      "language": "Rust",
+      "metric_name": "poseidons_per_s",
+      "higher_is_better": true,
+      "min_improvement_rel": 0.02,
+      "min_improvement_rel_mode": "adaptive",
+      "min_improvement_rel_sigma": 2.0,
+      "min_improvement_rel_min": 0.003,
+      "min_improvement_rel_max": 0.02,
+      "max_rel_stdev": 0.03,
+      "min_effect_sigma": 1.00,
+      "ci_z": 1.0,
+      "require_ci_separation": true,
+      "min_series_samples": 5,
+      "confirm_repeats": 1,
+      "ab_repeats": 1,
+      "blocked_mutation_ttl": 6,
+      "compound_every": 2,
+      "compound_limit": 14,
+      "compound_second_window": 10,
+      "mutation_schedule": "ucb",
+      "mutation_ucb_explore": 0.50,
+      "required_snippets": [
+        "add_rc_and_sbox::<FP, D>(&mut internal_state.s0, rc);",
+        "ILP::diagonal_mul(&mut internal_state.s_hi);",
+        "ILP::add_sum("
+      ],
+      "benchmark_command": [
+        "cargo",
+        "run",
+        "--release",
+        "--",
+        "poseidon",
+        "--log-n-perms",
+        "11"
+      ],
+      "benchmark_profiles": [
+        {
+          "name": "p10",
+          "benchmark_command": [
+            "cargo",
+            "run",
+            "--release",
+            "--",
+            "poseidon",
+            "--log-n-perms",
+            "10"
+          ],
+          "weight": 0.35
+        },
+        {
+          "name": "p11",
+          "benchmark_command": [
+            "cargo",
+            "run",
+            "--release",
+            "--",
+            "poseidon",
+            "--log-n-perms",
+            "11"
+          ],
+          "weight": 0.65
+        }
+      ],
+      "profiles_aggregate": "weighted_geomean",
+      "warmup_runs": 1,
+      "runs": 5,
+      "trim_extremes": 1,
+      "sleep_between_runs_s": 0.05,
+      "sleep_after_warmup_s": 0.35,
+      "aggregate": "median",
+      "metric_regex": "([0-9]+) Poseidons / s",
+      "bootstrap": {
+        "git_url": "https://github.com/leanEthereum/leanMultisig.git",
+        "path": "work/leanMultisig",
+        "ref": "6f06c021823c742697bf867bd53d0501b66289fe"
+      },
+      "require_metric_series_for_stats": true
+    },
+    "leanmultisig_poseidon2_monty_core_src_fast": {
+      "type": "command",
+      "description": "Lean Poseidon2 shared Monty31 core throughput target (Rust source)",
+      "project_dir": "work/leanMultisig",
+      "source_file": "work/leanMultisig/crates/backend/koala-bear/src/monty_31/poseidon2_monty.rs",
+      "language": "Rust",
+      "metric_name": "poseidons_per_s",
+      "higher_is_better": true,
+      "min_improvement_rel": 0.02,
+      "min_improvement_rel_mode": "adaptive",
+      "min_improvement_rel_sigma": 2.0,
+      "min_improvement_rel_min": 0.003,
+      "min_improvement_rel_max": 0.02,
+      "max_rel_stdev": 0.05,
+      "min_effect_sigma": 0.75,
+      "ci_z": 1.0,
+      "require_ci_separation": true,
+      "min_series_samples": 5,
+      "confirm_repeats": 1,
+      "ab_repeats": 1,
+      "blocked_mutation_ttl": 6,
+      "compound_every": 2,
+      "compound_limit": 10,
+      "compound_second_window": 8,
+      "mutation_schedule": "ucb",
+      "mutation_ucb_explore": 0.55,
+      "required_snippets": [
+        "state[0] = state[0].injective_exp_n();",
+        "P2P::internal_layer_mat_mul(state, full_sum);",
+        "external_initial_permute_state(",
+        "external_terminal_permute_state("
+      ],
+      "benchmark_command": [
+        "cargo",
+        "run",
+        "--release",
+        "--",
+        "poseidon",
+        "--log-n-perms",
+        "11"
+      ],
+      "benchmark_profiles": [
+        {
+          "name": "p10",
+          "benchmark_command": [
+            "cargo",
+            "run",
+            "--release",
+            "--",
+            "poseidon",
+            "--log-n-perms",
+            "10"
+          ],
+          "weight": 0.35
+        },
+        {
+          "name": "p11",
+          "benchmark_command": [
+            "cargo",
+            "run",
+            "--release",
+            "--",
+            "poseidon",
+            "--log-n-perms",
+            "11"
+          ],
+          "weight": 0.65
+        }
+      ],
+      "profiles_aggregate": "weighted_geomean",
+      "warmup_runs": 1,
+      "runs": 5,
+      "trim_extremes": 1,
+      "sleep_between_runs_s": 0.05,
+      "sleep_after_warmup_s": 0.35,
+      "aggregate": "median",
+      "metric_regex": "([0-9]+) Poseidons / s",
+      "bootstrap": {
+        "git_url": "https://github.com/leanEthereum/leanMultisig.git",
+        "path": "work/leanMultisig",
+        "ref": "6f06c021823c742697bf867bd53d0501b66289fe"
+      },
+      "require_metric_series_for_stats": true
+    },
+    "leanmultisig_poseidon2_no_packing_src_fast": {
+      "type": "command",
+      "description": "Lean Poseidon2 scalar/no-packing wrapper throughput target (Rust source)",
+      "project_dir": "work/leanMultisig",
+      "source_file": "work/leanMultisig/crates/backend/koala-bear/src/monty_31/no_packing/poseidon2.rs",
+      "language": "Rust",
+      "metric_name": "poseidons_per_s",
+      "higher_is_better": true,
+      "min_improvement_rel": 0.03,
+      "min_improvement_rel_mode": "adaptive",
+      "min_improvement_rel_sigma": 2.0,
+      "min_improvement_rel_min": 0.003,
+      "min_improvement_rel_max": 0.02,
+      "max_rel_stdev": 0.05,
+      "min_effect_sigma": 0.75,
+      "ci_z": 1.0,
+      "require_ci_separation": true,
+      "min_series_samples": 5,
+      "confirm_repeats": 1,
+      "ab_repeats": 1,
+      "blocked_mutation_ttl": 6,
+      "compound_every": 2,
+      "compound_limit": 10,
+      "compound_second_window": 8,
+      "mutation_schedule": "ucb",
+      "mutation_ucb_explore": 0.55,
+      "benchmark_command": [
+        "cargo",
+        "run",
+        "--release",
+        "--",
+        "poseidon",
+        "--log-n-perms",
+        "11"
+      ],
+      "benchmark_profiles": [
+        {
+          "name": "p10",
+          "benchmark_command": [
+            "cargo",
+            "run",
+            "--release",
+            "--",
+            "poseidon",
+            "--log-n-perms",
+            "10"
+          ],
+          "weight": 0.35
+        },
+        {
+          "name": "p11",
+          "benchmark_command": [
+            "cargo",
+            "run",
+            "--release",
+            "--",
+            "poseidon",
+            "--log-n-perms",
+            "11"
+          ],
+          "weight": 0.65
+        }
+      ],
+      "profiles_aggregate": "weighted_geomean",
+      "warmup_runs": 1,
+      "runs": 5,
+      "trim_extremes": 1,
+      "sleep_between_runs_s": 0.05,
+      "sleep_after_warmup_s": 0.35,
+      "aggregate": "median",
+      "metric_regex": "([0-9]+) Poseidons / s",
+      "bootstrap": {
+        "git_url": "https://github.com/leanEthereum/leanMultisig.git",
+        "path": "work/leanMultisig",
+        "ref": "6f06c021823c742697bf867bd53d0501b66289fe"
+      },
+      "require_metric_series_for_stats": true
     },
     "leanmultisig_poseidon16_full": {
       "type": "command",
