@@ -171,6 +171,8 @@ Source-level command targets can additionally require distribution separation
 They can also run post-accept A/B replay (`ab_repeats`) to confirm patched vs original.
 Rejected mutations can be temporarily cooled down (`blocked_mutation_ttl`) to encourage broader exploration.
 If the search stalls with `no_change`, the loop can release the oldest blocked mutation and retry selection in-place (`recover_from_no_change`, default `true`).
+Mutation selection can use a UCB bandit scheduler (`mutation_schedule=ucb`) with configurable exploration strength (`mutation_ucb_explore`).
+Sensitive crypto targets can enforce snippet-preservation guardrails (`required_snippets`) to reject candidates that drop critical permutation steps before benchmarking.
 Optional runtime controls are supported during benchmark commands:
 
 - `AUTORESEARCH_NICE=<level>` (process niceness)
