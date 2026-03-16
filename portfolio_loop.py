@@ -115,6 +115,8 @@ def run_batch(
     debug_command_output: bool,
     debug_max_chars: int,
     target_overrides_json: str = "",
+    mutation_memory_file: str = "",
+    disable_mutation_memory: bool = False,
 ) -> BatchResult:
     argv = [
         sys.executable,
@@ -137,6 +139,10 @@ def run_batch(
     argv.extend(["--debug-max-chars", str(max(256, debug_max_chars))])
     if target_overrides_json:
         argv.extend(["--target-overrides-json", target_overrides_json])
+    if mutation_memory_file:
+        argv.extend(["--mutation-memory-file", mutation_memory_file])
+    if disable_mutation_memory:
+        argv.append("--disable-mutation-memory")
     if verbose > 0:
         proc = subprocess.run(
             argv,
@@ -248,6 +254,16 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="Optional JSON file used to persist per-target scheduling totals across invocations",
     )
+    parser.add_argument(
+        "--mutation-memory-file",
+        default="",
+        help="Optional path forwarded to train.py --mutation-memory-file",
+    )
+    parser.add_argument(
+        "--disable-mutation-memory",
+        action="store_true",
+        help="Disable cross-target mutation replay in child train.py runs",
+    )
     return parser
 
 
@@ -262,6 +278,8 @@ def write_reports(
     ucb_explore: float,
     target_overrides_json: str,
     state_json: str,
+    mutation_memory_file: str,
+    disable_mutation_memory: bool,
 ) -> None:
     REPORT_JSON.write_text(
         json.dumps(
@@ -273,6 +291,8 @@ def write_reports(
                 "ucb_explore": ucb_explore,
                 "target_overrides_json": target_overrides_json,
                 "state_json": state_json,
+                "mutation_memory_file": mutation_memory_file,
+                "disable_mutation_memory": disable_mutation_memory,
                 "totals": totals,
                 "rows": [
                     {
@@ -305,6 +325,9 @@ def write_reports(
         lines.append(f"- target overrides: `{target_overrides_json}`")
     if state_json:
         lines.append(f"- state json: `{state_json}`")
+    if mutation_memory_file:
+        lines.append(f"- mutation memory file: `{mutation_memory_file}`")
+    lines.append(f"- mutation memory disabled: `{str(disable_mutation_memory).lower()}`")
     lines.append("")
     lines.append("## Per Target Totals")
     lines.append("")
@@ -423,6 +446,8 @@ def main(argv: list[str] | None = None) -> int:
                 debug_command_output=args.debug_command_output,
                 debug_max_chars=args.debug_max_chars,
                 target_overrides_json=args.target_overrides_json,
+                mutation_memory_file=args.mutation_memory_file,
+                disable_mutation_memory=args.disable_mutation_memory,
             )
             rows.append(result)
             portfolio_log(
@@ -464,6 +489,8 @@ def main(argv: list[str] | None = None) -> int:
                     ucb_explore=args.ucb_explore,
                     target_overrides_json=args.target_overrides_json,
                     state_json=args.state_json,
+                    mutation_memory_file=args.mutation_memory_file,
+                    disable_mutation_memory=args.disable_mutation_memory,
                 )
                 print(
                     json.dumps(
@@ -476,6 +503,8 @@ def main(argv: list[str] | None = None) -> int:
                             "ucb_explore": args.ucb_explore,
                             "target_overrides_json": args.target_overrides_json,
                             "state_json": args.state_json,
+                            "mutation_memory_file": args.mutation_memory_file,
+                            "disable_mutation_memory": args.disable_mutation_memory,
                             "report_md": str(REPORT_MD),
                             "report_json": str(REPORT_JSON),
                         },
@@ -501,6 +530,8 @@ def main(argv: list[str] | None = None) -> int:
         ucb_explore=args.ucb_explore,
         target_overrides_json=args.target_overrides_json,
         state_json=args.state_json,
+        mutation_memory_file=args.mutation_memory_file,
+        disable_mutation_memory=args.disable_mutation_memory,
     )
     save_totals_state(state_path, totals)
 
@@ -515,6 +546,8 @@ def main(argv: list[str] | None = None) -> int:
                 "ucb_explore": args.ucb_explore,
                 "target_overrides_json": args.target_overrides_json,
                 "state_json": args.state_json,
+                "mutation_memory_file": args.mutation_memory_file,
+                "disable_mutation_memory": args.disable_mutation_memory,
                 "report_md": str(REPORT_MD),
                 "report_json": str(REPORT_JSON),
             },

@@ -33,6 +33,7 @@ PORTFOLIO_JSON = ROOT / "portfolio_report.json"
 READINESS_REPORT = ROOT / "readiness_report.md"
 EVIDENCE_DIR = ROOT / "evidence"
 SUBMISSION_DIR = ROOT / "submission"
+MUTATION_MEMORY = ROOT / "work" / "mutation_memory.json"
 
 DEFAULT_REAL_OPTIMIZE_TARGETS = (
     "leanmultisig_poseidon16_src_fast,"
@@ -100,6 +101,9 @@ def reset_outputs() -> None:
     for path in (EVIDENCE_DIR, SUBMISSION_DIR):
         if path.exists():
             shutil.rmtree(path)
+    for path in (MUTATION_MEMORY, MUTATION_MEMORY.with_suffix(MUTATION_MEMORY.suffix + ".lock")):
+        if path.exists():
+            path.unlink()
 
 
 def parse_results() -> list[dict[str, str]]:
@@ -287,7 +291,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=6000,
         help="Max chars shown per command stream when debug output is enabled",
     )
-    parser.add_argument("--fresh", action="store_true", help="Reset results.tsv and agent_log.jsonl before run")
+    parser.add_argument(
+        "--fresh",
+        action="store_true",
+        help="Reset results/logs/reports and work/mutation_memory.json before run",
+    )
     parser.add_argument(
         "--synthesis-cook",
         action="store_true",

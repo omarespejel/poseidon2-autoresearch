@@ -978,6 +978,9 @@ def atomic_write_text(path: Path, content: str) -> None:
         if dir_fd is not None:
             try:
                 os.fsync(dir_fd)
+            except OSError:
+                # Directory fsync is best-effort for durability and can fail on some filesystems.
+                pass
             finally:
                 os.close(dir_fd)
     finally:
@@ -1079,12 +1082,24 @@ def seed_mutation_memory_from_results(memory: dict[str, Any]) -> None:
         if not mutation:
             continue
         status_token = cols[3].strip().lower()
-        if status_token == "accepted":
+        if status_token in {"accepted", "success"}:
             accepted = True
-        elif status_token in {"rejected", "failed", "skipped"}:
+        elif status_token == "rejected":
             accepted = False
+        elif status_token in {"failed", "skipped", "timeout", "error", "no_change"}:
+            # Infrastructure or no-op outcomes should not penalize mutation ranking.
+            continue
+        elif not status_token:
+            notes_token = cols[11].strip().lower()
+            if notes_token.startswith("accepted:"):
+                accepted = True
+            elif notes_token.startswith("rejected:"):
+                accepted = False
+            else:
+                continue
         else:
-            accepted = cols[11].strip().startswith("accepted:")
+            # Skip unrecognized statuses instead of silently treating as rejection.
+            continue
         update_mutation_memory(
             memory,
             mutation=mutation,
@@ -1094,7 +1109,9 @@ def seed_mutation_memory_from_results(memory: dict[str, Any]) -> None:
             timestamp=cols[0],
             metric_before=None,
             metric_after=None,
+            compact=False,
         )
+    compact_mutation_memory(mutations, now_epoch=time.time())
     memory["seeded_from_results"] = True
 
 
@@ -1166,6 +1183,7 @@ def update_mutation_memory(
     timestamp: str,
     metric_before: float | None,
     metric_after: float | None,
+    compact: bool = True,
 ) -> None:
     mutations = memory.setdefault("mutations", {})
     if not isinstance(mutations, dict):
@@ -1206,7 +1224,8 @@ def update_mutation_memory(
     if metric_before is not None and metric_after is not None:
         entry["latest_gain"] = metric_after - metric_before
 
-    compact_mutation_memory(mutations, now_epoch=parse_iso_to_epoch(timestamp) or time.time())
+    if compact:
+        compact_mutation_memory(mutations, now_epoch=parse_iso_to_epoch(timestamp) or time.time())
 
 
 def update_and_save_mutation_memory(
