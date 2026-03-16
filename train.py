@@ -966,29 +966,30 @@ def atomic_write_text(path: Path, content: str) -> None:
 def file_lock(lock_path: Path) -> Any:
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_file = lock_path.open("a+", encoding="utf-8")
-    if os.name == "nt":
-        import msvcrt
+    try:
+        if os.name == "nt":
+            import msvcrt
 
-        lock_file.seek(0, os.SEEK_END)
-        if lock_file.tell() == 0:
-            lock_file.write("\0")
-            lock_file.flush()
-        lock_file.seek(0)
-        msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+            lock_file.seek(0, os.SEEK_END)
+            if lock_file.tell() == 0:
+                lock_file.write("\0")
+                lock_file.flush()
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            return
+
+        import fcntl
+
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         try:
             yield
         finally:
-            msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
-            lock_file.close()
-        return
-
-    import fcntl
-
-    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-    try:
-        yield
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
     finally:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
         lock_file.close()
 
 
@@ -1180,7 +1181,7 @@ def update_mutation_memory(
     if metric_before is not None and metric_after is not None:
         entry["latest_gain"] = metric_after - metric_before
 
-    compact_mutation_memory(mutations, now_epoch=parse_iso_to_epoch(timestamp))
+    compact_mutation_memory(mutations, now_epoch=parse_iso_to_epoch(timestamp) or time.time())
 
 
 def update_and_save_mutation_memory(
