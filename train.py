@@ -870,6 +870,90 @@ def rust_mutator_hoist_log_num_cols(source: str) -> tuple[str, str, bool]:
     return candidate, "rust_hoist_log_num_cols", True
 
 
+def json_dump_stable(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, indent=2, sort_keys=True) + "\n"
+
+
+def json_heuristic_candidate(
+    source: str,
+    iteration: int,
+    source_path: Path,
+) -> tuple[str, str, bool]:
+    path = str(source_path).replace("\\", "/").lower()
+    if not path.endswith("config/track_b_attack_config.json"):
+        return source, "json_no_change", False
+
+    try:
+        payload = json.loads(source)
+    except json.JSONDecodeError:
+        return source, "json_trackb_parse_failed", False
+    if not isinstance(payload, dict):
+        return source, "json_trackb_invalid_root", False
+
+    search = payload.get("search")
+    if not isinstance(search, dict):
+        return source, "json_trackb_missing_search", False
+
+    def clone_obj() -> dict[str, Any]:
+        return json.loads(json.dumps(payload))
+
+    def apply_delta(obj: dict[str, Any], key: str, delta: int, lo: int, hi: int) -> bool:
+        section = obj.get("search")
+        if not isinstance(section, dict):
+            return False
+        try:
+            current = int(section.get(key))
+        except (TypeError, ValueError):
+            return False
+        updated = max(lo, min(hi, current + delta))
+        if updated == current:
+            return False
+        section[key] = updated
+        return True
+
+    def apply_seed_roll(obj: dict[str, Any]) -> bool:
+        section = obj.get("search")
+        if not isinstance(section, dict):
+            return False
+        try:
+            current = int(section.get("seed"))
+        except (TypeError, ValueError):
+            return False
+        section["seed"] = current + 101
+        return True
+
+    operators: list[tuple[str, Any]] = [
+        ("json_trackb_delta_candidates_up", lambda obj: apply_delta(obj, "delta_candidates", +8, 4, 4096)),
+        ("json_trackb_delta_candidates_down", lambda obj: apply_delta(obj, "delta_candidates", -8, 4, 4096)),
+        ("json_trackb_samples_per_delta_up", lambda obj: apply_delta(obj, "samples_per_delta", +64, 16, 131072)),
+        ("json_trackb_samples_per_delta_down", lambda obj: apply_delta(obj, "samples_per_delta", -64, 16, 131072)),
+        (
+            "json_trackb_preimage_attempts_up",
+            lambda obj: apply_delta(obj, "preimage_attempts_per_trial", +512, 32, 1_000_000),
+        ),
+        (
+            "json_trackb_preimage_attempts_down",
+            lambda obj: apply_delta(obj, "preimage_attempts_per_trial", -512, 32, 1_000_000),
+        ),
+        ("json_trackb_preimage_trials_up", lambda obj: apply_delta(obj, "preimage_trials", +2, 2, 4096)),
+        ("json_trackb_preimage_trials_down", lambda obj: apply_delta(obj, "preimage_trials", -2, 2, 4096)),
+        ("json_trackb_seed_roll", apply_seed_roll),
+    ]
+
+    shift = (iteration - 1) % len(operators)
+    ordered = operators[shift:] + operators[:shift]
+    for label, op in ordered:
+        candidate_obj = clone_obj()
+        changed = bool(op(candidate_obj))
+        if not changed:
+            continue
+        candidate_source = json_dump_stable(candidate_obj)
+        if candidate_source == source:
+            continue
+        return candidate_source, label, True
+    return source, "json_trackb_no_change", False
+
+
 def generic_heuristic_candidate(source: str, iteration: int) -> tuple[str, str, bool]:
     markers = [
         "AUTOCIRCUIT_NOP_ASSERT",
@@ -1144,6 +1228,14 @@ def heuristic_candidate(
     mutation_memory: dict[str, Any] | None = None,
     target_name: str = "",
 ) -> tuple[str, str, bool]:
+    if language.lower() == "json":
+        json_candidate, mutation, changed = json_heuristic_candidate(
+            source,
+            iteration,
+            source_path,
+        )
+        if changed:
+            return json_candidate, mutation, True
     if language.lower() == "rust":
         rust_candidate, mutation, changed = rust_heuristic_candidate(
             source,
@@ -1429,6 +1521,8 @@ def infer_mutation_language(*, mutation: str, target_language: str | None = None
         return candidate
     if mutation.startswith("rust_"):
         return "rust"
+    if mutation.startswith("json_"):
+        return "json"
     if mutation.startswith("heuristic_"):
         return "generic"
     return "unknown"

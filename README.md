@@ -13,6 +13,7 @@ This scaffold focuses on what is quickly verifiable:
 
 - `prepare.py`: setup + target evaluation + baseline recording (fixed/read-only)
 - `train.py`: autonomous optimization loop (editable research loop file)
+- `attack_harness.py`: deterministic reduced-round cryptanalysis harness (Track B signal target)
 - `program.md`: human-authored instructions for the agent
 - `run_loop.py`: backward-compatible alias to `train.py`
 - `portfolio_loop.py`: adaptive multi-target runner (avoids single-target plateaus)
@@ -36,6 +37,7 @@ From repository root:
 python3 prepare.py list-targets
 python3 prepare.py baseline --target cairo_poseidon_style_t8 --notes baseline
 python3 train.py --target cairo_poseidon_style_t8 --iterations 12 --max-accepted 3
+python3 prepare.py evaluate --target poseidon2_cryptanalysis_trackb_fast
 ```
 
 ## Verbose and Debug Runs
@@ -80,8 +82,15 @@ Useful controls:
 # add extra real-source optimization rounds
 python3 campaign.py --synthesis-cook --real-optimize-rounds 4
 
+# run cryptanalysis-only campaign lane
+python3 campaign.py --track cryptanalysis --real-profile none --loop-iterations 25 --crypto-optimize-rounds 2
+
+# run both lanes in one campaign
+python3 campaign.py --track hybrid --synthesis-cook --crypto-optimize-rounds 2
+
 # show the host-aware default source target set (ARM NEON vs x86 AVX2)
 python3 campaign.py --help | rg real-optimize-targets -n
+python3 campaign.py --help | rg crypto-optimize-targets -n
 
 # run loop indefinitely (stopped by max accepted)
 python3 campaign.py --synthesis-cook --loop-iterations 0 --max-accepted 3
@@ -225,6 +234,20 @@ Reference implementation context can be inspected in:
 
 - `work/leanMultisig`
 - `work/leanSig`
+
+## Track B Cryptanalysis Targets
+
+Track B uses command targets that optimize a deterministic `attack_score` extracted from JSON output:
+
+- `poseidon2_cryptanalysis_trackb_fast`
+- `poseidon2_cryptanalysis_trackb_full`
+
+Quick start:
+
+```bash
+python3 prepare.py baseline --target poseidon2_cryptanalysis_trackb_fast --notes trackb_baseline
+python3 train.py --target poseidon2_cryptanalysis_trackb_fast --iterations 12 --max-accepted 2 -v
+```
 
 ## LLM Mode (Optional)
 

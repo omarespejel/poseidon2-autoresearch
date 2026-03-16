@@ -1,0 +1,27 @@
+{
+  "challenge": {
+    "field_modulus": 65537,
+    "full_rounds": 8,
+    "partial_rounds": 22,
+    "preimage_target_bits": 12,
+    "round_constants_seed": 1729,
+    "sbox_power": 5,
+    "target_lane": 0,
+    "width": 3
+  },
+  "objective": {
+    "attack_found_bonus": 1.0,
+    "attack_found_threshold_bits": 8.0,
+    "complexity_cap_bits": 24.0,
+    "cost_penalty_scale": 0.1,
+    "weight_differential": 0.7,
+    "weight_preimage": 0.3
+  },
+  "search": {
+    "delta_candidates": 40,
+    "preimage_attempts_per_trial": 4096,
+    "preimage_trials": 16,
+    "samples_per_delta": 192,
+    "seed": 1337
+  }
+}
