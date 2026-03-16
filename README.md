@@ -38,6 +38,22 @@ python3 prepare.py baseline --target cairo_poseidon_style_t8 --notes baseline
 python3 train.py --target cairo_poseidon_style_t8 --iterations 12 --max-accepted 3
 ```
 
+## Verbose and Debug Runs
+
+Use verbosity when you need to see real-time progress and command-level diagnostics:
+
+```bash
+# loop-level progress (iteration start/result) to stderr
+python3 train.py --target leanmultisig_poseidon16_src_fast --iterations 12 -v
+
+# include captured build/bench stdout+stderr for debugging (truncated)
+python3 train.py --target leanmultisig_poseidon16_src_fast --iterations 4 -vv \
+  --debug-command-output --debug-max-chars 8000
+
+# same debugging flags are available in prepare.py
+python3 prepare.py --verbose --debug-command-output evaluate --target leanmultisig_poseidon16_src_fast
+```
+
 ## Karpathy-Compatible Mode
 
 The repo now supports the same top-level workflow shape:

@@ -55,6 +55,31 @@ DEFAULT_MUTATION_MEMORY_MAX_ENTRIES = 512
 DEFAULT_MUTATION_MEMORY_STALE_SECONDS = 14 * 24 * 60 * 60
 
 
+def configure_debug_environment(args: argparse.Namespace) -> None:
+    if args.verbose > 0:
+        existing = os.getenv("AUTORESEARCH_VERBOSE", "").strip()
+        try:
+            existing_level = int(existing) if existing else 0
+        except ValueError:
+            existing_level = 0
+        os.environ["AUTORESEARCH_VERBOSE"] = str(max(existing_level, args.verbose))
+    if args.debug_command_output:
+        os.environ["AUTORESEARCH_DEBUG_COMMAND_OUTPUT"] = "1"
+    os.environ["AUTORESEARCH_DEBUG_MAX_CHARS"] = str(max(256, int(args.debug_max_chars)))
+
+
+def train_log(args: argparse.Namespace, message: str, *, level: int = 1) -> None:
+    if int(getattr(args, "verbose", 0)) < level:
+        return
+    print(f"[train {prepare.now_iso()}] {message}", file=sys.stderr, flush=True)
+
+
+def summarize_notes(notes: str, *, max_len: int = 220) -> str:
+    if len(notes) <= max_len:
+        return notes
+    return f"{notes[:max_len]}... [truncated]"
+
+
 def load_prompt_template() -> str:
     return PROMPT_TEMPLATE.read_text()
 
@@ -1665,6 +1690,7 @@ def resolve_min_improvement_rel(
 
 
 def run_loop(args: argparse.Namespace) -> int:
+    configure_debug_environment(args)
     targets = prepare.load_targets()
     if args.target not in targets:
         print(f"Unknown target: {args.target}", file=sys.stderr)
@@ -1707,6 +1733,17 @@ def run_loop(args: argparse.Namespace) -> int:
         mutation_memory = load_mutation_memory(mutation_memory_path)
         seed_mutation_memory_from_results(mutation_memory)
 
+    train_log(
+        args,
+        (
+            f"starting target={args.target} iterations={args.iterations} "
+            f"max_accepted={args.max_accepted or 'none'} "
+            f"max_runtime={args.max_runtime_seconds or 'none'}s "
+            f"artifacts={args.artifacts}"
+        ),
+        level=1,
+    )
+
     baseline = prepare.evaluate_target(args.target)
     if baseline["status"] != "success" or baseline["metric_value"] is None:
         print("Baseline evaluation failed; aborting optimization loop", file=sys.stderr)
@@ -1732,6 +1769,15 @@ def run_loop(args: argparse.Namespace) -> int:
     )
 
     best_metric = float(baseline["metric_value"])
+    train_log(
+        args,
+        (
+            f"baseline metric={best_metric:.6f} "
+            f"check_s={baseline['check_s']:.3f} info_or_bench_s={baseline['info_or_bench_s']:.3f} "
+            f"execute_s={baseline['execute_s']:.3f}"
+        ),
+        level=1,
+    )
     baseline_metric_series = parse_metric_series(baseline.get("debug", {}).get("metric_values"))
     best_metric_series = baseline_metric_series if baseline_metric_series else [best_metric]
     accepted = 0
@@ -1803,6 +1849,11 @@ def run_loop(args: argparse.Namespace) -> int:
                 break
 
         iterations_completed = iteration
+        train_log(
+            args,
+            f"iter {iteration}/{args.iterations} starting (accepted={accepted}, best={best_metric:.6f})",
+            level=1,
+        )
         current_source = source_path.read_text()
 
         mutation = ""
@@ -1897,6 +1948,11 @@ def run_loop(args: argparse.Namespace) -> int:
                 )
 
         if not changed:
+            train_log(
+                args,
+                f"iter {iteration}: skipped (mutation={mutation}, reason=no_change)",
+                level=1,
+            )
             prepare.append_result_row(
                 target=args.target,
                 iteration=iteration,
@@ -1913,6 +1969,7 @@ def run_loop(args: argparse.Namespace) -> int:
 
         mutation_key = normalize_mutation_label(mutation) or mutation
         mutation_attempts[mutation_key] = mutation_attempts.get(mutation_key, 0) + 1
+        train_log(args, f"iter {iteration}: evaluating mutation={mutation_key}", level=2)
 
         source_path.write_text(candidate)
         try:
@@ -2086,6 +2143,19 @@ def run_loop(args: argparse.Namespace) -> int:
                 notes=f"{notes};run={run_label}",
             )
 
+            decision = "accepted" if improved else "rejected"
+            metric_s = "n/a" if metric_for_row is None else f"{float(metric_for_row):.6f}"
+            train_log(
+                args,
+                (
+                    f"iter {iteration}: {decision} mutation={mutation_key} status={result.get('status')} "
+                    f"metric={metric_s} best={best_metric:.6f} notes={summarize_notes(notes)}"
+                ),
+                level=1,
+            )
+            if diagnostics:
+                train_log(args, f"iter {iteration} diagnostics={json.dumps(diagnostics, sort_keys=True)}", level=2)
+
             prepare.append_log(
                 {
                     "event": "loop_iteration",
@@ -2115,6 +2185,14 @@ def run_loop(args: argparse.Namespace) -> int:
             raise
 
     elapsed_seconds = time.perf_counter() - loop_wall_start
+    train_log(
+        args,
+        (
+            f"completed target={args.target} stop_reason={stop_reason} accepted={accepted} "
+            f"iterations_completed={iterations_completed} best_metric={best_metric:.6f} elapsed_s={elapsed_seconds:.3f}"
+        ),
+        level=1,
+    )
     prepare.append_log(
         {
             "event": "loop_end",
@@ -2157,6 +2235,18 @@ def run_loop(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="AutoPoseidon train loop (Karpathy-compatible entrypoint)")
+    parser.add_argument("-v", "--verbose", action="count", default=0, help="Increase stderr verbosity")
+    parser.add_argument(
+        "--debug-command-output",
+        action="store_true",
+        help="Print captured benchmark/build/test command stdout/stderr (truncated)",
+    )
+    parser.add_argument(
+        "--debug-max-chars",
+        type=int,
+        default=4000,
+        help="Max chars shown per command stream when debug output is enabled",
+    )
     parser.add_argument("--target", default="cairo_poseidon_style_t8", help="Target from config/targets.json")
     parser.add_argument("--iterations", type=int, default=25, help="Max optimization iterations")
     parser.add_argument("--max-accepted", type=int, default=0, help="Stop after N accepted mutations (0 = no cap)")

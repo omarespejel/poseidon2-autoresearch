@@ -8,6 +8,7 @@ import datetime as dt
 import json
 import os
 import re
+import shlex
 import shutil
 import statistics
 import subprocess
@@ -43,6 +44,41 @@ ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 GIT_OID_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
 
 
+def env_int(name: str, default: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def is_verbose(level: int = 1) -> bool:
+    return env_int("AUTORESEARCH_VERBOSE", 0) >= level
+
+
+def debug_max_chars() -> int:
+    return max(256, env_int("AUTORESEARCH_DEBUG_MAX_CHARS", 4000))
+
+
+def debug_command_output() -> bool:
+    return os.getenv("AUTORESEARCH_DEBUG_COMMAND_OUTPUT", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def debug_log(message: str, *, level: int = 1) -> None:
+    if not is_verbose(level):
+        return
+    print(f"[prepare {now_iso()}] {message}", file=sys.stderr, flush=True)
+
+
+def trim_text(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    trimmed = text[:limit]
+    return f"{trimmed}\n... [truncated {len(text) - limit} chars]"
+
+
 def command_result_to_json(result: CommandResult) -> dict[str, Any]:
     return {
         "argv": result.argv,
@@ -68,6 +104,8 @@ def run_cmd(argv: list[str], cwd: Path) -> CommandResult:
     if nice_level:
         final_argv = ["nice", "-n", nice_level, *final_argv]
 
+    pretty = " ".join(shlex.quote(arg) for arg in final_argv)
+    debug_log(f"run: (cd {cwd} && {pretty})", level=1)
     start = time.perf_counter()
     try:
         proc = subprocess.run(final_argv, cwd=str(cwd), text=True, capture_output=True, check=False)
@@ -80,7 +118,7 @@ def run_cmd(argv: list[str], cwd: Path) -> CommandResult:
             stderr=str(exc),
             seconds=time.perf_counter() - start,
         )
-    return CommandResult(
+    result = CommandResult(
         argv=final_argv,
         cwd=cwd,
         code=proc.returncode,
@@ -88,6 +126,15 @@ def run_cmd(argv: list[str], cwd: Path) -> CommandResult:
         stderr=proc.stderr,
         seconds=time.perf_counter() - start,
     )
+    debug_log(f"done: exit={result.code} seconds={result.seconds:.3f}", level=1)
+    show_output = debug_command_output() or (result.code != 0 and is_verbose(1))
+    if show_output:
+        cap = debug_max_chars()
+        if result.stdout.strip():
+            debug_log("stdout:\n" + trim_text(result.stdout, cap), level=1)
+        if result.stderr.strip():
+            debug_log("stderr:\n" + trim_text(result.stderr, cap), level=1)
+    return result
 
 
 def load_targets() -> dict[str, dict[str, Any]]:
@@ -852,6 +899,18 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="AutoPoseidon prep and evaluation harness")
+    parser.add_argument("-v", "--verbose", action="count", default=0, help="Increase stderr verbosity")
+    parser.add_argument(
+        "--debug-command-output",
+        action="store_true",
+        help="Print captured command stdout/stderr to stderr (truncated)",
+    )
+    parser.add_argument(
+        "--debug-max-chars",
+        type=int,
+        default=4000,
+        help="Max chars shown per command stream when debug output is enabled",
+    )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     list_targets = sub.add_parser("list-targets", help="List configured targets")
@@ -892,6 +951,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.verbose > 0:
+        os.environ["AUTORESEARCH_VERBOSE"] = str(args.verbose)
+    if args.debug_command_output:
+        os.environ["AUTORESEARCH_DEBUG_COMMAND_OUTPUT"] = "1"
+    os.environ["AUTORESEARCH_DEBUG_MAX_CHARS"] = str(max(256, int(args.debug_max_chars)))
     return args.func(args)
 
 

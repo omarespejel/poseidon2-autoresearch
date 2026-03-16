@@ -37,6 +37,12 @@ def default_target_state() -> dict[str, Any]:
     return {"batches": 0, "accepted": 0, "best_metric": None, "plateau_streak": 0, "zero_streak": 0}
 
 
+def portfolio_log(verbose: int, message: str, *, level: int = 1) -> None:
+    if verbose < level:
+        return
+    print(f"[portfolio] {message}", file=sys.stderr, flush=True)
+
+
 def resolve_state_path(path_value: str) -> Path:
     path = Path(path_value)
     if not path.is_absolute():
@@ -105,6 +111,9 @@ def run_batch(
     max_accepted: int,
     artifacts: str,
     confirm_repeats: int,
+    verbose: int,
+    debug_command_output: bool,
+    debug_max_chars: int,
     target_overrides_json: str = "",
 ) -> BatchResult:
     argv = [
@@ -121,9 +130,24 @@ def run_batch(
         "--confirm-repeats",
         str(confirm_repeats),
     ]
+    if verbose > 0:
+        argv.extend(["--verbose"] * verbose)
+    if debug_command_output:
+        argv.append("--debug-command-output")
+    argv.extend(["--debug-max-chars", str(max(256, debug_max_chars))])
     if target_overrides_json:
         argv.extend(["--target-overrides-json", target_overrides_json])
-    proc = subprocess.run(argv, cwd=str(ROOT), text=True, capture_output=True, check=False)
+    if verbose > 0:
+        proc = subprocess.run(
+            argv,
+            cwd=str(ROOT),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=None,
+            check=False,
+        )
+    else:
+        proc = subprocess.run(argv, cwd=str(ROOT), text=True, capture_output=True, check=False)
 
     payload: dict[str, Any] = {}
     accepted = 0
@@ -147,12 +171,24 @@ def run_batch(
         accepted=accepted,
         best_metric=best_metric,
         payload=payload,
-        stderr=proc.stderr,
+        stderr=proc.stderr if proc.stderr is not None else "",
     )
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Adaptive multi-target AutoPoseidon runner")
+    parser.add_argument("-v", "--verbose", action="count", default=0, help="Increase stderr verbosity")
+    parser.add_argument(
+        "--debug-command-output",
+        action="store_true",
+        help="Forward command stdout/stderr debugging to train.py/prepare.py",
+    )
+    parser.add_argument(
+        "--debug-max-chars",
+        type=int,
+        default=4000,
+        help="Max chars shown per command stream when debug output is enabled",
+    )
     parser.add_argument(
         "--targets",
         default="leanmultisig_poseidon16_src_fast,leanmultisig_poseidon16_table_src_fast,leanmultisig_poseidon2_neon_src_fast",
@@ -330,6 +366,7 @@ def main(argv: list[str] | None = None) -> int:
 
     for round_index in range(1, args.rounds + 1):
         made_progress = False
+        portfolio_log(args.verbose, f"starting round {round_index}/{args.rounds}", level=1)
         remaining_targets = [target for target in targets if totals[target]["plateau_streak"] < args.plateau_threshold]
 
         while remaining_targets:
@@ -348,6 +385,15 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 target = remaining_targets.pop(0)
 
+            portfolio_log(
+                args.verbose,
+                (
+                    f"dispatch target={target} schedule={args.schedule} "
+                    f"plateau_streak={totals[target]['plateau_streak']}"
+                ),
+                level=2,
+            )
+
             state = totals[target]
 
             result = run_batch(
@@ -357,9 +403,23 @@ def main(argv: list[str] | None = None) -> int:
                 max_accepted=args.batch_max_accepted,
                 artifacts=args.artifacts,
                 confirm_repeats=args.confirm_repeats,
+                verbose=args.verbose,
+                debug_command_output=args.debug_command_output,
+                debug_max_chars=args.debug_max_chars,
                 target_overrides_json=args.target_overrides_json,
             )
             rows.append(result)
+            portfolio_log(
+                args.verbose,
+                (
+                    f"round={round_index} target={target} exit={result.code} "
+                    f"accepted={result.accepted} best_metric="
+                    f"{'n/a' if result.best_metric is None else f'{result.best_metric:.6f}'}"
+                ),
+                level=1,
+            )
+            if result.code != 0 and result.stderr.strip():
+                portfolio_log(args.verbose, f"stderr tail:\n{result.stderr[-2000:]}", level=1)
 
             state["batches"] += 1
             state["accepted"] += result.accepted
