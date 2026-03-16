@@ -1,0 +1,46 @@
+# Qodo Merge (PR-Agent) configuration for poseidon2-autoresearch
+# Autonomous Poseidon2 optimization loop — Python-only repo
+
+[pr_description]
+enable_default_description = true
+personal_extra_instructions = """
+Highlight any changes to the optimization loop logic, hash parameter tuning,
+or experiment trace format. Note impacts on reproducibility.
+"""
+
+[pr_reviewer]
+enable_default_review = true
+require_security_review = true
+extra_instructions = """
+This repo implements cryptographic hash function optimization (Poseidon2).
+Prioritize:
+- Correctness of hash computations and parameter configurations
+- Numerical stability in optimization loops
+- Reproducibility of experiment traces and checkpoints
+- Safe file I/O in checkpoint_loop.py and evidence_pack.py
+- No hardcoded secrets, API keys, or credentials
+- Python best practices: type hints, proper exception handling
+"""
+
+[pr_code_suggestions]
+enable_default_suggestions = true
+num_code_suggestions = 3
+extra_instructions = """
+Focus suggestions on:
+- Improving numerical precision in hash parameter tuning
+- Strengthening checkpoint and evidence pack integrity
+- Adding type annotations where missing
+- Improving error handling in loop constructs
+"""
+
+[checks]
+enable_auto_checks_feedback = true
+
+[ignore]
+glob = [
+  "*.lock",
+  "*.generated.*",
+  "__pycache__/**",
+  ".mypy_cache/**",
+  "*.egg-info/**"
+]
