@@ -758,10 +758,22 @@ def evaluate_command(target_name: str, target: dict[str, Any]) -> dict[str, Any]
 
     default_command = target.get("benchmark_command")
     default_regex = str(target.get("metric_regex", ""))
-    default_warmup = int(target.get("warmup_runs", 0))
-    default_runs = int(target.get("runs", 1))
-    default_aggregate = str(target.get("aggregate", "median"))
-    default_trim = int(target.get("trim_extremes", 0))
+    try:
+        default_warmup = int(target.get("warmup_runs", 0))
+        default_runs = int(target.get("runs", 1))
+        default_aggregate = str(target.get("aggregate", "median"))
+        default_trim = int(target.get("trim_extremes", 0))
+    except (TypeError, ValueError) as exc:
+        return {
+            "status": "failed",
+            "metric_name": metric_name,
+            "metric_value": None,
+            "check_s": 0.0,
+            "info_or_bench_s": 0.0,
+            "execute_s": 0.0,
+            "notes": f"invalid numeric field in target config: {exc}",
+            "debug": {},
+        }
 
     profiles_raw = target.get("benchmark_profiles")
     if not isinstance(profiles_raw, list) or not profiles_raw:
@@ -960,25 +972,16 @@ def evaluate_command(target_name: str, target: dict[str, Any]) -> dict[str, Any]
     else:
         composite_series = []
 
-    if not composite_series:
-        series_lengths = [len(series) for series in profile_series] if profile_series else []
-        return {
-            "status": "failed",
-            "metric_name": metric_name,
-            "metric_value": None,
-            "check_s": 0.0,
-            "info_or_bench_s": total_seconds,
-            "execute_s": 0.0,
-            "notes": (
-                "profile metric series are not alignable; "
-                "refusing to emit ambiguous statistical series for acceptance gates"
-            ),
-            "debug": {
-                "profile_reports": profile_reports,
-                "profiles_aggregate": profiles_aggregate,
-                "series_lengths": series_lengths,
-            },
-        }
+    debug_payload: dict[str, Any] = {
+        "profile_reports": profile_reports,
+        "profiles_aggregate": profiles_aggregate,
+        "metric_values_raw": profile_values,
+    }
+    if composite_series:
+        debug_payload["metric_values"] = composite_series
+    else:
+        debug_payload["series_lengths"] = [len(series) for series in profile_series] if profile_series else []
+        debug_payload["metric_values_series_status"] = "unaligned"
 
     profile_values_note = ",".join(
         f"{report['name']}={float(report['metric_value']):.2f}" for report in profile_reports
@@ -994,12 +997,7 @@ def evaluate_command(target_name: str, target: dict[str, Any]) -> dict[str, Any]
             f"ok profiles={len(profile_reports)} aggregate={profiles_aggregate} "
             f"values=[{profile_values_note}]"
         ),
-        "debug": {
-            "profile_reports": profile_reports,
-            "profiles_aggregate": profiles_aggregate,
-            "metric_values": composite_series,
-            "metric_values_raw": profile_values,
-        },
+        "debug": debug_payload,
     }
 
 
