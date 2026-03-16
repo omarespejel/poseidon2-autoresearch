@@ -12,7 +12,9 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import difflib
+import hashlib
 import json
+import math
 import os
 import platform
 import re
@@ -49,6 +51,8 @@ ALLOWED_TARGET_OVERRIDE_KEYS = {
     "min_series_samples",
     "ab_repeats",
     "blocked_mutation_ttl",
+    "mutation_schedule",
+    "mutation_ucb_explore",
 }
 DEFAULT_MUTATION_MEMORY_FILE = ROOT / "work" / "mutation_memory.json"
 DEFAULT_MUTATION_MEMORY_MAX_ENTRIES = 512
@@ -849,6 +853,8 @@ def rust_heuristic_candidate(
     mutation_attempts: dict[str, int] | None = None,
     target_config: dict[str, Any] | None = None,
     preferred_mutations: list[str] | None = None,
+    mutation_memory: dict[str, Any] | None = None,
+    target_name: str = "",
 ) -> tuple[str, str, bool]:
     path = str(source_path).replace("\\", "/").lower()
 
@@ -948,9 +954,13 @@ def rust_heuristic_candidate(
                 return (1, min(part_ranks))
         return (2, 1_000_000)
 
-    candidates: list[tuple[int, int, int, int, int, str, str]] = []
+    candidates: list[dict[str, Any]] = []
     single_candidates: list[tuple[int, str, str]] = []
     attempts = mutation_attempts or {}
+    mutation_schedule = str((target_config or {}).get("mutation_schedule", "priority")).strip().lower()
+    use_ucb_schedule = mutation_schedule == "ucb"
+    mutation_ucb_explore = float((target_config or {}).get("mutation_ucb_explore", 0.75))
+    total_memory_observations = mutation_memory_total_observations(mutation_memory)
 
     compound_every = int((target_config or {}).get("compound_every", 0))
     compound_limit = max(0, int((target_config or {}).get("compound_limit", 0)))
@@ -968,7 +978,15 @@ def rust_heuristic_candidate(
         single_candidates.append((idx, candidate, mutation))
         pref_class, pref_rank_value = preference_for_label(mutation)
         candidates.append(
-            (single_tier, pref_class, pref_rank_value, attempts.get(mutation, 0), idx, candidate, mutation)
+            {
+                "tier": single_tier,
+                "pref_class": pref_class,
+                "pref_rank": pref_rank_value,
+                "attempts": attempts.get(mutation, 0),
+                "index": idx,
+                "candidate": candidate,
+                "mutation": mutation,
+            }
         )
 
     if compound_every > 0 and compound_limit > 0 and single_candidates:
@@ -994,7 +1012,15 @@ def rust_heuristic_candidate(
                 combo_idx = idx_a * 1000 + idx_b
                 pref_class, pref_rank_value = preference_for_label(combo_mutation)
                 candidates.append(
-                    (compound_tier, pref_class, pref_rank_value, combo_attempts, combo_idx, candidate_b, combo_mutation)
+                    {
+                        "tier": compound_tier,
+                        "pref_class": pref_class,
+                        "pref_rank": pref_rank_value,
+                        "attempts": combo_attempts,
+                        "index": combo_idx,
+                        "candidate": candidate_b,
+                        "mutation": combo_mutation,
+                    }
                 )
                 added += 1
                 if added >= compound_limit:
@@ -1003,9 +1029,44 @@ def rust_heuristic_candidate(
                 break
 
     if candidates:
-        candidates.sort(key=lambda x: (x[0], x[1], x[2], x[3], x[4]))
-        _, _, _, _, _, chosen_candidate, chosen_mutation = candidates[0]
-        return chosen_candidate, chosen_mutation, True
+        if use_ucb_schedule:
+            for item in candidates:
+                accepted_hist, rejected_hist = mutation_memory_counts(
+                    mutation_memory,
+                    str(item["mutation"]),
+                    target_name=target_name,
+                    language="rust",
+                )
+                item["ucb_score"] = mutation_ucb_score(
+                    accepted=accepted_hist,
+                    rejected=rejected_hist,
+                    total_observations=total_memory_observations,
+                    explore=mutation_ucb_explore,
+                    preference_class=int(item["pref_class"]),
+                    schedule_tier=int(item["tier"]),
+                    attempt_count=int(item["attempts"]),
+                )
+            candidates.sort(
+                key=lambda item: (
+                    -float(item.get("ucb_score", 0.0)),
+                    int(item["pref_class"]),
+                    int(item["pref_rank"]),
+                    int(item["attempts"]),
+                    int(item["index"]),
+                )
+            )
+        else:
+            candidates.sort(
+                key=lambda item: (
+                    int(item["tier"]),
+                    int(item["pref_class"]),
+                    int(item["pref_rank"]),
+                    int(item["attempts"]),
+                    int(item["index"]),
+                )
+            )
+        chosen = candidates[0]
+        return str(chosen["candidate"]), str(chosen["mutation"]), True
     return source, "rust_no_change", False
 
 
@@ -1018,6 +1079,8 @@ def heuristic_candidate(
     mutation_attempts: dict[str, int] | None = None,
     target_config: dict[str, Any] | None = None,
     preferred_mutations: list[str] | None = None,
+    mutation_memory: dict[str, Any] | None = None,
+    target_name: str = "",
 ) -> tuple[str, str, bool]:
     if language.lower() == "rust":
         rust_candidate, mutation, changed = rust_heuristic_candidate(
@@ -1028,6 +1091,8 @@ def heuristic_candidate(
             mutation_attempts=mutation_attempts,
             target_config=target_config,
             preferred_mutations=preferred_mutations,
+            mutation_memory=mutation_memory,
+            target_name=target_name,
         )
         if changed:
             return rust_candidate, mutation, True
@@ -1613,6 +1678,151 @@ def preferred_mutations_from_memory(
     return [mutation for _, _, _, mutation in ranked[:limit]]
 
 
+def mutation_memory_total_observations(memory: dict[str, Any] | None) -> float:
+    if not isinstance(memory, dict):
+        return 0.0
+    raw_mutations = memory.get("mutations")
+    if not isinstance(raw_mutations, dict):
+        return 0.0
+
+    total = 0.0
+    for raw in raw_mutations.values():
+        if not isinstance(raw, dict):
+            continue
+        accepted = max(0.0, float(raw.get("accepted_total", 0) or 0.0))
+        rejected = max(0.0, float(raw.get("rejected_total", 0) or 0.0))
+        total += accepted + rejected
+    return total
+
+
+def mutation_memory_counts(
+    memory: dict[str, Any] | None,
+    mutation: str,
+    *,
+    target_name: str,
+    language: str,
+) -> tuple[float, float]:
+    if not isinstance(memory, dict):
+        return (0.0, 0.0)
+    raw_mutations = memory.get("mutations")
+    if not isinstance(raw_mutations, dict):
+        return (0.0, 0.0)
+
+    def entry_counts(label: str) -> tuple[float, float] | None:
+        raw = raw_mutations.get(label)
+        if not isinstance(raw, dict):
+            return None
+
+        accepted_total = max(0.0, float(raw.get("accepted_total", 0) or 0.0))
+        rejected_total = max(0.0, float(raw.get("rejected_total", 0) or 0.0))
+
+        language_counts = None
+        raw_languages = raw.get("languages")
+        if isinstance(raw_languages, dict):
+            language_counts = raw_languages.get(language)
+        target_counts = None
+        raw_targets = raw.get("targets")
+        if isinstance(raw_targets, dict):
+            target_counts = raw_targets.get(target_name)
+
+        local_accepted = 0.0
+        local_rejected = 0.0
+        if isinstance(language_counts, dict):
+            local_accepted += max(0.0, float(language_counts.get("accepted", 0) or 0.0))
+            local_rejected += max(0.0, float(language_counts.get("rejected", 0) or 0.0))
+        if isinstance(target_counts, dict):
+            local_accepted += max(0.0, float(target_counts.get("accepted", 0) or 0.0))
+            local_rejected += max(0.0, float(target_counts.get("rejected", 0) or 0.0))
+
+        if local_accepted + local_rejected > 0.0:
+            return (local_accepted, local_rejected)
+        return (accepted_total, rejected_total)
+
+    direct = entry_counts(mutation)
+    if direct is not None:
+        return direct
+
+    if "+" in mutation:
+        parts = [part.strip() for part in mutation.split("+") if part.strip()]
+        aggregates = [entry_counts(part) for part in parts]
+        aggregates = [item for item in aggregates if item is not None]
+        if aggregates:
+            accepted = sum(item[0] for item in aggregates) / len(aggregates)
+            rejected = sum(item[1] for item in aggregates) / len(aggregates)
+            return (accepted, rejected)
+
+    return (0.0, 0.0)
+
+
+def mutation_ucb_score(
+    *,
+    accepted: float,
+    rejected: float,
+    total_observations: float,
+    explore: float,
+    preference_class: int,
+    schedule_tier: int,
+    attempt_count: int,
+) -> float:
+    observations = max(0.0, accepted + rejected)
+    posterior_mean = (accepted + 1.0) / (observations + 2.0)
+    bonus = max(0.0, explore) * math.sqrt(math.log(max(2.0, total_observations + 2.0)) / (observations + 1.0))
+    preference_bonus = 0.0
+    if preference_class == 0:
+        preference_bonus = 0.05
+    elif preference_class == 1:
+        preference_bonus = 0.025
+    tier_bonus = 0.02 if schedule_tier == 0 else 0.0
+    attempt_penalty = min(0.25, 0.01 * max(0, attempt_count))
+    return posterior_mean + bonus + preference_bonus + tier_bonus - attempt_penalty
+
+
+def required_snippets_from_target(target_config: dict[str, Any]) -> list[str]:
+    raw = target_config.get("required_snippets")
+    if not isinstance(raw, list):
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        token = item.strip()
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        out.append(token)
+    return out
+
+
+def required_snippet_profile(source: str, snippets: list[str]) -> dict[str, int]:
+    profile: dict[str, int] = {}
+    for snippet in snippets:
+        count = source.count(snippet)
+        if count > 0:
+            profile[snippet] = count
+    return profile
+
+
+def required_snippet_guard(candidate: str, profile: dict[str, int]) -> tuple[bool, dict[str, Any]]:
+    if not profile:
+        return True, {"required_snippets": 0, "violations": []}
+
+    violations: list[dict[str, Any]] = []
+    for snippet, required in profile.items():
+        observed = candidate.count(snippet)
+        if observed >= required:
+            continue
+        violations.append(
+            {
+                "id": hashlib.sha1(snippet.encode("utf-8")).hexdigest()[:12],
+                "required": required,
+                "observed": observed,
+            }
+        )
+
+    return len(violations) == 0, {"required_snippets": len(profile), "violations": violations}
+
+
 def make_run_label() -> str:
     stamp = re.sub(r"[^0-9A-Za-z]+", "", prepare.now_iso())
     return f"run_{stamp}_{os.getpid()}"
@@ -2131,6 +2341,17 @@ def run_loop(args: argparse.Namespace) -> int:
     ab_repeats = int(target.get("ab_repeats", 0))
     max_rel_stdev = target.get("max_rel_stdev")
     max_rel_stdev_f = float(max_rel_stdev) if max_rel_stdev is not None else None
+    required_snippets = required_snippets_from_target(target)
+    required_snippet_counts = required_snippet_profile(source_path.read_text(), required_snippets)
+    if required_snippets and not required_snippet_counts:
+        train_log(
+            args,
+            (
+                "required_snippets configured but none were matched in source; "
+                "skipping snippet-preservation guardrail for this target"
+            ),
+            level=1,
+        )
 
     prepare.append_log(
         {
@@ -2161,6 +2382,14 @@ def run_loop(args: argparse.Namespace) -> int:
                 "require_ci_separation": require_ci_separation,
                 "min_series_samples": min_series_samples,
                 "ab_repeats": ab_repeats,
+            },
+            "mutation_strategy": {
+                "schedule": str(target.get("mutation_schedule", "priority")),
+                "ucb_explore": float(target.get("mutation_ucb_explore", 0.75)),
+            },
+            "source_guardrails": {
+                "required_snippets": len(required_snippet_counts),
+                "mode": "snippet_count_preservation",
             },
         }
     )
@@ -2252,6 +2481,8 @@ def run_loop(args: argparse.Namespace) -> int:
                     mutation_attempts=mutation_attempts,
                     target_config=target,
                     preferred_mutations=preferred_mutations,
+                    mutation_memory=mutation_memory,
+                    target_name=args.target,
                 )
                 mutation = f"fallback_{mutation}"
             else:
@@ -2267,6 +2498,8 @@ def run_loop(args: argparse.Namespace) -> int:
                 mutation_attempts=mutation_attempts,
                 target_config=target,
                 preferred_mutations=preferred_mutations,
+                mutation_memory=mutation_memory,
+                target_name=args.target,
             )
 
         if (
@@ -2294,6 +2527,8 @@ def run_loop(args: argparse.Namespace) -> int:
                     mutation_attempts=mutation_attempts,
                     target_config=target,
                     preferred_mutations=preferred_mutations,
+                    mutation_memory=mutation_memory,
+                    target_name=args.target,
                 )
 
         if not changed:
@@ -2319,6 +2554,68 @@ def run_loop(args: argparse.Namespace) -> int:
         mutation_key = normalize_mutation_label(mutation) or mutation
         mutation_attempts[mutation_key] = mutation_attempts.get(mutation_key, 0) + 1
         train_log(args, f"iter {iteration}: evaluating mutation={mutation_key}", level=2)
+
+        guard_ok, guard_details = required_snippet_guard(candidate, required_snippet_counts)
+        if not guard_ok:
+            diagnostics["required_snippets"] = guard_details
+            blocked_mutations_until[mutation_key] = iteration + blocked_mutation_ttl
+
+            if mutation_memory is not None and language_norm == "rust":
+                mutation_memory = update_and_save_mutation_memory(
+                    mutation_memory_path,
+                    mutation_memory,
+                    mutation=mutation_key,
+                    accepted=False,
+                    target_name=args.target,
+                    language=infer_mutation_language(mutation=mutation_key, target_language=language_norm),
+                    timestamp=prepare.now_iso(),
+                    metric_before=None,
+                    metric_after=None,
+                )
+
+            violation_ids = ",".join(v.get("id", "") for v in guard_details.get("violations", []) if isinstance(v, dict))
+            guard_notes = (
+                f"rejected_guardrail_required_snippets:{mutation};"
+                f"violations={violation_ids or 'unknown'}"
+            )
+            prepare.append_result_row(
+                target=args.target,
+                iteration=iteration,
+                status="skipped",
+                metric_name=target["metric_name"],
+                metric_value=best_metric,
+                higher_is_better=bool(target["higher_is_better"]),
+                check_s=0.0,
+                info_or_bench_s=0.0,
+                execute_s=0.0,
+                notes=f"{guard_notes};run={run_label}",
+            )
+            prepare.append_log(
+                {
+                    "event": "loop_iteration",
+                    "timestamp": prepare.now_iso(),
+                    "target": args.target,
+                    "iteration": iteration,
+                    "mutation": mutation,
+                    "mutation_key": mutation_key,
+                    "accepted": False,
+                    "best_metric": best_metric,
+                    "effective_threshold": threshold_diag,
+                    "result": {
+                        "status": "guardrail_rejected",
+                        "metric_name": target["metric_name"],
+                        "metric_value": best_metric,
+                        "notes": guard_notes,
+                    },
+                    "diagnostics": diagnostics,
+                },
+            )
+            train_log(
+                args,
+                f"iter {iteration}: rejected mutation={mutation_key} reason=required_snippet_guardrail",
+                level=1,
+            )
+            continue
 
         source_path.write_text(candidate)
         try:

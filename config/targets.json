@@ -84,6 +84,8 @@
       "compound_every": 3,
       "compound_limit": 10,
       "compound_second_window": 6,
+      "mutation_schedule": "ucb",
+      "mutation_ucb_explore": 0.60,
       "benchmark_command": [
         "cargo",
         "run",
@@ -122,6 +124,8 @@
       "compound_every": 2,
       "compound_limit": 8,
       "compound_second_window": 5,
+      "mutation_schedule": "ucb",
+      "mutation_ucb_explore": 0.60,
       "benchmark_command": [
         "cargo",
         "run",
@@ -165,6 +169,13 @@
       "compound_every": 2,
       "compound_limit": 14,
       "compound_second_window": 10,
+      "mutation_schedule": "ucb",
+      "mutation_ucb_explore": 0.50,
+      "required_snippets": [
+        "add_rc_and_sbox::<FP, D>(&mut internal_state.s0, rc);",
+        "ILP::diagonal_mul(&mut internal_state.s_hi);",
+        "ILP::add_sum("
+      ],
       "benchmark_command": [
         "cargo",
         "run",
@@ -209,6 +220,13 @@
       "compound_every": 2,
       "compound_limit": 14,
       "compound_second_window": 10,
+      "mutation_schedule": "ucb",
+      "mutation_ucb_explore": 0.50,
+      "required_snippets": [
+        "add_rc_and_sbox::<FP, D>(&mut internal_state.s0, rc);",
+        "ILP::diagonal_mul(&mut internal_state.s_hi);",
+        "ILP::add_sum("
+      ],
       "benchmark_command": [
         "cargo",
         "run",
@@ -253,6 +271,14 @@
       "compound_every": 2,
       "compound_limit": 10,
       "compound_second_window": 8,
+      "mutation_schedule": "ucb",
+      "mutation_ucb_explore": 0.55,
+      "required_snippets": [
+        "state[0] = state[0].injective_exp_n();",
+        "P2P::internal_layer_mat_mul(state, full_sum);",
+        "external_initial_permute_state(",
+        "external_terminal_permute_state("
+      ],
       "benchmark_command": [
         "cargo",
         "run",
@@ -297,6 +323,8 @@
       "compound_every": 2,
       "compound_limit": 10,
       "compound_second_window": 8,
+      "mutation_schedule": "ucb",
+      "mutation_ucb_explore": 0.55,
       "benchmark_command": [
         "cargo",
         "run",
