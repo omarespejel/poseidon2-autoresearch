@@ -658,30 +658,38 @@ def rust_mutator_avx_sum_vec_hoist_w24(source: str) -> tuple[str, str, bool]:
 
 
 def rust_mutator_avx_sum_vec_hoist_both(source: str) -> tuple[str, str, bool]:
-    variants = [
-        (
-            "                ILP::add_sum(\n"
-            "                    &mut internal_state.s_hi,\n"
-            "                    transmute::<PackedMontyField31AVX2<FP>, __m256i>(sum),\n"
-            "                );",
-            "                let sum_vec = transmute::<PackedMontyField31AVX2<FP>, __m256i>(sum);\n"
-            "                ILP::add_sum(&mut internal_state.s_hi, sum_vec);",
-            "rust_avx_sum_vec_hoist_both",
-        ),
-        (
-            "                ILP::add_sum(\n"
-            "                    &mut internal_state.s_hi,\n"
-            "                    transmute::<PackedMontyField31AVX512<FP>, __m512i>(sum),\n"
-            "                );",
-            "                let sum_vec = transmute::<PackedMontyField31AVX512<FP>, __m512i>(sum);\n"
-            "                ILP::add_sum(&mut internal_state.s_hi, sum_vec);",
-            "rust_avx512_sum_vec_hoist_both",
-        ),
-    ]
-    for old, new, name in variants:
-        if source.count(old) >= 2:
-            return source.replace(old, new, 2), name, True
-    return source, "rust_avx_sum_vec_hoist_both:pattern_missing", False
+    avx2_old = (
+        "                ILP::add_sum(\n"
+        "                    &mut internal_state.s_hi,\n"
+        "                    transmute::<PackedMontyField31AVX2<FP>, __m256i>(sum),\n"
+        "                );"
+    )
+    avx2_new = (
+        "                let sum_vec = transmute::<PackedMontyField31AVX2<FP>, __m256i>(sum);\n"
+        "                ILP::add_sum(&mut internal_state.s_hi, sum_vec);"
+    )
+    avx512_old = (
+        "                ILP::add_sum(\n"
+        "                    &mut internal_state.s_hi,\n"
+        "                    transmute::<PackedMontyField31AVX512<FP>, __m512i>(sum),\n"
+        "                );"
+    )
+    avx512_new = (
+        "                let sum_vec = transmute::<PackedMontyField31AVX512<FP>, __m512i>(sum);\n"
+        "                ILP::add_sum(&mut internal_state.s_hi, sum_vec);"
+    )
+
+    candidate = source
+    changed = False
+    if avx2_old in candidate:
+        candidate = candidate.replace(avx2_old, avx2_new, 1)
+        changed = True
+    if avx512_old in candidate:
+        candidate = candidate.replace(avx512_old, avx512_new, 1)
+        changed = True
+    if not changed:
+        return source, "rust_avx_sum_vec_hoist_both:pattern_missing", False
+    return candidate, "rust_avx_sum_vec_hoist_both", True
 
 
 def rust_mutator_hoist_log_num_cols(source: str) -> tuple[str, str, bool]:

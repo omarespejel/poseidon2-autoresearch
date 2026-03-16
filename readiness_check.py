@@ -349,13 +349,15 @@ def build_checks(
                 details="ok" if reg_tx else "missing erc8004.registration_tx in submission receipts",
             )
         )
-        checks.append(
-            CheckResult(
-                name="submission_receipts_registration_tx_format",
-                ok=looks_like_onchain_receipt(reg_tx),
-                details="onchain receipt format detected" if looks_like_onchain_receipt(reg_tx) else "registration tx is not hash/url-like",
+        if reg_tx:
+            receipt_ok = looks_like_onchain_receipt(reg_tx)
+            checks.append(
+                CheckResult(
+                    name="submission_receipts_registration_tx_format",
+                    ok=receipt_ok,
+                    details="onchain receipt format detected" if receipt_ok else "registration tx is not hash/url-like",
+                )
             )
-        )
         checks.append(
             CheckResult(
                 name="submission_receipts_additional_evidence",
