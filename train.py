@@ -969,6 +969,11 @@ def file_lock(lock_path: Path) -> Any:
     if os.name == "nt":
         import msvcrt
 
+        lock_file.seek(0, os.SEEK_END)
+        if lock_file.tell() == 0:
+            lock_file.write("\0")
+            lock_file.flush()
+        lock_file.seek(0)
         msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
         try:
             yield
@@ -988,7 +993,7 @@ def file_lock(lock_path: Path) -> Any:
 
 
 def load_mutation_memory(path: Path) -> dict[str, Any]:
-    base: dict[str, Any] = {"version": 1, "updated_at": None, "mutations": {}}
+    base: dict[str, Any] = {"version": 1, "updated_at": None, "seeded_from_results": False, "mutations": {}}
     if path.exists():
         try:
             payload = json.loads(path.read_text())
@@ -997,6 +1002,7 @@ def load_mutation_memory(path: Path) -> dict[str, Any]:
         if isinstance(payload, dict):
             payload.setdefault("version", 1)
             payload.setdefault("updated_at", None)
+            payload.setdefault("seeded_from_results", False)
             payload.setdefault("mutations", {})
             if isinstance(payload.get("mutations"), dict):
                 return payload
@@ -1004,12 +1010,13 @@ def load_mutation_memory(path: Path) -> dict[str, Any]:
 
 
 def seed_mutation_memory_from_results(memory: dict[str, Any]) -> None:
+    if bool(memory.get("seeded_from_results")):
+        return
+
     mutations = memory.get("mutations")
     if not isinstance(mutations, dict):
         memory["mutations"] = {}
         mutations = memory["mutations"]
-    if mutations:
-        return
 
     targets = prepare.load_targets()
     target_language_map: dict[str, str] = {}
@@ -1024,9 +1031,11 @@ def seed_mutation_memory_from_results(memory: dict[str, Any]) -> None:
 
     results_file = ROOT / "results.tsv"
     if not results_file.exists():
+        memory["seeded_from_results"] = True
         return
     rows = results_file.read_text().splitlines()
     if len(rows) <= 1:
+        memory["seeded_from_results"] = True
         return
 
     for row in rows[1:]:
@@ -1060,6 +1069,7 @@ def seed_mutation_memory_from_results(memory: dict[str, Any]) -> None:
             metric_before=None,
             metric_after=None,
         )
+    memory["seeded_from_results"] = True
 
 
 def save_mutation_memory(path: Path, memory: dict[str, Any]) -> None:
