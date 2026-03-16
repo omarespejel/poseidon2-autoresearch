@@ -1748,9 +1748,15 @@ def run_loop(args: argparse.Namespace) -> int:
     if not mutation_memory_path.is_absolute():
         mutation_memory_path = ROOT / mutation_memory_path
     mutation_memory: dict[str, Any] | None = None
-    if not args.disable_mutation_memory:
-        mutation_memory = load_mutation_memory(mutation_memory_path)
-        seed_mutation_memory_from_results(mutation_memory)
+    mutation_memory_enabled = (not args.disable_mutation_memory) and language_norm == "rust"
+    if mutation_memory_enabled:
+        # Persist seeded history to disk before iterations start so per-iteration
+        # read/modify/write updates do not discard in-process seeded state.
+        lock_path = mutation_memory_path.with_suffix(mutation_memory_path.suffix + ".lock")
+        with file_lock(lock_path):
+            mutation_memory = load_mutation_memory(mutation_memory_path)
+            seed_mutation_memory_from_results(mutation_memory)
+            save_mutation_memory(mutation_memory_path, mutation_memory)
 
     max_iterations = args.iterations if args.iterations > 0 else None
     iterations_label = str(args.iterations) if max_iterations is not None else "infinite"
@@ -2128,7 +2134,7 @@ def run_loop(args: argparse.Namespace) -> int:
             if not improved:
                 blocked_mutations_until[mutation_key] = iteration + blocked_mutation_ttl
 
-            if mutation_memory is not None:
+            if mutation_memory is not None and language_norm == "rust":
                 mutation_memory = update_and_save_mutation_memory(
                     mutation_memory_path,
                     mutation_memory,

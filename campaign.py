@@ -141,6 +141,15 @@ def add_debug_flags(argv: list[str], args: argparse.Namespace) -> list[str]:
     return out
 
 
+def add_mutation_memory_flags(argv: list[str], args: argparse.Namespace) -> list[str]:
+    out = list(argv)
+    if args.mutation_memory_file:
+        out.extend(["--mutation-memory-file", args.mutation_memory_file])
+    if args.disable_mutation_memory:
+        out.append("--disable-mutation-memory")
+    return out
+
+
 def prepare_cmd(args: argparse.Namespace, *tail: str) -> list[str]:
     base = [sys.executable, str(PREPARE)]
     return add_debug_flags(base, args) + list(tail)
@@ -148,12 +157,12 @@ def prepare_cmd(args: argparse.Namespace, *tail: str) -> list[str]:
 
 def train_cmd(args: argparse.Namespace, *tail: str) -> list[str]:
     base = [sys.executable, str(LOOP)]
-    return add_debug_flags(base, args) + list(tail)
+    return add_mutation_memory_flags(add_debug_flags(base, args), args) + list(tail)
 
 
 def portfolio_cmd(args: argparse.Namespace, *tail: str) -> list[str]:
     base = [sys.executable, str(PORTFOLIO)]
-    return add_debug_flags(base, args) + list(tail)
+    return add_mutation_memory_flags(add_debug_flags(base, args), args) + list(tail)
 
 
 def write_report(
@@ -351,6 +360,16 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.75,
         help="UCB exploration coefficient for real-source optimization",
+    )
+    parser.add_argument(
+        "--mutation-memory-file",
+        default="",
+        help="Optional path forwarded to train.py/portfolio_loop.py --mutation-memory-file",
+    )
+    parser.add_argument(
+        "--disable-mutation-memory",
+        action="store_true",
+        help="Disable cross-target mutation replay in train.py and portfolio_loop.py",
     )
     parser.add_argument(
         "--build-evidence",
