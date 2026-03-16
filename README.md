@@ -38,6 +38,7 @@ From repository root:
 python3 prepare.py list-targets
 python3 prepare.py baseline --target cairo_poseidon_style_t8 --notes baseline
 python3 train.py --target cairo_poseidon_style_t8 --iterations 12 --max-accepted 3
+# Track B evaluation harness example
 python3 prepare.py evaluate --target poseidon2_cryptanalysis_trackb_fast
 ```
 

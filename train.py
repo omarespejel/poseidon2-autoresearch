@@ -944,17 +944,6 @@ def json_heuristic_candidate(
         analysis["split_round"] = updated
         return True
 
-    def apply_seed_roll(obj: dict[str, Any]) -> bool:
-        section = obj.get("search")
-        if not isinstance(section, dict):
-            return False
-        try:
-            current = int(section.get("seed"))
-        except (TypeError, ValueError):
-            return False
-        section["seed"] = current + 101
-        return True
-
     def apply_float_delta(
         obj: dict[str, Any],
         *,
@@ -1043,7 +1032,6 @@ def json_heuristic_candidate(
         ("json_trackb_preimage_attempts_down", op_search("preimage_attempts_per_trial", -512, 32, 1_000_000)),
         ("json_trackb_preimage_trials_up", op_search("preimage_trials", +2, 2, 4096)),
         ("json_trackb_preimage_trials_down", op_search("preimage_trials", -2, 2, 4096)),
-        ("json_trackb_seed_roll", apply_seed_roll),
     ]
 
     shift = (iteration - 1) % len(operators)

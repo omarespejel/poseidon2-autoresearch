@@ -723,6 +723,7 @@ def evaluate_command_profile(
     total_invocations = warmup_runs + runs
 
     for invocation in range(total_invocations):
+        invocation_start_ns = time.time_ns()
         bench = run_cmd(benchmark_command, project_dir)
         total_seconds += bench.seconds
         bench_runs.append(command_result_to_json(bench))
@@ -759,7 +760,11 @@ def evaluate_command_profile(
                 json_path = project_dir / json_path
             if json_path.exists():
                 try:
-                    payload = json.loads(json_path.read_text(encoding="utf-8"))
+                    stat = json_path.stat()
+                    if stat.st_mtime_ns < invocation_start_ns:
+                        payload = None
+                    else:
+                        payload = json.loads(json_path.read_text(encoding="utf-8"))
                 except (OSError, json.JSONDecodeError):
                     payload = None
                 value = extract_metric_from_json_payload(payload, metric_json_path)

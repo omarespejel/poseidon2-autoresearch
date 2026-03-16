@@ -246,7 +246,6 @@ def build_spec(config: dict[str, Any], *, mode: str) -> Poseidon2Spec:
     external_matrix_inv = matrix_inverse(external_matrix, modulus)
     internal_matrix_inv = matrix_inverse(internal_matrix, modulus)
 
-    full_half = full_rounds // 2
     external_round_constants: list[list[int]] = []
     for r in range(full_rounds):
         row: list[int] = []
@@ -751,11 +750,21 @@ def main(argv: list[str] | None = None) -> int:
     spec = build_spec(config, mode=args.mode)
     search = parse_search(config, mode=args.mode)
     analysis = parse_analysis(config, spec)
-    rng = random.Random(int(search["seed"]))
+    base_seed = int(search["seed"])
 
-    differential = differential_kernel(spec=spec, analysis=analysis, search=search, rng=rng)
-    mitm_preimage = mitm_truncated_preimage_kernel(spec=spec, analysis=analysis, search=search, rng=rng)
-    collision = birthday_collision_kernel(spec=spec, analysis=analysis, search=search, rng=rng)
+    def kernel_rng(label: str) -> random.Random:
+        material = f"{base_seed}:{args.mode}:{label}".encode("utf-8")
+        seed = int.from_bytes(hashlib.sha256(material).digest()[:8], "big")
+        return random.Random(seed)  # noqa: S311 - deterministic benchmarking harness, not crypto RNG.
+
+    differential = differential_kernel(spec=spec, analysis=analysis, search=search, rng=kernel_rng("differential"))
+    mitm_preimage = mitm_truncated_preimage_kernel(
+        spec=spec,
+        analysis=analysis,
+        search=search,
+        rng=kernel_rng("mitm_preimage"),
+    )
+    collision = birthday_collision_kernel(spec=spec, analysis=analysis, search=search, rng=kernel_rng("collision"))
     metrics = score(
         config=config,
         search=search,
