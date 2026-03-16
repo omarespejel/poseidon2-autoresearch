@@ -53,6 +53,9 @@ ALLOWED_TARGET_OVERRIDE_KEYS = {
 DEFAULT_MUTATION_MEMORY_FILE = ROOT / "work" / "mutation_memory.json"
 DEFAULT_MUTATION_MEMORY_MAX_ENTRIES = 512
 DEFAULT_MUTATION_MEMORY_STALE_SECONDS = 14 * 24 * 60 * 60
+DEFAULT_MUTATION_MEMORY_ACCEPTED_STALE_MULTIPLIER = 4.0
+DEFAULT_MUTATION_MEMORY_MIN_ACCEPTED_TOTAL = 2
+DEFAULT_MUTATION_MEMORY_MIN_SUCCESS_RATE = 0.30
 
 
 def configure_debug_environment(args: argparse.Namespace) -> None:
@@ -1135,18 +1138,24 @@ def compact_mutation_memory(
     now_epoch: float,
     stale_seconds: int = DEFAULT_MUTATION_MEMORY_STALE_SECONDS,
     max_entries: int = DEFAULT_MUTATION_MEMORY_MAX_ENTRIES,
+    accepted_stale_multiplier: float = DEFAULT_MUTATION_MEMORY_ACCEPTED_STALE_MULTIPLIER,
 ) -> None:
     if stale_seconds > 0:
         cutoff = now_epoch - float(stale_seconds)
+        accepted_cutoff: float | None = None
+        if accepted_stale_multiplier > 0:
+            accepted_cutoff = now_epoch - (float(stale_seconds) * float(accepted_stale_multiplier))
         stale_keys: list[str] = []
         for mutation, raw in mutations.items():
             if not isinstance(raw, dict):
                 stale_keys.append(mutation)
                 continue
             accepted_total = int(raw.get("accepted_total", 0))
-            if accepted_total > 0:
-                continue
             last_seen_epoch = parse_iso_to_epoch(raw.get("last_seen_at"))
+            if accepted_total > 0:
+                if accepted_cutoff is not None and last_seen_epoch and last_seen_epoch < accepted_cutoff:
+                    stale_keys.append(mutation)
+                continue
             if last_seen_epoch and last_seen_epoch < cutoff:
                 stale_keys.append(mutation)
         for key in stale_keys:
@@ -1266,6 +1275,8 @@ def preferred_mutations_from_memory(
     target_name: str,
     language: str,
     limit: int = 8,
+    min_accepted_total: int = DEFAULT_MUTATION_MEMORY_MIN_ACCEPTED_TOTAL,
+    min_success_rate: float = DEFAULT_MUTATION_MEMORY_MIN_SUCCESS_RATE,
 ) -> list[str]:
     mutations = memory.get("mutations")
     if not isinstance(mutations, dict):
@@ -1302,6 +1313,8 @@ def preferred_mutations_from_memory(
         cross_target_tier = 0 if has_current_target_success else 1
         total = accepted_total + max(0, rejected_total)
         success_rate = accepted_total / total if total > 0 else 0.0
+        if accepted_total < max(0, min_accepted_total) and success_rate < max(0.0, min_success_rate):
+            continue
         ranked.append((cross_target_tier, -success_rate, -accepted_total, mutation))
 
     ranked.sort()
