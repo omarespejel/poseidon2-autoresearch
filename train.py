@@ -897,8 +897,16 @@ def json_heuristic_candidate(
     def clone_obj() -> dict[str, Any]:
         return json.loads(json.dumps(payload))
 
-    def apply_delta(obj: dict[str, Any], key: str, delta: int, lo: int, hi: int) -> bool:
-        section = obj.get("search")
+    def apply_delta(
+        obj: dict[str, Any],
+        *,
+        section_name: str,
+        key: str,
+        delta: int,
+        lo: int,
+        hi: int,
+    ) -> bool:
+        section = obj.get(section_name)
         if not isinstance(section, dict):
             return False
         try:
@@ -909,6 +917,31 @@ def json_heuristic_candidate(
         if updated == current:
             return False
         section[key] = updated
+        return True
+
+    def total_rounds(obj: dict[str, Any]) -> int:
+        poseidon_cfg = obj.get("poseidon2")
+        if not isinstance(poseidon_cfg, dict):
+            return 21
+        full_rounds = max(2, int(poseidon_cfg.get("full_rounds", 8)))
+        if full_rounds % 2 != 0:
+            full_rounds += 1
+        partial_rounds = max(1, int(poseidon_cfg.get("partial_rounds", 13)))
+        return full_rounds + partial_rounds
+
+    def apply_split_round(obj: dict[str, Any], delta: int) -> bool:
+        analysis = obj.get("analysis")
+        if not isinstance(analysis, dict):
+            return False
+        try:
+            current = int(analysis.get("split_round"))
+        except (TypeError, ValueError):
+            return False
+        rounds = total_rounds(obj)
+        updated = max(1, min(max(2, rounds - 1), current + delta))
+        if updated == current:
+            return False
+        analysis["split_round"] = updated
         return True
 
     def apply_seed_roll(obj: dict[str, Any]) -> bool:
@@ -922,21 +955,58 @@ def json_heuristic_candidate(
         section["seed"] = current + 101
         return True
 
+    def op_search(key: str, delta: int, lo: int, hi: int) -> Any:
+        return lambda obj: apply_delta(
+            obj,
+            section_name="search",
+            key=key,
+            delta=delta,
+            lo=lo,
+            hi=hi,
+        )
+
+    def op_analysis(key: str, delta: int, lo: int, hi: int) -> Any:
+        return lambda obj: apply_delta(
+            obj,
+            section_name="analysis",
+            key=key,
+            delta=delta,
+            lo=lo,
+            hi=hi,
+        )
+
     operators: list[tuple[str, Any]] = [
-        ("json_trackb_delta_candidates_up", lambda obj: apply_delta(obj, "delta_candidates", +8, 4, 4096)),
-        ("json_trackb_delta_candidates_down", lambda obj: apply_delta(obj, "delta_candidates", -8, 4, 4096)),
-        ("json_trackb_samples_per_delta_up", lambda obj: apply_delta(obj, "samples_per_delta", +64, 16, 131072)),
-        ("json_trackb_samples_per_delta_down", lambda obj: apply_delta(obj, "samples_per_delta", -64, 16, 131072)),
+        ("json_trackb_diff_candidates_up", op_search("differential_candidates", +8, 4, 65536)),
+        ("json_trackb_diff_candidates_down", op_search("differential_candidates", -8, 4, 65536)),
         (
-            "json_trackb_preimage_attempts_up",
-            lambda obj: apply_delta(obj, "preimage_attempts_per_trial", +512, 32, 1_000_000),
+            "json_trackb_diff_samples_up",
+            op_search("differential_samples_per_candidate", +32, 8, 1_000_000),
         ),
         (
-            "json_trackb_preimage_attempts_down",
-            lambda obj: apply_delta(obj, "preimage_attempts_per_trial", -512, 32, 1_000_000),
+            "json_trackb_diff_samples_down",
+            op_search("differential_samples_per_candidate", -32, 8, 1_000_000),
         ),
-        ("json_trackb_preimage_trials_up", lambda obj: apply_delta(obj, "preimage_trials", +2, 2, 4096)),
-        ("json_trackb_preimage_trials_down", lambda obj: apply_delta(obj, "preimage_trials", -2, 2, 4096)),
+        ("json_trackb_mitm_forward_up", op_search("mitm_forward_states", +256, 64, 1_000_000)),
+        ("json_trackb_mitm_forward_down", op_search("mitm_forward_states", -256, 64, 1_000_000)),
+        ("json_trackb_mitm_backward_up", op_search("mitm_backward_states", +256, 64, 1_000_000)),
+        ("json_trackb_mitm_backward_down", op_search("mitm_backward_states", -256, 64, 1_000_000)),
+        ("json_trackb_collision_samples_up", op_search("collision_samples", +512, 64, 1_000_000)),
+        ("json_trackb_collision_samples_down", op_search("collision_samples", -512, 64, 1_000_000)),
+        ("json_trackb_split_round_up", lambda obj: apply_split_round(obj, +1)),
+        ("json_trackb_split_round_down", lambda obj: apply_split_round(obj, -1)),
+        ("json_trackb_middle_key_bits_up", op_analysis("middle_key_bits", +1, 6, 30)),
+        ("json_trackb_middle_key_bits_down", op_analysis("middle_key_bits", -1, 6, 30)),
+        ("json_trackb_truncated_bits_up", op_analysis("truncated_bits", +1, 8, 30)),
+        ("json_trackb_truncated_bits_down", op_analysis("truncated_bits", -1, 8, 30)),
+        # Backward-compatible operators for earlier config schema.
+        ("json_trackb_delta_candidates_up", op_search("delta_candidates", +8, 4, 4096)),
+        ("json_trackb_delta_candidates_down", op_search("delta_candidates", -8, 4, 4096)),
+        ("json_trackb_samples_per_delta_up", op_search("samples_per_delta", +64, 16, 131072)),
+        ("json_trackb_samples_per_delta_down", op_search("samples_per_delta", -64, 16, 131072)),
+        ("json_trackb_preimage_attempts_up", op_search("preimage_attempts_per_trial", +512, 32, 1_000_000)),
+        ("json_trackb_preimage_attempts_down", op_search("preimage_attempts_per_trial", -512, 32, 1_000_000)),
+        ("json_trackb_preimage_trials_up", op_search("preimage_trials", +2, 2, 4096)),
+        ("json_trackb_preimage_trials_down", op_search("preimage_trials", -2, 2, 4096)),
         ("json_trackb_seed_roll", apply_seed_roll),
     ]
 

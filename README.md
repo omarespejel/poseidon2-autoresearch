@@ -237,7 +237,12 @@ Reference implementation context can be inspected in:
 
 ## Track B Cryptanalysis Targets
 
-Track B uses command targets that optimize a deterministic `attack_score` extracted from JSON output:
+Track B uses command targets that optimize a deterministic `attack_score` extracted from JSON output.
+The harness runs reduced-round Poseidon2-style kernels over a prime field:
+
+- differential bias search on truncated output deltas
+- meet-in-the-middle truncated preimage search (prefix/suffix split with inversion)
+- birthday-style truncated collision search
 
 - `poseidon2_cryptanalysis_trackb_fast`
 - `poseidon2_cryptanalysis_trackb_full`
@@ -245,6 +250,7 @@ Track B uses command targets that optimize a deterministic `attack_score` extrac
 Quick start:
 
 ```bash
+python3 attack_harness.py --config config/track_b_attack_config.json --mode fast --output-format pretty
 python3 prepare.py baseline --target poseidon2_cryptanalysis_trackb_fast --notes trackb_baseline
 python3 train.py --target poseidon2_cryptanalysis_trackb_fast --iterations 12 --max-accepted 2 -v
 ```

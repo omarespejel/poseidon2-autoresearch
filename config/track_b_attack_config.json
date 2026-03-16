@@ -1,27 +1,43 @@
 {
-  "challenge": {
-    "field_modulus": 65537,
-    "full_rounds": 8,
-    "partial_rounds": 22,
-    "preimage_target_bits": 12,
-    "round_constants_seed": 1729,
-    "sbox_power": 5,
+  "analysis": {
+    "middle_key_bits": 12,
+    "middle_key_lanes": [
+      0,
+      1
+    ],
+    "split_round": 11,
     "target_lane": 0,
-    "width": 3
+    "truncated_bits": 22
   },
   "objective": {
     "attack_found_bonus": 1.0,
-    "attack_found_threshold_bits": 8.0,
-    "complexity_cap_bits": 24.0,
-    "cost_penalty_scale": 0.1,
-    "weight_differential": 0.7,
-    "weight_preimage": 0.3
+    "attack_found_threshold_bits": 6.5,
+    "complexity_cap_bits": 28.0,
+    "cost_penalty_scale": 0.06,
+    "weight_collision": 0.2,
+    "weight_differential": 0.35,
+    "weight_preimage": 0.45
+  },
+  "poseidon2": {
+    "constants_seed": "trackb-poseidon2-v2",
+    "field_modulus": 2130706433,
+    "full_rounds": 8,
+    "internal_diagonal": [
+      2,
+      3,
+      5
+    ],
+    "partial_rounds": 13,
+    "sbox_power": 5,
+    "width": 3
   },
   "search": {
-    "delta_candidates": 40,
-    "preimage_attempts_per_trial": 4096,
-    "preimage_trials": 16,
-    "samples_per_delta": 192,
+    "collision_samples": 4096,
+    "differential_candidates": 56,
+    "differential_samples_per_candidate": 128,
+    "mitm_backward_states": 3072,
+    "mitm_forward_states": 3072,
+    "scale_rounds_in_full_mode": 0,
     "seed": 1337
   }
 }
