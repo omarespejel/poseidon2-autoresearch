@@ -20,6 +20,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import readiness_check
+
 ROOT = Path(__file__).resolve().parent
 PREPARE = ROOT / "prepare.py"
 LOOP = ROOT / "train.py"
@@ -37,15 +39,7 @@ EVIDENCE_DIR = ROOT / "evidence"
 SUBMISSION_DIR = ROOT / "submission"
 MUTATION_MEMORY = ROOT / "work" / "mutation_memory.json"
 
-DEFAULT_INFORMATIONAL_READINESS_CHECKS: frozenset[str] = frozenset(
-    {
-        "recent_activity_24h",
-        "submission_multi_tool_orchestration",
-        "submission_receipts_additional_evidence",
-        "submission_safety_guardrails_populated",
-        "submission_compute_budget_usage",
-    }
-)
+DEFAULT_INFORMATIONAL_READINESS_CHECKS: frozenset[str] = readiness_check.INFORMATIONAL_CHECKS
 
 
 def resolve_poseidon_arch() -> str:
