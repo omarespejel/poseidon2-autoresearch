@@ -1744,11 +1744,13 @@ def mutation_memory_counts(
     if "+" in mutation:
         parts = [part.strip() for part in mutation.split("+") if part.strip()]
         aggregates = [entry_counts(part) for part in parts]
-        aggregates = [item for item in aggregates if item is not None]
-        if aggregates:
-            accepted = sum(item[0] for item in aggregates) / len(aggregates)
-            rejected = sum(item[1] for item in aggregates) / len(aggregates)
-            return (accepted, rejected)
+        # Treat partially-known compounds as unknown to preserve exploration.
+        if not aggregates or any(item is None for item in aggregates):
+            return (0.0, 0.0)
+
+        accepted = sum(item[0] for item in aggregates if item is not None) / len(aggregates)
+        rejected = sum(item[1] for item in aggregates if item is not None) / len(aggregates)
+        return (accepted, rejected)
 
     return (0.0, 0.0)
 
@@ -1833,11 +1835,11 @@ def strip_rust_comments_and_literals(source: str) -> str:
                 while j < n and source[j] == "#":
                     j += 1
                 if j < n and source[j] == '"':
+                    hash_count = j - i - 1
                     out.extend(" " * (j - i + 1))
                     i = j + 1
                     state = "raw_string"
-                    raw_hashes = j - (i - (j - i + 1) + 1)  # replaced below for clarity
-                    raw_hashes = j - (i - 1) - 1
+                    raw_hashes = hash_count
                     continue
 
             out.append(ch)
@@ -2702,19 +2704,6 @@ def run_loop(args: argparse.Namespace) -> int:
         if not guard_ok:
             diagnostics["required_snippets"] = guard_details
             blocked_mutations_until[mutation_key] = iteration + blocked_mutation_ttl
-
-            if mutation_memory is not None and language_norm == "rust":
-                mutation_memory = update_and_save_mutation_memory(
-                    mutation_memory_path,
-                    mutation_memory,
-                    mutation=mutation_key,
-                    accepted=False,
-                    target_name=args.target,
-                    language=infer_mutation_language(mutation=mutation_key, target_language=language_norm),
-                    timestamp=prepare.now_iso(),
-                    metric_before=None,
-                    metric_after=None,
-                )
 
             violation_ids = ",".join(v.get("id", "") for v in guard_details.get("violations", []) if isinstance(v, dict))
             guard_notes = (
