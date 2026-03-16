@@ -88,15 +88,24 @@ def clamp_optional(value: float, *, floor: float = 0.0, cap: float | None = None
 def build_cycle_overrides(
     *,
     calibration: dict[str, dict[str, Any]],
+    min_samples: int,
     rel_floor: float,
     rel_cap: float | None,
     noise_multiplier: float,
     noise_floor: float,
+    noise_floor_ratio: float,
     noise_cap: float | None,
     force_fixed_mode: bool,
 ) -> dict[str, dict[str, Any]]:
     overrides: dict[str, dict[str, Any]] = {}
     for target, stats in calibration.items():
+        try:
+            samples_success = int(stats.get("samples_success", 0))
+        except Exception:  # noqa: BLE001
+            samples_success = 0
+        if samples_success < max(1, min_samples):
+            continue
+
         row: dict[str, Any] = {}
 
         rec_rel = stats.get("recommended_min_improvement_rel")
@@ -115,9 +124,17 @@ def build_cycle_overrides(
         except Exception:  # noqa: BLE001
             rel_stdev_f = None
         if rel_stdev_f is not None:
+            configured_noise_floor = 0.0
+            configured_noise = stats.get("configured_max_rel_stdev")
+            try:
+                configured_noise_f = float(configured_noise)
+                configured_noise_floor = max(0.0, configured_noise_f * max(0.0, noise_floor_ratio))
+            except Exception:  # noqa: BLE001
+                configured_noise_floor = 0.0
+
             guard = clamp_optional(
                 rel_stdev_f * max(0.0, noise_multiplier),
-                floor=max(0.0, noise_floor),
+                floor=max(0.0, noise_floor, configured_noise_floor),
                 cap=noise_cap,
             )
             row["max_rel_stdev"] = guard
@@ -219,12 +236,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--override-rel-floor", type=float, default=0.0, help="Lower bound for relative threshold overrides")
     parser.add_argument("--override-rel-cap", type=float, default=0.05, help="Upper cap for relative threshold overrides")
     parser.add_argument(
+        "--override-min-samples",
+        type=int,
+        default=3,
+        help="Minimum successful calibration samples required before generating overrides",
+    )
+    parser.add_argument(
         "--override-noise-multiplier",
         type=float,
         default=2.0,
         help="Multiply rel_stdev to derive max_rel_stdev override",
     )
     parser.add_argument("--override-noise-floor", type=float, default=0.0, help="Lower bound for max_rel_stdev overrides")
+    parser.add_argument(
+        "--override-noise-floor-ratio",
+        type=float,
+        default=0.5,
+        help="Configured max_rel_stdev ratio used as additional floor when generating noise overrides",
+    )
     parser.add_argument("--override-noise-cap", type=float, default=0.25, help="Upper cap for max_rel_stdev overrides")
     parser.add_argument(
         "--override-force-fixed-mode",
@@ -300,22 +329,36 @@ def main(argv: list[str] | None = None) -> int:
         cycle_data["max_rel_stdev"] = max_rel_stdev
 
         cycle_overrides: dict[str, dict[str, Any]] = {}
+        skipped_overrides: dict[str, str] = {}
         overrides_path = resolve_overrides_path(args.overrides_path)
         if args.auto_threshold_overrides:
             rel_cap = args.override_rel_cap if args.override_rel_cap > 0.0 else None
             noise_cap = args.override_noise_cap if args.override_noise_cap > 0.0 else None
+            for target_name, stats in cycle_data["calibration"].items():
+                try:
+                    samples_success = int(stats.get("samples_success", 0))
+                except Exception:  # noqa: BLE001
+                    samples_success = 0
+                if samples_success < max(1, args.override_min_samples):
+                    skipped_overrides[target_name] = (
+                        f"samples_success={samples_success} < override_min_samples={args.override_min_samples}"
+                    )
             cycle_overrides = build_cycle_overrides(
                 calibration=cycle_data["calibration"],
+                min_samples=args.override_min_samples,
                 rel_floor=args.override_rel_floor,
                 rel_cap=rel_cap,
                 noise_multiplier=args.override_noise_multiplier,
                 noise_floor=args.override_noise_floor,
+                noise_floor_ratio=args.override_noise_floor_ratio,
                 noise_cap=noise_cap,
                 force_fixed_mode=args.override_force_fixed_mode,
             )
             overrides_path.parent.mkdir(parents=True, exist_ok=True)
             overrides_path.write_text(json.dumps(cycle_overrides, indent=2, sort_keys=True) + "\n")
             cycle_data["target_overrides"] = cycle_overrides
+            if skipped_overrides:
+                cycle_data["target_overrides_skipped"] = skipped_overrides
             cycle_data["target_overrides_path"] = str(overrides_path)
 
         portfolio_argv = [
@@ -393,8 +436,10 @@ def main(argv: list[str] | None = None) -> int:
             "auto_threshold_overrides": args.auto_threshold_overrides,
             "override_rel_floor": args.override_rel_floor,
             "override_rel_cap": args.override_rel_cap,
+            "override_min_samples": args.override_min_samples,
             "override_noise_multiplier": args.override_noise_multiplier,
             "override_noise_floor": args.override_noise_floor,
+            "override_noise_floor_ratio": args.override_noise_floor_ratio,
             "override_noise_cap": args.override_noise_cap,
             "override_force_fixed_mode": args.override_force_fixed_mode,
             "overrides_path": str(resolve_overrides_path(args.overrides_path)),
