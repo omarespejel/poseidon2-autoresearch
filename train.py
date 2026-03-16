@@ -1529,10 +1529,13 @@ def run_loop(args: argparse.Namespace) -> int:
                         best_metric = float(metric_value) if confirmed_metric is None else confirmed_metric
                         if confirmed_metric is not None:
                             metric_for_row = confirmed_metric
-                        if metric_series is not None and metric_series:
-                            best_metric_series = metric_series
+                        accepted_series = ab_details.get("candidate_values") if ab_details else None
+                        if isinstance(accepted_series, list) and accepted_series:
+                            best_metric_series = [float(v) for v in accepted_series]
                         elif confirmed_values:
                             best_metric_series = [float(v) for v in confirmed_values]
+                        elif metric_series is not None and metric_series:
+                            best_metric_series = metric_series
                         notes = f"accepted:{notes};{confirm_reason};{ab_reason}"
                     else:
                         improved = False
