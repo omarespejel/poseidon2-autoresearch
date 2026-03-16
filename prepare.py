@@ -809,11 +809,23 @@ def evaluate_command(target_name: str, target: dict[str, Any]) -> dict[str, Any]
         profile_name = str(profile_raw.get("name", f"profile_{idx}")).strip() or f"profile_{idx}"
         command = profile_raw.get("benchmark_command", default_command)
         metric_regex = str(profile_raw.get("metric_regex", default_regex))
-        warmup_runs = int(profile_raw.get("warmup_runs", default_warmup))
-        runs = int(profile_raw.get("runs", default_runs))
-        aggregate = str(profile_raw.get("aggregate", default_aggregate))
-        trim_extremes = int(profile_raw.get("trim_extremes", default_trim))
-        weight = float(profile_raw.get("weight", 1.0))
+        try:
+            warmup_runs = int(profile_raw.get("warmup_runs", default_warmup))
+            runs = int(profile_raw.get("runs", default_runs))
+            aggregate = str(profile_raw.get("aggregate", default_aggregate))
+            trim_extremes = int(profile_raw.get("trim_extremes", default_trim))
+            weight = float(profile_raw.get("weight", 1.0))
+        except (TypeError, ValueError) as exc:
+            return {
+                "status": "failed",
+                "metric_name": metric_name,
+                "metric_value": None,
+                "check_s": 0.0,
+                "info_or_bench_s": total_seconds,
+                "execute_s": 0.0,
+                "notes": f"profile={profile_name} invalid numeric field: {exc}",
+                "debug": {"profile_reports": profile_reports},
+            }
 
         if not isinstance(command, list) or not command:
             return {
@@ -835,6 +847,17 @@ def evaluate_command(target_name: str, target: dict[str, Any]) -> dict[str, Any]
                 "info_or_bench_s": total_seconds,
                 "execute_s": 0.0,
                 "notes": f"profile={profile_name} metric_regex must be non-empty",
+                "debug": {"profile_reports": profile_reports},
+            }
+        if not math.isfinite(weight) or weight <= 0.0:
+            return {
+                "status": "failed",
+                "metric_name": metric_name,
+                "metric_value": None,
+                "check_s": 0.0,
+                "info_or_bench_s": total_seconds,
+                "execute_s": 0.0,
+                "notes": f"profile={profile_name} weight must be a finite positive number, got {weight}",
                 "debug": {"profile_reports": profile_reports},
             }
 
@@ -872,18 +895,6 @@ def evaluate_command(target_name: str, target: dict[str, Any]) -> dict[str, Any]
                 "info_or_bench_s": total_seconds,
                 "execute_s": 0.0,
                 "notes": str(report.get("notes", "profile evaluation failed")),
-                "debug": {"profile_reports": profile_reports},
-            }
-
-        if not math.isfinite(weight) or weight <= 0.0:
-            return {
-                "status": "failed",
-                "metric_name": metric_name,
-                "metric_value": None,
-                "check_s": 0.0,
-                "info_or_bench_s": total_seconds,
-                "execute_s": 0.0,
-                "notes": f"profile={profile_name} weight must be > 0",
                 "debug": {"profile_reports": profile_reports},
             }
 
@@ -950,7 +961,24 @@ def evaluate_command(target_name: str, target: dict[str, Any]) -> dict[str, Any]
         composite_series = []
 
     if not composite_series:
-        composite_series = [float(v) for v in profile_values]
+        series_lengths = [len(series) for series in profile_series] if profile_series else []
+        return {
+            "status": "failed",
+            "metric_name": metric_name,
+            "metric_value": None,
+            "check_s": 0.0,
+            "info_or_bench_s": total_seconds,
+            "execute_s": 0.0,
+            "notes": (
+                "profile metric series are not alignable; "
+                "refusing to emit ambiguous statistical series for acceptance gates"
+            ),
+            "debug": {
+                "profile_reports": profile_reports,
+                "profiles_aggregate": profiles_aggregate,
+                "series_lengths": series_lengths,
+            },
+        }
 
     profile_values_note = ",".join(
         f"{report['name']}={float(report['metric_value']):.2f}" for report in profile_reports
