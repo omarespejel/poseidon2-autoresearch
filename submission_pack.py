@@ -97,7 +97,7 @@ def infer_target_commands(target: dict[str, Any]) -> list[list[str]]:
         seen: set[tuple[str, ...]] = set()
 
         profiles = target.get("benchmark_profiles")
-        if isinstance(profiles, list):
+        if isinstance(profiles, list) and profiles:
             for profile in profiles:
                 if not isinstance(profile, dict):
                     continue
@@ -109,6 +109,7 @@ def infer_target_commands(target: dict[str, Any]) -> list[list[str]]:
                     continue
                 seen.add(normalized)
                 out.append([*normalized])
+            return out
 
         cmd = target.get("benchmark_command", [])
         if isinstance(cmd, list) and cmd:

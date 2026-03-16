@@ -791,6 +791,17 @@ def evaluate_command(target_name: str, target: dict[str, Any]) -> dict[str, Any]
                 "notes": "benchmark_command must be a non-empty list",
                 "debug": {},
             }
+        if not default_regex:
+            return {
+                "status": "failed",
+                "metric_name": metric_name,
+                "metric_value": None,
+                "check_s": 0.0,
+                "info_or_bench_s": 0.0,
+                "execute_s": 0.0,
+                "notes": "metric_regex must be non-empty",
+                "debug": {},
+            }
         return evaluate_command_profile(
             metric_name=metric_name,
             project_dir=project_dir,
