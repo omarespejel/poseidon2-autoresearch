@@ -11,12 +11,16 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
+import platform
 import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+import readiness_check
 
 ROOT = Path(__file__).resolve().parent
 PREPARE = ROOT / "prepare.py"
@@ -35,11 +39,45 @@ EVIDENCE_DIR = ROOT / "evidence"
 SUBMISSION_DIR = ROOT / "submission"
 MUTATION_MEMORY = ROOT / "work" / "mutation_memory.json"
 
-DEFAULT_REAL_OPTIMIZE_TARGETS = (
-    "leanmultisig_poseidon16_src_fast,"
-    "leanmultisig_poseidon16_table_src_fast,"
-    "leanmultisig_poseidon2_neon_src_fast"
-)
+DEFAULT_INFORMATIONAL_READINESS_CHECKS: frozenset[str] = readiness_check.INFORMATIONAL_CHECKS
+
+
+def resolve_poseidon_arch() -> str:
+    override = os.getenv("POSEIDON_ARCH", "").strip().lower()
+    if override in {"arm64", "aarch64", "arm", "neon"}:
+        return "arm64"
+    if override in {"x86_64", "amd64", "x86", "avx2", "avx512"}:
+        return "x86_64"
+
+    machine = platform.machine().lower()
+    processor = platform.processor().lower()
+    if any(token in machine for token in ("arm64", "aarch64", "arm")) or any(
+        token in processor for token in ("arm", "apple")
+    ):
+        return "arm64"
+    if machine in {"x86_64", "amd64", "x86", "i386", "i686"} or any(
+        token in processor for token in ("intel", "x86")
+    ):
+        return "x86_64"
+    return "unknown"
+
+
+def default_real_optimize_targets() -> str:
+    """Select SOTA Poseidon source targets that match the current host backend."""
+    targets = [
+        "leanmultisig_poseidon16_src_fast",
+        "leanmultisig_poseidon16_table_src_fast",
+    ]
+    arch = resolve_poseidon_arch()
+    if arch == "arm64":
+        targets.append("leanmultisig_poseidon2_neon_src_fast")
+    elif arch == "x86_64":
+        targets.append("leanmultisig_poseidon2_avx2_src_fast")
+    else:
+        # Unknown host: hedge by including both scalar and x86 backend source targets.
+        targets.append("leanmultisig_poseidon2_no_packing_src_fast")
+        targets.append("leanmultisig_poseidon2_avx2_src_fast")
+    return ",".join(targets)
 
 
 @dataclass
@@ -261,17 +299,29 @@ def write_report(
         )
     if readiness_payload is not None:
         readiness_ok = "yes"
-        checks = readiness_payload.get("checks")
-        if isinstance(checks, list):
-            required_failed = 0
-            for check in checks:
-                if not isinstance(check, dict):
-                    continue
-                name = str(check.get("name", ""))
-                ok = bool(check.get("ok", False))
-                if name != "recent_activity_24h" and not ok:
-                    required_failed += 1
-            readiness_ok = "yes" if required_failed == 0 else "no"
+        overall_ready = readiness_payload.get("overall_ready")
+        if isinstance(overall_ready, bool):
+            readiness_ok = "yes" if overall_ready else "no"
+        else:
+            checks = readiness_payload.get("checks")
+            informational_raw = readiness_payload.get("informational_checks")
+            informational_checks = set(DEFAULT_INFORMATIONAL_READINESS_CHECKS)
+            if isinstance(informational_raw, list):
+                informational_checks = {
+                    str(item).strip()
+                    for item in informational_raw
+                    if isinstance(item, str) and str(item).strip()
+                } or informational_checks
+            if isinstance(checks, list):
+                required_failed = 0
+                for check in checks:
+                    if not isinstance(check, dict):
+                        continue
+                    name = str(check.get("name", ""))
+                    ok = bool(check.get("ok", False))
+                    if name not in informational_checks and not ok:
+                        required_failed += 1
+                readiness_ok = "yes" if required_failed == 0 else "no"
         lines.append(
             "| readiness_check | {ok} | {report} |".format(
                 ok=readiness_ok,
@@ -337,8 +387,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--real-optimize-targets",
-        default=DEFAULT_REAL_OPTIMIZE_TARGETS,
-        help="Comma-separated source targets for real optimization",
+        default=default_real_optimize_targets(),
+        help="Comma-separated source targets for real optimization (host-aware default)",
     )
     parser.add_argument(
         "--real-optimize-batch-iterations",

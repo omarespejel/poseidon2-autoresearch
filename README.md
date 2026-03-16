@@ -79,6 +79,9 @@ Useful controls:
 # add extra real-source optimization rounds
 python3 campaign.py --synthesis-cook --real-optimize-rounds 4
 
+# show the host-aware default source target set (ARM NEON vs x86 AVX2)
+python3 campaign.py --help | rg real-optimize-targets -n
+
 # run loop indefinitely (stopped by max accepted)
 python3 campaign.py --synthesis-cook --loop-iterations 0 --max-accepted 3
 
@@ -181,6 +184,8 @@ Before long runs, measure target noise empirically:
 python3 prepare.py calibrate --target leanmultisig_poseidon16_src_fast --samples 5
 python3 prepare.py calibrate --target leanmultisig_poseidon16_table_src_fast --samples 5
 python3 prepare.py calibrate --target leanmultisig_poseidon2_neon_src_fast --samples 5
+python3 prepare.py calibrate --target leanmultisig_poseidon2_avx2_src_fast --samples 5
+python3 prepare.py calibrate --target leanmultisig_poseidon2_no_packing_src_fast --samples 5
 ```
 
 For direct Rust autoresearch against Lean source code:
@@ -194,6 +199,8 @@ Additional source-level targets are also available for deeper Poseidon2 hotspots
 
 - `leanmultisig_poseidon16_table_src_fast`
 - `leanmultisig_poseidon2_neon_src_fast`
+- `leanmultisig_poseidon2_avx2_src_fast`
+- `leanmultisig_poseidon2_no_packing_src_fast`
 
 Reference implementation context can be inspected in:
 

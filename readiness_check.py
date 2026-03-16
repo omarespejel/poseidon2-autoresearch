@@ -7,6 +7,7 @@ import argparse
 import csv
 import datetime as dt
 import json
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,7 +26,16 @@ DEFAULT_REPORT = ROOT / "readiness_report.md"
 
 # Public Synthesis timeline marker observed on-site.
 DEFAULT_BUILD_CLOSE_UTC = dt.datetime(2026, 3, 22, 17, 0, 0, tzinfo=dt.timezone.utc)
-INFORMATIONAL_CHECKS = {"recent_activity_24h"}
+INFORMATIONAL_CHECKS: frozenset[str] = frozenset(
+    {
+        "recent_activity_24h",
+        "submission_multi_tool_orchestration",
+        "submission_receipts_additional_evidence",
+        # Kept informational for backward compatibility with older agent_log schemas.
+        "submission_safety_guardrails_populated",
+        "submission_compute_budget_usage",
+    }
+)
 
 
 @dataclass
@@ -74,6 +84,19 @@ def load_json(path: Path) -> dict[str, Any] | None:
     if isinstance(data, dict):
         return data
     return None
+
+
+def looks_like_onchain_receipt(value: str) -> bool:
+    token = value.strip()
+    if not token:
+        return False
+    if re.fullmatch(r"0x[0-9a-fA-F]{64}", token):
+        return True
+    return token.startswith("https://")
+
+
+def overall_ready_from_checks(checks: list[CheckResult], *, informational: frozenset[str] = INFORMATIONAL_CHECKS) -> bool:
+    return all(c.ok for c in checks if c.name not in informational)
 
 
 def retained_entry_path(item: dict[str, Any]) -> Path | None:
@@ -238,18 +261,111 @@ def build_checks(
             )
         )
 
+        decisions = submission_log.get("decisions")
+        decision_count = len(decisions) if isinstance(decisions, list) else 0
+        checks.append(
+            CheckResult(
+                name="submission_autonomous_decision_trace",
+                ok=decision_count > 0,
+                details=f"decision_count={decision_count}",
+            )
+        )
+
+        tool_calls = submission_log.get("tool_calls")
+        distinct_tools: set[str] = set()
+        if isinstance(tool_calls, list):
+            for call in tool_calls:
+                if not isinstance(call, dict):
+                    continue
+                tool = call.get("tool")
+                if isinstance(tool, str) and tool.strip():
+                    distinct_tools.add(tool.strip())
+        checks.append(
+            CheckResult(
+                name="submission_tool_calls_present",
+                ok=bool(distinct_tools),
+                details=f"distinct_tools={len(distinct_tools)} [{', '.join(sorted(distinct_tools)[:8])}]",
+            )
+        )
+        checks.append(
+            CheckResult(
+                name="submission_multi_tool_orchestration",
+                ok=len(distinct_tools) >= 2,
+                details=f"distinct_tools={len(distinct_tools)}",
+            )
+        )
+
+        safety_guardrails = submission_log.get("safety_guardrails")
+        has_safety_payload = False
+        if isinstance(safety_guardrails, dict):
+            policy = safety_guardrails.get("policy")
+            counters = safety_guardrails.get("counters")
+            has_safety_payload = (
+                isinstance(policy, list)
+                and len(policy) > 0
+                and isinstance(counters, dict)
+                and len(counters) > 0
+            )
+        checks.append(
+            CheckResult(
+                name="submission_safety_guardrails_populated",
+                ok=has_safety_payload,
+                details="safety_guardrails has policy and counters" if has_safety_payload else "missing safety policy/counters",
+            )
+        )
+
+        compute_budget = submission_log.get("compute_budget")
+        has_budget_usage = False
+        if isinstance(compute_budget, dict):
+            consumed = compute_budget.get("consumed")
+            has_budget_usage = isinstance(consumed, dict) and any(
+                consumed.get(key) is not None
+                for key in ("iterations", "accepted", "estimated_model_calls", "evaluation_seconds_total")
+            )
+        checks.append(
+            CheckResult(
+                name="submission_compute_budget_usage",
+                ok=has_budget_usage,
+                details="compute_budget.consumed populated" if has_budget_usage else "missing compute budget usage details",
+            )
+        )
+
     if submission_receipts is not None:
         erc8004 = submission_receipts.get("erc8004")
         reg_tx = ""
+        additional_count = 0
         if isinstance(erc8004, dict):
             raw = erc8004.get("registration_tx", "")
             if isinstance(raw, str):
                 reg_tx = raw.strip()
+            raw_additional = erc8004.get("additional_receipts")
+            if isinstance(raw_additional, list):
+                additional_count = sum(
+                    1
+                    for item in raw_additional
+                    if isinstance(item, str) and bool(item.strip()) and looks_like_onchain_receipt(item)
+                )
         checks.append(
             CheckResult(
                 name="submission_receipts_registration_tx",
                 ok=bool(reg_tx),
                 details="ok" if reg_tx else "missing erc8004.registration_tx in submission receipts",
+            )
+        )
+        if reg_tx:
+            receipt_ok = looks_like_onchain_receipt(reg_tx)
+            checks.append(
+                CheckResult(
+                    name="submission_receipts_registration_tx_format",
+                    ok=receipt_ok,
+                    details="onchain receipt format detected" if receipt_ok else "registration tx is not hash/url-like",
+                )
+            )
+        checks.append(
+            CheckResult(
+                name="submission_receipts_additional_evidence",
+                ok=additional_count > 0,
+                details=f"additional_onchain_receipts={additional_count}",
             )
         )
 
@@ -305,7 +421,7 @@ def build_checks(
 
 def write_markdown_report(path: Path, checks: list[CheckResult], *, build_close_utc: dt.datetime) -> None:
     # Fresh activity is informative but not a hard blocker once the evidence pack is assembled.
-    ready = all(c.ok for c in checks if c.name not in INFORMATIONAL_CHECKS)
+    ready = overall_ready_from_checks(checks)
     now = now_utc().isoformat()
 
     lines: list[str] = []
@@ -364,6 +480,7 @@ def main(argv: list[str] | None = None) -> int:
     portfolio = load_json(PORTFOLIO_JSON)
     rows = read_results_rows()
     checks = build_checks(manifest=manifest, portfolio=portfolio, rows=rows, build_close_utc=build_close_utc)
+    overall_ready = overall_ready_from_checks(checks)
 
     report_path = Path(args.report)
     write_markdown_report(report_path, checks, build_close_utc=build_close_utc)
@@ -373,6 +490,8 @@ def main(argv: list[str] | None = None) -> int:
         "generated_at": now_utc().isoformat(),
         "report": str(report_path),
         "build_close_utc": build_close_utc.isoformat(),
+        "overall_ready": overall_ready,
+        "informational_checks": sorted(INFORMATIONAL_CHECKS),
         "checks": [{"name": c.name, "ok": c.ok, "details": c.details} for c in checks],
     }
     print(json.dumps(payload, indent=2, sort_keys=True))
