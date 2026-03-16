@@ -79,6 +79,20 @@ def regex_replace_once(source: str, pattern: str, repl: str, *, flags: int = 0) 
     return candidate, candidate != source
 
 
+def replace_nth_occurrence(source: str, old: str, new: str, occurrence: int) -> tuple[str, bool]:
+    if occurrence < 1:
+        return source, False
+    start = 0
+    idx = -1
+    for _ in range(occurrence):
+        idx = source.find(old, start)
+        if idx == -1:
+            return source, False
+        start = idx + len(old)
+    candidate = source[:idx] + new + source[idx + len(old) :]
+    return candidate, candidate != source
+
+
 def rust_mutator_const_collects(source: str) -> tuple[str, str, bool]:
     rules = [
         (
@@ -175,8 +189,36 @@ def rust_mutator_pack_point_buffer(source: str) -> tuple[str, str, bool]:
         "        packed_point_coords.extend_from_slice(&air_claims.point.0);\n"
         "        let packed_point = MultilinearPoint(packed_point_coords);"
     )
-    candidate = source.replace(old, replacement, 1)
+    candidate, changed = replace_nth_occurrence(source, old, replacement, 1)
+    if not changed:
+        return source, "rust_pack_point_buffer:replace_failed", False
     return candidate, "rust_pack_point_buffer", True
+
+
+def rust_mutator_pack_point_buffer_verify(source: str) -> tuple[str, str, bool]:
+    old = "let packed_point = MultilinearPoint([betas.clone(), air_claims.point.0].concat());"
+    replacement = (
+        "let mut packed_point_coords = betas.clone();\n"
+        "        packed_point_coords.extend_from_slice(&air_claims.point.0);\n"
+        "        let packed_point = MultilinearPoint(packed_point_coords);"
+    )
+    candidate, changed = replace_nth_occurrence(source, old, replacement, 2)
+    if not changed:
+        return source, "rust_pack_point_buffer_verify:pattern_missing", False
+    return candidate, "rust_pack_point_buffer_verify", True
+
+
+def rust_mutator_pack_point_buffer_both(source: str) -> tuple[str, str, bool]:
+    old = "let packed_point = MultilinearPoint([betas.clone(), air_claims.point.0].concat());"
+    if source.count(old) < 2:
+        return source, "rust_pack_point_buffer_both:pattern_missing", False
+    replacement = (
+        "let mut packed_point_coords = betas.clone();\n"
+        "        packed_point_coords.extend_from_slice(&air_claims.point.0);\n"
+        "        let packed_point = MultilinearPoint(packed_point_coords);"
+    )
+    candidate = source.replace(old, replacement, 2)
+    return candidate, "rust_pack_point_buffer_both", True
 
 
 def rust_mutator_poseidon_table_res_copy(source: str) -> tuple[str, str, bool]:
@@ -555,6 +597,8 @@ def rust_heuristic_candidate(
             rust_mutator_cache_trace_refs,
             rust_mutator_hoist_packed_cols,
             rust_mutator_pack_point_buffer,
+            rust_mutator_pack_point_buffer_verify,
+            rust_mutator_pack_point_buffer_both,
             rust_mutator_hoist_log_num_cols,
         ]
     )
