@@ -982,71 +982,23 @@ def evaluate_command(target_name: str, target: dict[str, Any]) -> dict[str, Any]
             "debug": {"profile_reports": profile_reports, "profiles_aggregate": profiles_aggregate},
         }
 
-    profile_series: list[list[float]] = []
-    series_parse_error: str | None = None
+    profile_sample_counts: dict[str, int] = {}
     for report in profile_reports:
         debug_payload = report.get("debug", {})
-        values = debug_payload.get("metric_values") if isinstance(debug_payload, dict) else None
-        if not isinstance(values, list):
-            series_parse_error = f"profile={report['name']} metric_values missing_or_not_list"
-            profile_series = []
-            break
-        parsed: list[float] = []
-        for item_idx, item in enumerate(values):
-            if not isinstance(item, (int, float)):
-                series_parse_error = (
-                    f"profile={report['name']} metric_values[{item_idx}] "
-                    f"must be numeric, got {type(item).__name__}"
-                )
-                parsed = []
-                break
-            parsed.append(float(item))
-        if not parsed:
-            if series_parse_error is None:
-                if not values:
-                    series_parse_error = f"profile={report['name']} metric_values is empty"
-                else:
-                    series_parse_error = (
-                        f"profile={report['name']} metric_values did not yield numeric entries"
-                    )
-            profile_series = []
-            break
-        profile_series.append(parsed)
-
-    composite_series: list[float]
-    composite_error: str | None = None
-    if profile_series and len({len(series) for series in profile_series}) == 1:
-        composite_series = []
-        for idx in range(len(profile_series[0])):
-            step_values = [series[idx] for series in profile_series]
-            try:
-                composite_series.append(
-                    aggregate_weighted_metric(step_values, profile_weights, profiles_aggregate)
-                )
-            except ToolError as exc:
-                composite_error = str(exc)
-                composite_series = []
-                break
-    else:
-        composite_series = []
+        values = debug_payload.get("metric_values_raw") if isinstance(debug_payload, dict) else None
+        if isinstance(values, list):
+            profile_sample_counts[str(report["name"])] = len(values)
 
     debug_payload: dict[str, Any] = {
         "profile_reports": profile_reports,
         "profiles_aggregate": profiles_aggregate,
-        "metric_values_raw": profile_values,
+        "profile_aggregate_values": profile_values,
+        "profile_sample_counts": profile_sample_counts,
+        "metric_values_series_status": "omitted_multi_profile",
+        "metric_values_series_reason": (
+            "cross-profile run pairing is not statistically valid; composite series intentionally omitted"
+        ),
     }
-    if composite_series:
-        debug_payload["metric_values"] = composite_series
-    else:
-        debug_payload["series_lengths"] = [len(series) for series in profile_series] if profile_series else []
-        if series_parse_error:
-            debug_payload["metric_values_series_status"] = "parse_failure"
-            debug_payload["series_parse_error"] = series_parse_error
-        elif composite_error:
-            debug_payload["metric_values_series_status"] = "aggregation_failure"
-            debug_payload["aggregation_error"] = composite_error
-        else:
-            debug_payload["metric_values_series_status"] = "unaligned"
 
     profile_values_note = ",".join(
         f"{report['name']}={float(report['metric_value']):.2f}" for report in profile_reports
