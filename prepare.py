@@ -43,6 +43,7 @@ class ToolError(RuntimeError):
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 GIT_OID_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
+VALID_PROFILE_AGGREGATES = {"weighted_geomean", "weighted_mean"}
 
 
 def env_int(name: str, default: int) -> int:
@@ -804,6 +805,22 @@ def evaluate_command(target_name: str, target: dict[str, Any]) -> dict[str, Any]
     profile_weights: list[float] = []
     profile_reports: list[dict[str, Any]] = []
     total_seconds = 0.0
+    profiles_aggregate = str(target.get("profiles_aggregate", "weighted_geomean")).strip().lower()
+    if profiles_aggregate not in VALID_PROFILE_AGGREGATES:
+        return {
+            "status": "failed",
+            "metric_name": metric_name,
+            "metric_value": None,
+            "check_s": 0.0,
+            "info_or_bench_s": 0.0,
+            "execute_s": 0.0,
+            "notes": (
+                f"unknown profiles_aggregate mode '{profiles_aggregate}'; "
+                f"must be one of {sorted(VALID_PROFILE_AGGREGATES)}"
+            ),
+            "debug": {},
+        }
+    seen_profile_names: set[str] = set()
 
     for idx, profile_raw in enumerate(profiles_raw, start=1):
         if not isinstance(profile_raw, dict):
@@ -819,6 +836,18 @@ def evaluate_command(target_name: str, target: dict[str, Any]) -> dict[str, Any]
             }
 
         profile_name = str(profile_raw.get("name", f"profile_{idx}")).strip() or f"profile_{idx}"
+        if profile_name in seen_profile_names:
+            return {
+                "status": "failed",
+                "metric_name": metric_name,
+                "metric_value": None,
+                "check_s": 0.0,
+                "info_or_bench_s": total_seconds,
+                "execute_s": 0.0,
+                "notes": f"duplicate profile name '{profile_name}' in benchmark_profiles",
+                "debug": {"profile_reports": profile_reports},
+            }
+        seen_profile_names.add(profile_name)
         command = profile_raw.get("benchmark_command", default_command)
         metric_regex = str(profile_raw.get("metric_regex", default_regex))
         try:
@@ -924,7 +953,6 @@ def evaluate_command(target_name: str, target: dict[str, Any]) -> dict[str, Any]
         profile_values.append(float(metric_value))
         profile_weights.append(weight)
 
-    profiles_aggregate = str(target.get("profiles_aggregate", "weighted_geomean")).strip().lower()
     try:
         combined_metric = aggregate_weighted_metric(profile_values, profile_weights, profiles_aggregate)
     except ToolError as exc:
@@ -940,24 +968,33 @@ def evaluate_command(target_name: str, target: dict[str, Any]) -> dict[str, Any]
         }
 
     profile_series: list[list[float]] = []
+    series_parse_error: str | None = None
     for report in profile_reports:
         debug_payload = report.get("debug", {})
         values = debug_payload.get("metric_values") if isinstance(debug_payload, dict) else None
         if not isinstance(values, list):
+            series_parse_error = f"profile={report['name']} metric_values missing_or_not_list"
             profile_series = []
             break
         parsed: list[float] = []
-        for item in values:
+        for item_idx, item in enumerate(values):
             if not isinstance(item, (int, float)):
+                series_parse_error = (
+                    f"profile={report['name']} metric_values[{item_idx}] "
+                    f"must be numeric, got {type(item).__name__}"
+                )
                 parsed = []
                 break
             parsed.append(float(item))
         if not parsed:
+            if series_parse_error is None:
+                series_parse_error = f"profile={report['name']} metric_values empty_after_parse"
             profile_series = []
             break
         profile_series.append(parsed)
 
     composite_series: list[float]
+    composite_error: str | None = None
     if profile_series and len({len(series) for series in profile_series}) == 1:
         composite_series = []
         for idx in range(len(profile_series[0])):
@@ -966,7 +1003,8 @@ def evaluate_command(target_name: str, target: dict[str, Any]) -> dict[str, Any]
                 composite_series.append(
                     aggregate_weighted_metric(step_values, profile_weights, profiles_aggregate)
                 )
-            except ToolError:
+            except ToolError as exc:
+                composite_error = str(exc)
                 composite_series = []
                 break
     else:
@@ -981,7 +1019,14 @@ def evaluate_command(target_name: str, target: dict[str, Any]) -> dict[str, Any]
         debug_payload["metric_values"] = composite_series
     else:
         debug_payload["series_lengths"] = [len(series) for series in profile_series] if profile_series else []
-        debug_payload["metric_values_series_status"] = "unaligned"
+        if series_parse_error:
+            debug_payload["metric_values_series_status"] = "parse_failure"
+            debug_payload["series_parse_error"] = series_parse_error
+        elif composite_error:
+            debug_payload["metric_values_series_status"] = "aggregation_failure"
+            debug_payload["series_parse_error"] = composite_error
+        else:
+            debug_payload["metric_values_series_status"] = "unaligned"
 
     profile_values_note = ",".join(
         f"{report['name']}={float(report['metric_value']):.2f}" for report in profile_reports
