@@ -63,11 +63,30 @@ The repo now supports the same top-level workflow shape:
 - `program.md` (human instructions)
 
 This keeps compatibility with prompts and workflows written for Karpathy-style autoresearch projects.
-Operational instructions are in `codex_instructions.md`.
-Forward roadmap is in `NEXT_STEPS.md`.
-Date-anchored execution checklist is in `SPRINT_PLAN_2026-03-15_to_2026-03-22.md`.
-Deep external validation notes are in `DEEP_RESEARCH_2026-03-15.md`.
-Noise calibration snapshots are tracked in `calibration_report.md`.
+Use `--iterations 0` to run indefinitely until `--max-accepted` or `--max-runtime-seconds` stops the loop.
+
+## End-To-End Campaign
+
+To run a full track-aligned pipeline (autonomous loop + real Lean baselines + real-source optimization + evidence + submission/readiness artifacts):
+
+```bash
+python3 campaign.py --fresh --synthesis-cook --real-profile fast -v
+```
+
+Useful controls:
+
+```bash
+# add extra real-source optimization rounds
+python3 campaign.py --synthesis-cook --real-optimize-rounds 4
+
+# run loop indefinitely (stopped by max accepted)
+python3 campaign.py --synthesis-cook --loop-iterations 0 --max-accepted 3
+
+# enforce identity fields for canonical submission artifacts
+python3 campaign.py --synthesis-cook --strict-submission
+```
+
+Track requirement mapping is documented in `SYNTHESIS_ALIGNMENT.md`.
 
 ## Adaptive Portfolio Mode
 
@@ -76,6 +95,8 @@ For broader search across multiple Rust hotspots:
 ```bash
 python3 portfolio_loop.py --rounds 4 --batch-iterations 6 --batch-max-accepted 1 --artifacts accepted
 ```
+
+Set `--rounds 0` to run indefinitely until `--stop-after-total-accepted` is reached.
 
 To inject per-target acceptance overrides (for example, from a calibration pass):
 
