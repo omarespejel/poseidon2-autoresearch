@@ -67,6 +67,7 @@ def default_real_optimize_targets() -> str:
     targets = [
         "leanmultisig_poseidon16_src_fast",
         "leanmultisig_poseidon16_table_src_fast",
+        "leanmultisig_poseidon2_monty_core_src_fast",
     ]
     arch = resolve_poseidon_arch()
     if arch == "arm64":
@@ -74,7 +75,7 @@ def default_real_optimize_targets() -> str:
     elif arch == "x86_64":
         targets.append("leanmultisig_poseidon2_avx2_src_fast")
     else:
-        # Unknown host: hedge by including both scalar and x86 backend source targets.
+        # Unknown host: hedge by including wrapper fallback and x86 backend source targets.
         targets.append("leanmultisig_poseidon2_no_packing_src_fast")
         targets.append("leanmultisig_poseidon2_avx2_src_fast")
     return ",".join(targets)

@@ -10,6 +10,7 @@ examples/noir_poseidon2_style_t8/target/
 examples/noir_poseidon2_style_t16/target/
 artifacts/
 evidence/
+submission/
 checkpoint_report.json
 checkpoint_report.md
 portfolio_report.json

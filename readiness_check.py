@@ -228,6 +228,7 @@ def build_checks(
     if submission_log is not None:
         required_sections = [
             "stages",
+            "conversation_log",
             "decisions",
             "tool_calls",
             "failures",
@@ -268,6 +269,34 @@ def build_checks(
                 name="submission_autonomous_decision_trace",
                 ok=decision_count > 0,
                 details=f"decision_count={decision_count}",
+            )
+        )
+
+        conversation_log = submission_log.get("conversation_log")
+        conversation_count = len(conversation_log) if isinstance(conversation_log, list) else 0
+        checks.append(
+            CheckResult(
+                name="submission_conversation_log_present",
+                ok=conversation_count > 0,
+                details=f"conversation_events={conversation_count}",
+            )
+        )
+        seen_stages: set[str] = set()
+        if isinstance(conversation_log, list):
+            for event in conversation_log:
+                if not isinstance(event, dict):
+                    continue
+                stage = event.get("stage")
+                if isinstance(stage, str) and stage.strip():
+                    seen_stages.add(stage.strip())
+        missing_trace_stages = [
+            stage for stage in ("discover", "plan", "execute", "verify", "submit") if stage not in seen_stages
+        ]
+        checks.append(
+            CheckResult(
+                name="submission_conversation_stage_trace",
+                ok=not missing_trace_stages,
+                details="ok" if not missing_trace_stages else f"missing stages: {', '.join(missing_trace_stages)}",
             )
         )
 

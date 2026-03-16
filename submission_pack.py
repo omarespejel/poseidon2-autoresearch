@@ -299,16 +299,190 @@ def derive_stages(
 ) -> dict[str, int]:
     baseline_rows = [r for r in rows if int(r.get("iteration", "0") or 0) == 0]
     non_baseline_rows = [r for r in rows if int(r.get("iteration", "0") or 0) > 0]
-    verify_count = len(non_baseline_rows)
-    execute_count = max(len(decisions), len(non_baseline_rows))
+    decision_count = len(decisions)
+    non_baseline_count = len(non_baseline_rows)
+    has_activity = bool(rows or loop_start or decisions)
+
+    discover_count = max(
+        1 if baseline_rows else 0,
+        len(loop_start),
+        1 if decision_count > 0 else 0,
+        1 if non_baseline_count > 0 else 0,
+    )
+    plan_count = max(len(loop_start), 1 if has_activity else 0)
+    execute_count = max(decision_count, non_baseline_count)
+    verify_count = max(decision_count, non_baseline_count)
+    submit_count = 1 if has_activity else 0
 
     return {
-        "discover": max(1 if baseline_rows else 0, len(loop_start)),
-        "plan": max(1, len(loop_start)),
+        "discover": discover_count,
+        "plan": plan_count,
         "execute": execute_count,
         "verify": verify_count,
-        "submit": 1,
+        "submit": submit_count,
     }
+
+
+def derive_conversation_log(
+    *,
+    rows: list[dict[str, str]],
+    loop_start: list[dict[str, Any]],
+    loop_end: list[dict[str, Any]],
+    decisions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    seq = 0
+
+    def push(
+        *,
+        stage: str,
+        timestamp: str | None,
+        summary: str,
+        target: str | None = None,
+        iteration: int | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        nonlocal seq
+        seq += 1
+        entry: dict[str, Any] = {
+            "id": f"cl_{seq:05d}",
+            "stage": stage,
+            "timestamp": timestamp or now_iso(),
+            "summary": summary,
+        }
+        if target:
+            entry["target"] = target
+        if iteration is not None:
+            entry["iteration"] = int(iteration)
+        if details:
+            entry["details"] = details
+        out.append(entry)
+
+    for row in rows:
+        try:
+            iteration = int(row.get("iteration", "0") or 0)
+        except ValueError:
+            iteration = 0
+        if iteration != 0:
+            continue
+        push(
+            stage="discover",
+            timestamp=row.get("timestamp"),
+            target=row.get("target"),
+            iteration=0,
+            summary="Collected baseline target metric",
+            details={
+                "metric_name": row.get("metric_name"),
+                "metric_value": parse_float(row.get("metric_value"), default=float("nan")),
+                "status": row.get("status"),
+            },
+        )
+
+    if not out:
+        first_start = loop_start[0] if loop_start else {}
+        first_row = rows[0] if rows else {}
+        first_decision = decisions[0] if decisions else {}
+        fallback_ts = (
+            first_start.get("timestamp")
+            or first_row.get("timestamp")
+            or first_decision.get("timestamp")
+            or now_iso()
+        )
+        fallback_target = (
+            str(first_start.get("target", ""))
+            or str(first_row.get("target", ""))
+            or str(first_decision.get("target", ""))
+        )
+        if rows or loop_start or decisions:
+            push(
+                stage="discover",
+                timestamp=fallback_ts,
+                target=fallback_target,
+                iteration=0,
+                summary="Initialized target context and baseline assumptions",
+            )
+
+    for event in loop_start:
+        compute_budget = event.get("compute_budget") if isinstance(event.get("compute_budget"), dict) else {}
+        push(
+            stage="plan",
+            timestamp=event.get("timestamp"),
+            target=str(event.get("target", "")),
+            summary="Selected optimization policy and compute budget",
+            details={
+                "mode": event.get("mode"),
+                "iterations": event.get("iterations"),
+                "max_iterations": compute_budget.get("max_iterations"),
+                "max_accepted": compute_budget.get("max_accepted"),
+                "max_runtime_seconds": compute_budget.get("max_runtime_seconds"),
+            },
+        )
+
+    if not loop_start and (rows or decisions):
+        first_row = rows[0] if rows else {}
+        first_decision = decisions[0] if decisions else {}
+        push(
+            stage="plan",
+            timestamp=first_row.get("timestamp") or first_decision.get("timestamp") or now_iso(),
+            target=str(first_row.get("target", "")) or str(first_decision.get("target", "")),
+            summary="Recovered planning context from persisted run artifacts",
+            details={
+                "mode": "reconstructed",
+                "source": "results.tsv_and_decisions",
+                "reason": "loop_start_missing",
+            },
+        )
+
+    for decision in decisions:
+        ts = decision.get("timestamp")
+        target = str(decision.get("target", ""))
+        iteration = int(decision.get("iteration", 0) or 0)
+        mutation = str(decision.get("mutation", ""))
+        push(
+            stage="execute",
+            timestamp=ts,
+            target=target,
+            iteration=iteration,
+            summary="Applied candidate mutation and executed benchmark pipeline",
+            details={"mutation": mutation},
+        )
+        push(
+            stage="verify",
+            timestamp=ts,
+            target=target,
+            iteration=iteration,
+            summary="Validated candidate against strict acceptance guardrails",
+            details={
+                "accepted": bool(decision.get("accepted", False)),
+                "status": decision.get("status"),
+                "metric_name": decision.get("metric_name"),
+                "metric_value": decision.get("metric_value"),
+            },
+        )
+
+    for event in loop_end:
+        push(
+            stage="submit",
+            timestamp=event.get("timestamp"),
+            target=str(event.get("target", "")),
+            summary="Finalized run outputs and prepared submission artifacts",
+            details={
+                "accepted": event.get("accepted"),
+                "best_metric": event.get("best_metric"),
+                "stop_reason": event.get("stop_reason"),
+                "elapsed_seconds": event.get("elapsed_seconds"),
+            },
+        )
+
+    if not loop_end and decisions:
+        push(
+            stage="submit",
+            timestamp=decisions[-1].get("timestamp"),
+            target=str(decisions[-1].get("target", "")),
+            summary="Finalized run outputs and prepared submission artifacts",
+        )
+
+    return out
 
 
 def derive_budget(
@@ -575,6 +749,12 @@ def main(argv: list[str] | None = None) -> int:
 
     targets_seen = sorted({row.get("target", "") for row in rows if row.get("target")})
     stages = derive_stages(rows=rows, loop_start=loop_start, decisions=decisions)
+    conversation_log = derive_conversation_log(
+        rows=rows,
+        loop_start=loop_start,
+        loop_end=loop_end,
+        decisions=decisions,
+    )
     budget = derive_budget(
         loop_start=loop_start,
         loop_end=loop_end,
@@ -627,9 +807,11 @@ def main(argv: list[str] | None = None) -> int:
             "rejected_total": sum(1 for d in decisions if not bool(d.get("accepted"))),
             "tool_calls_total": len(tool_calls),
             "failures_total": len(failures),
+            "conversation_events_total": len(conversation_log),
         },
         "compute_budget": budget,
         "safety_guardrails": safety,
+        "conversation_log": conversation_log,
         "decisions": decisions,
         "tool_calls": tool_calls,
         "retries": retries,
