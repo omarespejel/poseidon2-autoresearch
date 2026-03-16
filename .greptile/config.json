@@ -1,0 +1,62 @@
+{
+  "strictness": 2,
+  "commentTypes": ["logic", "syntax", "style"],
+  "triggerOnUpdates": true,
+  "shouldUpdateDescription": true,
+  "fixWithAI": true,
+  "statusCheck": true,
+  "statusCommentsEnabled": true,
+  "instructions": "This is a Poseidon2 hash function autoresearch project. Focus on correctness of cryptographic implementations, performance optimization, and reproducibility of experiments. Be direct and technical.",
+  "ignorePatterns": "*.md\n*.txt\n.coderabbit.yaml",
+  "summarySection": {
+    "included": true,
+    "collapsible": false,
+    "defaultOpen": true
+  },
+  "issuesTableSection": {
+    "included": true,
+    "collapsible": false,
+    "defaultOpen": true
+  },
+  "confidenceScoreSection": {
+    "included": true,
+    "collapsible": false,
+    "defaultOpen": true
+  },
+  "sequenceDiagramSection": {
+    "included": true,
+    "collapsible": true,
+    "defaultOpen": false
+  },
+  "rules": [
+    {
+      "id": "no-unwrap",
+      "rule": "Do not use .unwrap() in non-test code. Use proper error handling with Result/Option types.",
+      "scope": ["**/*.rs"],
+      "severity": "high"
+    },
+    {
+      "id": "unsafe-justify",
+      "rule": "All unsafe blocks must have a safety comment explaining why they are necessary and correct.",
+      "scope": ["**/*.rs"],
+      "severity": "high"
+    },
+    {
+      "id": "crypto-correctness",
+      "rule": "Verify that any changes to hash function parameters, round constants, or MDS matrices are mathematically justified and reference the relevant paper or specification.",
+      "scope": ["**/*.rs"],
+      "severity": "high"
+    },
+    {
+      "id": "benchmark-reproducibility",
+      "rule": "Benchmarks must document the environment, parameters, and methodology. Results should be reproducible.",
+      "scope": ["benchmarks/**"],
+      "severity": "medium"
+    },
+    {
+      "id": "experiment-traces",
+      "rule": "All optimization experiments must produce reproducible traces. Accept/revert decisions must be logged with clear rationale.",
+      "severity": "medium"
+    }
+  ]
+}
