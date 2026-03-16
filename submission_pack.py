@@ -95,6 +95,9 @@ def infer_target_commands(target: dict[str, Any]) -> list[list[str]]:
     if ttype == "command":
         out: list[list[str]] = []
         seen: set[tuple[str, ...]] = set()
+        default_cmd = target.get("benchmark_command")
+        if isinstance(default_cmd, list):
+            default_cmd = [str(part) for part in default_cmd]
 
         profiles = target.get("benchmark_profiles")
         if isinstance(profiles, list) and profiles:
@@ -102,6 +105,8 @@ def infer_target_commands(target: dict[str, Any]) -> list[list[str]]:
                 if not isinstance(profile, dict):
                     continue
                 cmd = profile.get("benchmark_command")
+                if cmd is None:
+                    cmd = default_cmd
                 if not isinstance(cmd, list) or not cmd:
                     continue
                 normalized = tuple(str(part) for part in cmd)
@@ -111,7 +116,7 @@ def infer_target_commands(target: dict[str, Any]) -> list[list[str]]:
                 out.append([*normalized])
             return out
 
-        cmd = target.get("benchmark_command", [])
+        cmd = default_cmd if isinstance(default_cmd, list) else []
         if isinstance(cmd, list) and cmd:
             normalized = tuple(str(part) for part in cmd)
             if normalized not in seen:
