@@ -142,6 +142,9 @@ def write_reports(payload: dict[str, Any]) -> None:
     lines.append(f"- calibration samples: `{cfg['calibration_samples']}`")
     lines.append(f"- batch iterations: `{cfg['batch_iterations']}`")
     lines.append(f"- batch max accepted: `{cfg['batch_max_accepted']}`")
+    lines.append(f"- schedule: `{cfg['schedule']}`")
+    if cfg.get("schedule") == "ucb":
+        lines.append(f"- ucb explore: `{cfg['ucb_explore']}`")
     lines.append(f"- auto threshold overrides: `{cfg['auto_threshold_overrides']}`")
     if cfg.get("auto_threshold_overrides"):
         lines.append(f"- overrides path: `{cfg['overrides_path']}`")
@@ -189,6 +192,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sigma-multiplier", type=float, default=2.0, help="Calibrate sigma multiplier")
     parser.add_argument("--batch-iterations", type=int, default=6, help="Train iterations per target in each cycle")
     parser.add_argument("--batch-max-accepted", type=int, default=1, help="Max accepted edits per target per cycle")
+    parser.add_argument(
+        "--schedule",
+        choices=["round_robin", "ucb"],
+        default="round_robin",
+        help="Scheduling strategy passed to portfolio_loop.py",
+    )
+    parser.add_argument("--ucb-explore", type=float, default=0.75, help="UCB exploration strength for portfolio scheduling")
     parser.add_argument(
         "--artifacts",
         choices=["none", "accepted", "all"],
@@ -319,6 +329,10 @@ def main(argv: list[str] | None = None) -> int:
             str(args.batch_iterations),
             "--batch-max-accepted",
             str(args.batch_max_accepted),
+            "--schedule",
+            args.schedule,
+            "--ucb-explore",
+            str(args.ucb_explore),
             "--artifacts",
             args.artifacts,
             "--confirm-repeats",
@@ -371,6 +385,8 @@ def main(argv: list[str] | None = None) -> int:
             "sigma_multiplier": args.sigma_multiplier,
             "batch_iterations": args.batch_iterations,
             "batch_max_accepted": args.batch_max_accepted,
+            "schedule": args.schedule,
+            "ucb_explore": args.ucb_explore,
             "artifacts": args.artifacts,
             "confirm_repeats": args.confirm_repeats,
             "cross_target": args.cross_target,
