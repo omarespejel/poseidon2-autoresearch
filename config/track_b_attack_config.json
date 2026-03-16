@@ -36,7 +36,7 @@
     "differential_candidates": 56,
     "differential_samples_per_candidate": 128,
     "mitm_backward_states": 3072,
-    "mitm_forward_states": 3072,
+    "mitm_forward_states": 3328,
     "scale_rounds_in_full_mode": 0,
     "seed": 1337
   }
