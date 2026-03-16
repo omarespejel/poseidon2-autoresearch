@@ -960,7 +960,11 @@ def rust_heuristic_candidate(
     mutation_schedule = str((target_config or {}).get("mutation_schedule", "priority")).strip().lower()
     use_ucb_schedule = mutation_schedule == "ucb"
     mutation_ucb_explore = float((target_config or {}).get("mutation_ucb_explore", 0.75))
-    total_memory_observations = mutation_memory_total_observations(mutation_memory)
+    scope_totals = mutation_memory_scope_totals(
+        mutation_memory,
+        target_name=target_name,
+        language="rust",
+    )
 
     compound_every = int((target_config or {}).get("compound_every", 0))
     compound_limit = max(0, int((target_config or {}).get("compound_limit", 0)))
@@ -1031,11 +1035,14 @@ def rust_heuristic_candidate(
     if candidates:
         if use_ucb_schedule:
             for item in candidates:
-                accepted_hist, rejected_hist = mutation_memory_counts(
+                accepted_hist, rejected_hist, history_scope = mutation_memory_counts(
                     mutation_memory,
                     str(item["mutation"]),
                     target_name=target_name,
                     language="rust",
+                )
+                total_memory_observations = float(
+                    scope_totals.get(history_scope, scope_totals.get("global", 0.0))
                 )
                 item["ucb_score"] = mutation_ucb_score(
                     accepted=accepted_hist,
@@ -1678,21 +1685,47 @@ def preferred_mutations_from_memory(
     return [mutation for _, _, _, mutation in ranked[:limit]]
 
 
-def mutation_memory_total_observations(memory: dict[str, Any] | None) -> float:
+def mutation_memory_scope_totals(
+    memory: dict[str, Any] | None,
+    *,
+    target_name: str,
+    language: str,
+) -> dict[str, float]:
+    totals = {"target": 0.0, "language": 0.0, "global": 0.0}
     if not isinstance(memory, dict):
-        return 0.0
+        return totals
     raw_mutations = memory.get("mutations")
     if not isinstance(raw_mutations, dict):
-        return 0.0
+        return totals
 
-    total = 0.0
     for raw in raw_mutations.values():
         if not isinstance(raw, dict):
             continue
-        accepted = max(0.0, float(raw.get("accepted_total", 0) or 0.0))
-        rejected = max(0.0, float(raw.get("rejected_total", 0) or 0.0))
-        total += accepted + rejected
-    return total
+        accepted_total = max(0.0, float(raw.get("accepted_total", 0) or 0.0))
+        rejected_total = max(0.0, float(raw.get("rejected_total", 0) or 0.0))
+        totals["global"] += accepted_total + rejected_total
+
+        raw_languages = raw.get("languages")
+        if isinstance(raw_languages, dict):
+            language_counts = raw_languages.get(language)
+            if isinstance(language_counts, dict):
+                language_accepted = max(0.0, float(language_counts.get("accepted", 0) or 0.0))
+                language_rejected = max(0.0, float(language_counts.get("rejected", 0) or 0.0))
+                totals["language"] += language_accepted + language_rejected
+
+        raw_targets = raw.get("targets")
+        if isinstance(raw_targets, dict):
+            target_counts = raw_targets.get(target_name)
+            if isinstance(target_counts, dict):
+                target_accepted = max(0.0, float(target_counts.get("accepted", 0) or 0.0))
+                target_rejected = max(0.0, float(target_counts.get("rejected", 0) or 0.0))
+                totals["target"] += target_accepted + target_rejected
+
+    if totals["language"] <= 0.0:
+        totals["language"] = totals["global"]
+    if totals["target"] <= 0.0:
+        totals["target"] = totals["language"]
+    return totals
 
 
 def mutation_memory_counts(
@@ -1701,14 +1734,14 @@ def mutation_memory_counts(
     *,
     target_name: str,
     language: str,
-) -> tuple[float, float]:
+) -> tuple[float, float, str]:
     if not isinstance(memory, dict):
-        return (0.0, 0.0)
+        return (0.0, 0.0, "global")
     raw_mutations = memory.get("mutations")
     if not isinstance(raw_mutations, dict):
-        return (0.0, 0.0)
+        return (0.0, 0.0, "global")
 
-    def entry_counts(label: str) -> tuple[float, float] | None:
+    def entry_counts(label: str) -> tuple[float, float, str] | None:
         raw = raw_mutations.get(label)
         if not isinstance(raw, dict):
             return None
@@ -1729,13 +1762,13 @@ def mutation_memory_counts(
             target_accepted = max(0.0, float(target_counts.get("accepted", 0) or 0.0))
             target_rejected = max(0.0, float(target_counts.get("rejected", 0) or 0.0))
             if target_accepted + target_rejected > 0.0:
-                return (target_accepted, target_rejected)
+                return (target_accepted, target_rejected, "target")
         if isinstance(language_counts, dict):
             language_accepted = max(0.0, float(language_counts.get("accepted", 0) or 0.0))
             language_rejected = max(0.0, float(language_counts.get("rejected", 0) or 0.0))
             if language_accepted + language_rejected > 0.0:
-                return (language_accepted, language_rejected)
-        return (accepted_total, rejected_total)
+                return (language_accepted, language_rejected, "language")
+        return (accepted_total, rejected_total, "global")
 
     direct = entry_counts(mutation)
     if direct is not None:
@@ -1746,13 +1779,19 @@ def mutation_memory_counts(
         aggregates = [entry_counts(part) for part in parts]
         # Treat partially-known compounds as unknown to preserve exploration.
         if not aggregates or any(item is None for item in aggregates):
-            return (0.0, 0.0)
+            return (0.0, 0.0, "global")
 
         accepted = sum(item[0] for item in aggregates if item is not None) / len(aggregates)
         rejected = sum(item[1] for item in aggregates if item is not None) / len(aggregates)
-        return (accepted, rejected)
+        scope_rank = {"target": 0, "language": 1, "global": 2}
+        scope = max(
+            (item[2] for item in aggregates if item is not None),
+            key=lambda value: scope_rank.get(value, 2),
+            default="global",
+        )
+        return (accepted, rejected, scope)
 
-    return (0.0, 0.0)
+    return (0.0, 0.0, "global")
 
 
 def mutation_ucb_score(
@@ -1822,6 +1861,16 @@ def strip_rust_comments_and_literals(source: str) -> str:
                 state = "block_comment"
                 block_depth = 1
                 continue
+            if ch == "'" and i + 1 < n and (source[i + 1].isalpha() or source[i + 1] == "_"):
+                # Preserve Rust lifetimes/labels (e.g. 'a, 'static, 'label:) as code.
+                j = i + 1
+                while j < n and (source[j].isalnum() or source[j] == "_"):
+                    j += 1
+                if not (j < n and source[j] == "'"):
+                    out.append(ch)
+                    i += 1
+                    continue
+
             if ch in {"'", '"'}:
                 out.append(ch)
                 i += 1
@@ -1893,7 +1942,7 @@ def strip_rust_comments_and_literals(source: str) -> str:
             continue
 
         if state == "raw_string":
-            if ch == '"' and raw_hashes >= 0:
+            if ch == '"':
                 hashes = source[i + 1 : i + 1 + raw_hashes]
                 if len(hashes) == raw_hashes and all(token == "#" for token in hashes):
                     out.append(" ")
