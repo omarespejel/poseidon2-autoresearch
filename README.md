@@ -174,6 +174,27 @@ python3 train.py --target cairo_poseidon_style_t8 --iterations 25
 
 The loop falls back to heuristics automatically if an API call fails.
 
+## Cross-Target Mutation Replay
+
+Rust targets now share accepted mutation history through persisted replay memory:
+
+- default file: `work/mutation_memory.json`
+- memory is seeded from historical `results.tsv` accepted/rejected rows
+- successful mutations on one Rust target are prioritized on other Rust targets
+
+Controls:
+
+```bash
+# default behavior (memory enabled)
+python3 train.py --target leanmultisig_poseidon16_src_fast --iterations 12
+
+# custom memory file
+python3 train.py --target leanmultisig_poseidon2_neon_src_fast --mutation-memory-file work/custom_memory.json
+
+# disable replay memory
+python3 train.py --target leanmultisig_poseidon2_neon_src_fast --disable-mutation-memory
+```
+
 ## Acceptance Policy
 
 A candidate is accepted only when:
