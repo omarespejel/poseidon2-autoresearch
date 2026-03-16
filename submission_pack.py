@@ -93,8 +93,37 @@ def infer_target_commands(target: dict[str, Any]) -> list[list[str]]:
     if ttype == "noir":
         return [["nargo", "check"], ["nargo", "info"], ["nargo", "execute"]]
     if ttype == "command":
-        cmd = target.get("benchmark_command", [])
-        return [list(cmd)] if isinstance(cmd, list) else []
+        out: list[list[str]] = []
+        seen: set[tuple[str, ...]] = set()
+        default_cmd = target.get("benchmark_command")
+        if isinstance(default_cmd, list):
+            default_cmd = [str(part) for part in default_cmd]
+
+        profiles = target.get("benchmark_profiles")
+        if isinstance(profiles, list) and profiles:
+            for profile in profiles:
+                if not isinstance(profile, dict):
+                    return []
+                cmd = profile.get("benchmark_command")
+                if cmd is None:
+                    cmd = default_cmd
+                if not isinstance(cmd, list) or not cmd:
+                    # Keep evidence generation strict: if any profile command cannot be
+                    # resolved exactly like prepare.py would, do not emit partial command lists.
+                    return []
+                normalized = tuple(str(part) for part in cmd)
+                if normalized in seen:
+                    continue
+                seen.add(normalized)
+                out.append([*normalized])
+            return out
+
+        cmd = default_cmd if isinstance(default_cmd, list) else []
+        if isinstance(cmd, list) and cmd:
+            normalized = tuple(str(part) for part in cmd)
+            if normalized not in seen:
+                out.append([*normalized])
+        return out
     return []
 
 

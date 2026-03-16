@@ -15,6 +15,7 @@ Primary source for required capabilities:
 | Structured execution logs (`agent_log.json`) | `submission_pack.py` writes `submission/agent_log.json` with decisions, retries, failures, tool calls, outputs |
 | Tool use and orchestration | `train.py`, `prepare.py`, `portfolio_loop.py`, `campaign.py` (multi-step orchestration) |
 | Safety guardrails | strict improvement gate, evaluation success requirement, optional variance/distribution/A-B confirmations, required-snippet preservation on sensitive Poseidon targets, auto-revert |
+| Verification rigor on real workloads | command-target workload profiles (`benchmark_profiles`) aggregate multiple Poseidon throughput shapes into one acceptance metric (`profiles_aggregate`) |
 | Compute budget awareness | `train.py` budgets (`max_iterations`, `max_accepted`, `max_runtime_seconds`) + submission budget accounting |
 
 ## Real Poseidon2 Improvement Track

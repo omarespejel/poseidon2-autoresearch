@@ -173,6 +173,8 @@ Rejected mutations can be temporarily cooled down (`blocked_mutation_ttl`) to en
 If the search stalls with `no_change`, the loop can release the oldest blocked mutation and retry selection in-place (`recover_from_no_change`, default `true`).
 Mutation selection can use a UCB bandit scheduler (`mutation_schedule=ucb`) with configurable exploration strength (`mutation_ucb_explore`).
 Sensitive crypto targets can enforce snippet-preservation guardrails (`required_snippets`) to reject candidates that drop critical permutation steps before benchmarking.
+Source-level Poseidon targets can run workload profiles (`benchmark_profiles`) and aggregate them with `profiles_aggregate`
+to avoid overfitting to one benchmark shape (for example, combining `--log-n-perms 10` and `11` in one accept/reject metric).
 Optional runtime controls are supported during benchmark commands:
 
 - `AUTORESEARCH_NICE=<level>` (process niceness)
