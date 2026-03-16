@@ -194,7 +194,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="leanmultisig_poseidon16_src_fast,leanmultisig_poseidon16_table_src_fast,leanmultisig_poseidon2_neon_src_fast",
         help="Comma-separated target list to cycle through",
     )
-    parser.add_argument("--rounds", type=int, default=4, help="Number of portfolio rounds")
+    parser.add_argument(
+        "--rounds",
+        type=int,
+        default=4,
+        help="Number of portfolio rounds (0 = run indefinitely until stop-after-total-accepted is reached)",
+    )
     parser.add_argument("--batch-iterations", type=int, default=6, help="Iterations per target batch")
     parser.add_argument("--batch-max-accepted", type=int, default=1, help="Max accepted changes per target batch")
     parser.add_argument(
@@ -351,6 +356,9 @@ def ucb_score(state: dict[str, Any], *, total_batches: int, explore: float, max_
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.rounds < 0:
+        print("--rounds must be >= 0", file=sys.stderr)
+        return 2
     targets = [t.strip() for t in args.targets.split(",") if t.strip()]
     if not targets:
         print("No targets configured", file=sys.stderr)
@@ -363,10 +371,18 @@ def main(argv: list[str] | None = None) -> int:
     totals = load_totals_state(state_path, targets)
     rows: list[BatchResult] = []
     total_accepted = 0
+    rounds_executed = 0
+    max_rounds = args.rounds if args.rounds > 0 else None
+    rounds_label = str(args.rounds) if max_rounds is not None else "infinite"
 
-    for round_index in range(1, args.rounds + 1):
+    round_index = 0
+    while True:
+        round_index += 1
+        if max_rounds is not None and round_index > max_rounds:
+            break
+        rounds_executed = round_index
         made_progress = False
-        portfolio_log(args.verbose, f"starting round {round_index}/{args.rounds}", level=1)
+        portfolio_log(args.verbose, f"starting round {round_index}/{rounds_label}", level=1)
         remaining_targets = [target for target in targets if totals[target]["plateau_streak"] < args.plateau_threshold]
 
         while remaining_targets:
@@ -454,6 +470,7 @@ def main(argv: list[str] | None = None) -> int:
                         {
                             "ok": True,
                             "rounds_executed": round_index,
+                            "infinite_rounds": max_rounds is None,
                             "total_accepted": total_accepted,
                             "schedule": args.schedule,
                             "ucb_explore": args.ucb_explore,
@@ -477,7 +494,7 @@ def main(argv: list[str] | None = None) -> int:
     write_reports(
         rows=rows,
         totals=totals,
-        rounds=args.rounds,
+        rounds=rounds_executed,
         batch_iterations=args.batch_iterations,
         batch_max_accepted=args.batch_max_accepted,
         schedule=args.schedule,
@@ -491,7 +508,8 @@ def main(argv: list[str] | None = None) -> int:
         json.dumps(
             {
                 "ok": True,
-                "rounds_executed": args.rounds,
+                "rounds_executed": rounds_executed,
+                "infinite_rounds": max_rounds is None,
                 "total_accepted": total_accepted,
                 "schedule": args.schedule,
                 "ucb_explore": args.ucb_explore,

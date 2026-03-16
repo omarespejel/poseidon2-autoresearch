@@ -1733,10 +1733,13 @@ def run_loop(args: argparse.Namespace) -> int:
         mutation_memory = load_mutation_memory(mutation_memory_path)
         seed_mutation_memory_from_results(mutation_memory)
 
+    max_iterations = args.iterations if args.iterations > 0 else None
+    iterations_label = str(args.iterations) if max_iterations is not None else "infinite"
+
     train_log(
         args,
         (
-            f"starting target={args.target} iterations={args.iterations} "
+            f"starting target={args.target} iterations={iterations_label} "
             f"max_accepted={args.max_accepted or 'none'} "
             f"max_runtime={args.max_runtime_seconds or 'none'}s "
             f"artifacts={args.artifacts}"
@@ -1753,7 +1756,7 @@ def run_loop(args: argparse.Namespace) -> int:
     run_label = make_run_label()
     run_env = runtime_fingerprint(target_name=args.target, target=target, source_path=source_path)
     loop_wall_start = time.perf_counter()
-    stop_reason = "iterations_exhausted"
+    stop_reason = "iterations_exhausted" if max_iterations is not None else "external_stop"
 
     prepare.append_result_row(
         target=args.target,
@@ -1801,7 +1804,7 @@ def run_loop(args: argparse.Namespace) -> int:
             "run_label": run_label,
             "runtime_env": run_env,
             "target_overrides": target_overrides,
-            "iterations": args.iterations,
+            "iterations": max_iterations,
             "mode": "openai" if os.getenv("OPENAI_API_KEY") else "heuristic",
             "mutation_memory": {
                 "enabled": mutation_memory is not None,
@@ -1811,7 +1814,7 @@ def run_loop(args: argparse.Namespace) -> int:
                 else 0,
             },
             "compute_budget": {
-                "max_iterations": args.iterations,
+                "max_iterations": max_iterations,
                 "max_accepted": args.max_accepted if args.max_accepted > 0 else None,
                 "max_runtime_seconds": args.max_runtime_seconds if args.max_runtime_seconds > 0 else None,
             },
@@ -1830,7 +1833,12 @@ def run_loop(args: argparse.Namespace) -> int:
     mutation_attempts = load_mutation_attempt_counts(args.target)
     iterations_completed = 0
 
-    for iteration in range(1, args.iterations + 1):
+    iteration = 0
+    while True:
+        iteration += 1
+        if max_iterations is not None and iteration > max_iterations:
+            break
+
         if args.max_runtime_seconds > 0:
             elapsed = time.perf_counter() - loop_wall_start
             if elapsed >= args.max_runtime_seconds:
@@ -1851,7 +1859,11 @@ def run_loop(args: argparse.Namespace) -> int:
         iterations_completed = iteration
         train_log(
             args,
-            f"iter {iteration}/{args.iterations} starting (accepted={accepted}, best={best_metric:.6f})",
+            (
+                f"iter {iteration}/"
+                f"{args.iterations if max_iterations is not None else 'inf'} "
+                f"starting (accepted={accepted}, best={best_metric:.6f})"
+            ),
             level=1,
         )
         current_source = source_path.read_text()
@@ -2205,7 +2217,7 @@ def run_loop(args: argparse.Namespace) -> int:
             "best_metric": best_metric,
             "elapsed_seconds": elapsed_seconds,
             "compute_budget": {
-                "max_iterations": args.iterations,
+                "max_iterations": max_iterations,
                 "max_accepted": args.max_accepted if args.max_accepted > 0 else None,
                 "max_runtime_seconds": args.max_runtime_seconds if args.max_runtime_seconds > 0 else None,
             },
@@ -2218,7 +2230,8 @@ def run_loop(args: argparse.Namespace) -> int:
                 "target": args.target,
                 "best_metric": best_metric,
                 "accepted": accepted,
-                "iterations_requested": args.iterations,
+                "iterations_requested": max_iterations,
+                "infinite_iterations": max_iterations is None,
                 "iterations_completed": iterations_completed,
                 "max_accepted": args.max_accepted,
                 "max_runtime_seconds": args.max_runtime_seconds if args.max_runtime_seconds > 0 else None,
@@ -2248,7 +2261,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Max chars shown per command stream when debug output is enabled",
     )
     parser.add_argument("--target", default="cairo_poseidon_style_t8", help="Target from config/targets.json")
-    parser.add_argument("--iterations", type=int, default=25, help="Max optimization iterations")
+    parser.add_argument(
+        "--iterations",
+        type=int,
+        default=25,
+        help="Max optimization iterations (0 = run indefinitely until another budget cap triggers)",
+    )
     parser.add_argument("--max-accepted", type=int, default=0, help="Stop after N accepted mutations (0 = no cap)")
     parser.add_argument(
         "--max-runtime-seconds",
@@ -2291,6 +2309,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.iterations < 0:
+        parser.error("--iterations must be >= 0")
     return run_loop(args)
 
 
