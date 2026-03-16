@@ -84,6 +84,8 @@
       "compound_every": 3,
       "compound_limit": 10,
       "compound_second_window": 6,
+      "mutation_selection_strategy": "ucb",
+      "mutation_ucb_explore": 0.85,
       "benchmark_command": [
         "cargo",
         "run",
@@ -122,6 +124,8 @@
       "compound_every": 2,
       "compound_limit": 8,
       "compound_second_window": 5,
+      "mutation_selection_strategy": "ucb",
+      "mutation_ucb_explore": 0.85,
       "benchmark_command": [
         "cargo",
         "run",
@@ -165,6 +169,8 @@
       "compound_every": 2,
       "compound_limit": 14,
       "compound_second_window": 10,
+      "mutation_selection_strategy": "ucb",
+      "mutation_ucb_explore": 1.0,
       "benchmark_command": [
         "cargo",
         "run",

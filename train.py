@@ -13,6 +13,7 @@ import argparse
 import datetime as dt
 import difflib
 import json
+import math
 import os
 import platform
 import re
@@ -49,6 +50,8 @@ ALLOWED_TARGET_OVERRIDE_KEYS = {
     "min_series_samples",
     "ab_repeats",
     "blocked_mutation_ttl",
+    "mutation_selection_strategy",
+    "mutation_ucb_explore",
 }
 DEFAULT_MUTATION_MEMORY_FILE = ROOT / "work" / "mutation_memory.json"
 DEFAULT_MUTATION_MEMORY_MAX_ENTRIES = 512
@@ -585,6 +588,88 @@ def generic_heuristic_candidate(source: str, iteration: int) -> tuple[str, str, 
     return source, "heuristic_no_change", False
 
 
+def mutation_memory_observations(memory: dict[str, Any]) -> int:
+    mutations = memory.get("mutations")
+    if not isinstance(mutations, dict):
+        return 0
+    total = 0
+    for raw in mutations.values():
+        if not isinstance(raw, dict):
+            continue
+        total += max(0, int(raw.get("accepted_total", 0)))
+        total += max(0, int(raw.get("rejected_total", 0)))
+    return total
+
+
+def split_compound_mutation(mutation: str) -> list[str]:
+    return [part.strip() for part in mutation.split("+") if part.strip()]
+
+
+def mutation_memory_stats(
+    memory: dict[str, Any],
+    mutation: str,
+) -> tuple[int, int, float] | None:
+    mutations = memory.get("mutations")
+    if not isinstance(mutations, dict):
+        return None
+
+    raw = mutations.get(mutation)
+    if isinstance(raw, dict):
+        accepted = max(0, int(raw.get("accepted_total", 0)))
+        rejected = max(0, int(raw.get("rejected_total", 0)))
+        latest_gain = float(raw.get("latest_gain", 0.0) or 0.0)
+        return accepted, rejected, latest_gain
+
+    parts = split_compound_mutation(mutation)
+    if len(parts) <= 1:
+        return None
+
+    accepted = 0
+    rejected = 0
+    gains: list[float] = []
+    found = False
+    for part in parts:
+        part_raw = mutations.get(part)
+        if not isinstance(part_raw, dict):
+            continue
+        found = True
+        accepted += max(0, int(part_raw.get("accepted_total", 0)))
+        rejected += max(0, int(part_raw.get("rejected_total", 0)))
+        gains.append(float(part_raw.get("latest_gain", 0.0) or 0.0))
+
+    if not found:
+        return None
+
+    latest_gain = sum(gains) / len(gains) if gains else 0.0
+    return accepted, rejected, latest_gain
+
+
+def mutation_ucb_score(
+    memory: dict[str, Any] | None,
+    mutation: str,
+    *,
+    explore: float,
+) -> float:
+    if not isinstance(memory, dict):
+        return 0.0
+
+    total_observations = max(1, mutation_memory_observations(memory))
+    stats = mutation_memory_stats(memory, mutation)
+    if stats is None:
+        return 1.0 + max(0.0, explore) * math.sqrt(math.log(total_observations + 1.0))
+
+    accepted, rejected, latest_gain = stats
+    n = accepted + rejected
+    if n <= 0:
+        return 1.0 + max(0.0, explore) * math.sqrt(math.log(total_observations + 1.0))
+
+    mean = accepted / n
+    bonus = max(0.0, explore) * math.sqrt(math.log(total_observations + 1.0) / n)
+    # Keep gain influence bounded so acceptance history remains primary.
+    gain_component = max(-0.25, min(0.25, latest_gain))
+    return mean + bonus + gain_component
+
+
 def rust_heuristic_candidate(
     source: str,
     iteration: int,
@@ -593,6 +678,7 @@ def rust_heuristic_candidate(
     mutation_attempts: dict[str, int] | None = None,
     target_config: dict[str, Any] | None = None,
     preferred_mutations: list[str] | None = None,
+    mutation_memory: dict[str, Any] | None = None,
 ) -> tuple[str, str, bool]:
     path = str(source_path).replace("\\", "/").lower()
 
@@ -652,7 +738,7 @@ def rust_heuristic_candidate(
                 return (1, min(part_ranks))
         return (2, 1_000_000)
 
-    candidates: list[tuple[int, int, int, int, int, str, str]] = []
+    candidates: list[tuple[int, int, int, float, int, int, str, str]] = []
     single_candidates: list[tuple[int, str, str]] = []
     attempts = mutation_attempts or {}
 
@@ -662,6 +748,11 @@ def rust_heuristic_candidate(
     prefer_compound = compound_every > 0 and (iteration % compound_every == 0)
     single_tier = 1 if prefer_compound else 0
     compound_tier = 0 if prefer_compound else 1
+    selection_strategy = str((target_config or {}).get("mutation_selection_strategy", "ucb")).strip().lower()
+    if selection_strategy not in {"shift", "ucb"}:
+        selection_strategy = "ucb"
+    ucb_explore = float((target_config or {}).get("mutation_ucb_explore", 0.75))
+    use_ucb = selection_strategy == "ucb" and isinstance(mutation_memory, dict)
 
     for idx, operator in enumerate(ordered):
         candidate, mutation, changed = operator(source)
@@ -671,8 +762,18 @@ def rust_heuristic_candidate(
             continue
         single_candidates.append((idx, candidate, mutation))
         pref_class, pref_rank_value = preference_for_label(mutation)
+        score = mutation_ucb_score(mutation_memory, mutation, explore=ucb_explore) if use_ucb else 0.0
         candidates.append(
-            (single_tier, pref_class, pref_rank_value, attempts.get(mutation, 0), idx, candidate, mutation)
+            (
+                single_tier,
+                pref_class,
+                pref_rank_value,
+                -score,
+                attempts.get(mutation, 0),
+                idx,
+                candidate,
+                mutation,
+            )
         )
 
     if compound_every > 0 and compound_limit > 0 and single_candidates:
@@ -697,8 +798,18 @@ def rust_heuristic_candidate(
                 combo_attempts = attempts.get(combo_mutation, attempts.get(mutation_a, 0) + attempts.get(mutation_b, 0))
                 combo_idx = idx_a * 1000 + idx_b
                 pref_class, pref_rank_value = preference_for_label(combo_mutation)
+                score = mutation_ucb_score(mutation_memory, combo_mutation, explore=ucb_explore) if use_ucb else 0.0
                 candidates.append(
-                    (compound_tier, pref_class, pref_rank_value, combo_attempts, combo_idx, candidate_b, combo_mutation)
+                    (
+                        compound_tier,
+                        pref_class,
+                        pref_rank_value,
+                        -score,
+                        combo_attempts,
+                        combo_idx,
+                        candidate_b,
+                        combo_mutation,
+                    )
                 )
                 added += 1
                 if added >= compound_limit:
@@ -707,8 +818,8 @@ def rust_heuristic_candidate(
                 break
 
     if candidates:
-        candidates.sort(key=lambda x: (x[0], x[1], x[2], x[3], x[4]))
-        _, _, _, _, _, chosen_candidate, chosen_mutation = candidates[0]
+        candidates.sort(key=lambda x: (x[0], x[1], x[2], x[3], x[4], x[5]))
+        _, _, _, _, _, _, chosen_candidate, chosen_mutation = candidates[0]
         return chosen_candidate, chosen_mutation, True
     return source, "rust_no_change", False
 
@@ -722,6 +833,7 @@ def heuristic_candidate(
     mutation_attempts: dict[str, int] | None = None,
     target_config: dict[str, Any] | None = None,
     preferred_mutations: list[str] | None = None,
+    mutation_memory: dict[str, Any] | None = None,
 ) -> tuple[str, str, bool]:
     if language.lower() == "rust":
         rust_candidate, mutation, changed = rust_heuristic_candidate(
@@ -732,6 +844,7 @@ def heuristic_candidate(
             mutation_attempts=mutation_attempts,
             target_config=target_config,
             preferred_mutations=preferred_mutations,
+            mutation_memory=mutation_memory,
         )
         if changed:
             return rust_candidate, mutation, True
@@ -1092,8 +1205,7 @@ def seed_mutation_memory_from_results(memory: dict[str, Any]) -> None:
             target_name=target_name,
             language=infer_mutation_language(mutation=mutation, target_language=target_language_map.get(target_name)),
             timestamp=cols[0],
-            metric_before=None,
-            metric_after=None,
+            objective_gain=None,
         )
     memory["seeded_from_results"] = True
 
@@ -1164,8 +1276,7 @@ def update_mutation_memory(
     target_name: str,
     language: str,
     timestamp: str,
-    metric_before: float | None,
-    metric_after: float | None,
+    objective_gain: float | None,
 ) -> None:
     mutations = memory.setdefault("mutations", {})
     if not isinstance(mutations, dict):
@@ -1203,8 +1314,8 @@ def update_mutation_memory(
     if isinstance(targets, dict):
         _increment_stat(targets, target_name, accepted)
 
-    if metric_before is not None and metric_after is not None:
-        entry["latest_gain"] = metric_after - metric_before
+    if objective_gain is not None:
+        entry["latest_gain"] = float(objective_gain)
 
     compact_mutation_memory(mutations, now_epoch=parse_iso_to_epoch(timestamp) or time.time())
 
@@ -1218,8 +1329,7 @@ def update_and_save_mutation_memory(
     target_name: str,
     language: str,
     timestamp: str,
-    metric_before: float | None,
-    metric_after: float | None,
+    objective_gain: float | None,
 ) -> dict[str, Any]:
     lock_path = path.with_suffix(path.suffix + ".lock")
     with file_lock(lock_path):
@@ -1231,8 +1341,7 @@ def update_and_save_mutation_memory(
             target_name=target_name,
             language=language,
             timestamp=timestamp,
-            metric_before=metric_before,
-            metric_after=metric_after,
+            objective_gain=objective_gain,
         )
         save_mutation_memory(path, latest)
 
@@ -1915,6 +2024,7 @@ def run_loop(args: argparse.Namespace) -> int:
                     mutation_attempts=mutation_attempts,
                     target_config=target,
                     preferred_mutations=preferred_mutations,
+                    mutation_memory=mutation_memory,
                 )
                 mutation = f"fallback_{mutation}"
             else:
@@ -1930,6 +2040,7 @@ def run_loop(args: argparse.Namespace) -> int:
                 mutation_attempts=mutation_attempts,
                 target_config=target,
                 preferred_mutations=preferred_mutations,
+                mutation_memory=mutation_memory,
             )
 
         if (
@@ -1957,6 +2068,7 @@ def run_loop(args: argparse.Namespace) -> int:
                     mutation_attempts=mutation_attempts,
                     target_config=target,
                     preferred_mutations=preferred_mutations,
+                    mutation_memory=mutation_memory,
                 )
 
         if not changed:
@@ -2109,6 +2221,14 @@ def run_loop(args: argparse.Namespace) -> int:
             if not improved:
                 blocked_mutations_until[mutation_key] = iteration + blocked_mutation_ttl
 
+            objective_gain = None
+            if success and metric_for_row is not None:
+                observed_metric = float(metric_for_row)
+                if bool(target["higher_is_better"]):
+                    objective_gain = observed_metric - best_before
+                else:
+                    objective_gain = best_before - observed_metric
+
             if mutation_memory is not None:
                 mutation_memory = update_and_save_mutation_memory(
                     mutation_memory_path,
@@ -2118,8 +2238,7 @@ def run_loop(args: argparse.Namespace) -> int:
                     target_name=args.target,
                     language=infer_mutation_language(mutation=mutation_key, target_language=language_norm),
                     timestamp=prepare.now_iso(),
-                    metric_before=best_before if improved else None,
-                    metric_after=best_metric if improved else None,
+                    objective_gain=objective_gain,
                 )
 
             should_write_artifact = args.artifacts == "all" or (args.artifacts == "accepted" and improved)
