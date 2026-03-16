@@ -32,6 +32,7 @@ DEFAULT_OVERRIDES_PATH = ROOT / "work" / "checkpoint_target_overrides.json"
 @dataclass
 class CmdResult:
     argv: list[str]
+    cwd: Path
     code: int
     stdout: str
     stderr: str
@@ -41,8 +42,8 @@ def run_cmd(argv: list[str], *, extra_env: dict[str, str] | None = None) -> CmdR
     env = os.environ.copy()
     if extra_env:
         env.update(extra_env)
-    proc = subprocess.run(argv, cwd=str(ROOT), text=True, capture_output=True, env=env)
-    return CmdResult(argv=argv, code=proc.returncode, stdout=proc.stdout, stderr=proc.stderr)
+    proc = subprocess.run(argv, cwd=str(ROOT), text=True, capture_output=True, env=env, check=False)
+    return CmdResult(argv=argv, cwd=ROOT, code=proc.returncode, stdout=proc.stdout, stderr=proc.stderr)
 
 
 def must_json(argv: list[str], *, extra_env: dict[str, str] | None = None) -> tuple[dict[str, Any], CmdResult]:
@@ -60,7 +61,7 @@ def must_json(argv: list[str], *, extra_env: dict[str, str] | None = None) -> tu
         sys.stderr.write(f"JSON parse error for command: {' '.join(argv)}\n")
         if result.stdout:
             sys.stderr.write(result.stdout + "\n")
-        raise SystemExit(1)
+        raise SystemExit(1) from None
     return payload, result
 
 

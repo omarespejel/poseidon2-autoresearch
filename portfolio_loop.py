@@ -35,6 +35,7 @@ class BatchResult:
 def run_batch(
     *,
     target: str,
+    round_index: int,
     iterations: int,
     max_accepted: int,
     artifacts: str,
@@ -57,7 +58,7 @@ def run_batch(
     ]
     if target_overrides_json:
         argv.extend(["--target-overrides-json", target_overrides_json])
-    proc = subprocess.run(argv, cwd=str(ROOT), text=True, capture_output=True)
+    proc = subprocess.run(argv, cwd=str(ROOT), text=True, capture_output=True, check=False)
 
     payload: dict[str, Any] = {}
     accepted = 0
@@ -76,7 +77,7 @@ def run_batch(
 
     return BatchResult(
         target=target,
-        round_index=-1,
+        round_index=round_index,
         code=proc.returncode,
         accepted=accepted,
         best_metric=best_metric,
@@ -231,13 +232,13 @@ def main(argv: list[str] | None = None) -> int:
 
             result = run_batch(
                 target=target,
+                round_index=round_index,
                 iterations=args.batch_iterations,
                 max_accepted=args.batch_max_accepted,
                 artifacts=args.artifacts,
                 confirm_repeats=args.confirm_repeats,
                 target_overrides_json=args.target_overrides_json,
             )
-            result.round_index = round_index
             rows.append(result)
 
             state["batches"] += 1

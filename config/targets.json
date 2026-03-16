@@ -24,6 +24,7 @@
       "description": "Poseidon2-style Noir permutation (width 8, optimization sandbox)",
       "project_dir": "examples/noir_poseidon2_style_t8",
       "source_file": "examples/noir_poseidon2_style_t8/src/main.nr",
+      "language": "Noir",
       "metric_name": "acir_opcodes",
       "higher_is_better": false
     },
@@ -32,6 +33,7 @@
       "description": "Poseidon2-style Noir permutation (width 16, optimization sandbox)",
       "project_dir": "examples/noir_poseidon2_style_t16",
       "source_file": "examples/noir_poseidon2_style_t16/src/main.nr",
+      "language": "Noir",
       "metric_name": "acir_opcodes",
       "higher_is_better": false
     },
@@ -60,7 +62,7 @@
       "bootstrap": {
         "git_url": "https://github.com/leanEthereum/leanMultisig.git",
         "path": "work/leanMultisig",
-        "ref": "main"
+        "ref": "6f06c021823c742697bf867bd53d0501b66289fe"
       }
     },
     "leanmultisig_poseidon16_src_fast": {
@@ -98,7 +100,7 @@
       "bootstrap": {
         "git_url": "https://github.com/leanEthereum/leanMultisig.git",
         "path": "work/leanMultisig",
-        "ref": "main"
+        "ref": "6f06c021823c742697bf867bd53d0501b66289fe"
       }
     },
     "leanmultisig_poseidon16_table_src_fast": {
@@ -136,7 +138,7 @@
       "bootstrap": {
         "git_url": "https://github.com/leanEthereum/leanMultisig.git",
         "path": "work/leanMultisig",
-        "ref": "main"
+        "ref": "6f06c021823c742697bf867bd53d0501b66289fe"
       }
     },
     "leanmultisig_poseidon2_neon_src_fast": {
@@ -180,7 +182,7 @@
       "bootstrap": {
         "git_url": "https://github.com/leanEthereum/leanMultisig.git",
         "path": "work/leanMultisig",
-        "ref": "main"
+        "ref": "6f06c021823c742697bf867bd53d0501b66289fe"
       }
     },
     "leanmultisig_poseidon16_full": {
@@ -207,7 +209,7 @@
       "bootstrap": {
         "git_url": "https://github.com/leanEthereum/leanMultisig.git",
         "path": "work/leanMultisig",
-        "ref": "main"
+        "ref": "6f06c021823c742697bf867bd53d0501b66289fe"
       }
     },
     "leanmultisig_xmss_fast": {
@@ -236,7 +238,7 @@
       "bootstrap": {
         "git_url": "https://github.com/leanEthereum/leanMultisig.git",
         "path": "work/leanMultisig",
-        "ref": "main"
+        "ref": "6f06c021823c742697bf867bd53d0501b66289fe"
       }
     }
   }

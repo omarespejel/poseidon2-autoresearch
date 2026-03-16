@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from target_config import load_targets_file
+
 ROOT = Path(__file__).resolve().parent
 TARGETS_FILE = ROOT / "config" / "targets.json"
 RESULTS_FILE = ROOT / "results.tsv"
@@ -66,7 +68,7 @@ def run_cmd(argv: list[str], cwd: Path) -> CommandResult:
         final_argv = ["nice", "-n", nice_level, *final_argv]
 
     start = time.perf_counter()
-    proc = subprocess.run(final_argv, cwd=str(cwd), text=True, capture_output=True)
+    proc = subprocess.run(final_argv, cwd=str(cwd), text=True, capture_output=True, check=False)
     return CommandResult(
         argv=final_argv,
         cwd=cwd,
@@ -78,8 +80,7 @@ def run_cmd(argv: list[str], cwd: Path) -> CommandResult:
 
 
 def load_targets() -> dict[str, dict[str, Any]]:
-    data = json.loads(TARGETS_FILE.read_text())
-    return data["targets"]
+    return load_targets_file(TARGETS_FILE)
 
 
 def ensure_outputs() -> None:
@@ -96,7 +97,11 @@ def append_log(payload: dict[str, Any]) -> None:
         f.write(json.dumps(payload, sort_keys=True) + "\n")
 
 
-def best_metric_for_target(target: str, higher_is_better: bool) -> float | None:
+def sanitize_notes(notes: str) -> str:
+    return notes.replace("\t", " ").replace("\r", " ").replace("\n", " ")
+
+
+def best_metric_for_target(target: str, *, higher_is_better: bool) -> float | None:
     if not RESULTS_FILE.exists():
         return None
 
@@ -112,11 +117,7 @@ def best_metric_for_target(target: str, higher_is_better: bool) -> float | None:
         except ValueError:
             continue
 
-        if best is None:
-            best = value
-        elif higher_is_better and value > best:
-            best = value
-        elif (not higher_is_better) and value < best:
+        if best is None or (higher_is_better and value > best) or ((not higher_is_better) and value < best):
             best = value
 
     return best
@@ -137,7 +138,7 @@ def append_result_row(
 ) -> None:
     ensure_outputs()
 
-    prev_best = best_metric_for_target(target, higher_is_better)
+    prev_best = best_metric_for_target(target, higher_is_better=higher_is_better)
     value_s = ""
     best_s = ""
     delta_s = ""
@@ -170,7 +171,7 @@ def append_result_row(
         f"{check_s:.4f}",
         f"{info_or_bench_s:.4f}",
         f"{execute_s:.4f}",
-        notes.replace("\t", " "),
+        sanitize_notes(notes),
     ]
 
     with RESULTS_FILE.open("a", encoding="utf-8") as f:
@@ -317,9 +318,15 @@ def bootstrap_target(target_name: str, target: dict[str, Any]) -> None:
     ensure_tool_exists("git")
 
     if repo_dir.exists() and (repo_dir / ".git").exists():
-        run_cmd(["git", "fetch", "--all", "--tags", "--prune"], repo_dir)
-        run_cmd(["git", "checkout", ref], repo_dir)
-        run_cmd(["git", "pull", "--ff-only"], repo_dir)
+        fetch = run_cmd(["git", "fetch", "--all", "--tags", "--prune"], repo_dir)
+        if fetch.code != 0:
+            raise ToolError(f"Failed to fetch {repo_dir}: {fetch.stderr or fetch.stdout}")
+        checkout = run_cmd(["git", "checkout", ref], repo_dir)
+        if checkout.code != 0:
+            raise ToolError(f"Failed to checkout {ref}: {checkout.stderr or checkout.stdout}")
+        pull = run_cmd(["git", "pull", "--ff-only"], repo_dir)
+        if pull.code != 0:
+            raise ToolError(f"Failed to pull {ref}: {pull.stderr or pull.stdout}")
         return
 
     if repo_dir.exists() and not (repo_dir / ".git").exists():
@@ -579,14 +586,14 @@ def evaluate_command(target_name: str, target: dict[str, Any]) -> dict[str, Any]
             "check_s": 0.0,
             "info_or_bench_s": total_seconds,
             "execute_s": 0.0,
-                "notes": str(exc),
-                "debug": {
-                    "bench_runs": bench_runs,
-                    "metric_values": metric_values,
-                    "metric_values_raw": metric_values_raw,
-                    "trim_extremes": trim_extremes,
-                },
-            }
+            "notes": str(exc),
+            "debug": {
+                "bench_runs": bench_runs,
+                "metric_values": metric_values,
+                "metric_values_raw": metric_values_raw,
+                "trim_extremes": trim_extremes,
+            },
+        }
 
     values_s = ",".join(f"{v:.2f}" for v in metric_values)
     return {

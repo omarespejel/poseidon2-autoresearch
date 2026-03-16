@@ -20,6 +20,7 @@ import statistics
 import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -751,14 +752,17 @@ def load_target_overrides(path_value: str | None, *, target_name: str) -> dict[s
 
     payload = json.loads(path.read_text())
     if not isinstance(payload, dict):
-        raise ValueError("target overrides payload must be a JSON object")
+        raise TypeError("target overrides payload must be a JSON object")
 
-    selected = payload.get(target_name, payload)
+    selected: Any
+    if any(key in ALLOWED_TARGET_OVERRIDE_KEYS for key in payload):
+        selected = payload
+    else:
+        selected = payload.get(target_name, {})
     if not isinstance(selected, dict):
-        raise ValueError(f"target overrides entry for '{target_name}' must be a JSON object")
+        raise TypeError(f"target overrides entry for '{target_name}' must be a JSON object")
 
-    filtered = {key: value for key, value in selected.items() if key in ALLOWED_TARGET_OVERRIDE_KEYS}
-    return filtered
+    return {key: value for key, value in selected.items() if key in ALLOWED_TARGET_OVERRIDE_KEYS}
 
 
 def extract_mutation_label_from_notes(notes: str) -> str | None:
@@ -851,7 +855,7 @@ def confirm_improvement(
     ok = is_better(
         confirmed,
         best_metric,
-        higher_is_better,
+        higher_is_better=higher_is_better,
         min_improvement_abs=min_improvement_abs,
         min_improvement_rel=min_improvement_rel,
     )
@@ -874,44 +878,47 @@ def ab_validate_candidate(
 
     candidate_values: list[float] = []
     original_values: list[float] = []
+    restore_source = original_source
 
-    source_path.write_text(candidate_source)
-    for _ in range(repeats):
-        candidate_result = prepare.evaluate_target(target_name)
-        metric_value = candidate_result.get("metric_value")
-        if candidate_result.get("status") != "success" or metric_value is None:
-            return False, {"candidate_values": candidate_values}, "ab_candidate_eval_failed"
-        candidate_values.append(float(metric_value))
+    try:
+        source_path.write_text(candidate_source)
+        for _ in range(repeats):
+            candidate_result = prepare.evaluate_target(target_name)
+            metric_value = candidate_result.get("metric_value")
+            if candidate_result.get("status") != "success" or metric_value is None:
+                return False, {"candidate_values": candidate_values}, "ab_candidate_eval_failed"
+            candidate_values.append(float(metric_value))
 
-    source_path.write_text(original_source)
-    for _ in range(repeats):
-        original_result = prepare.evaluate_target(target_name)
-        metric_value = original_result.get("metric_value")
-        if original_result.get("status") != "success" or metric_value is None:
-            source_path.write_text(candidate_source)
-            return False, {"candidate_values": candidate_values, "original_values": original_values}, "ab_original_eval_failed"
-        original_values.append(float(metric_value))
+        source_path.write_text(original_source)
+        for _ in range(repeats):
+            original_result = prepare.evaluate_target(target_name)
+            metric_value = original_result.get("metric_value")
+            if original_result.get("status") != "success" or metric_value is None:
+                return False, {"candidate_values": candidate_values, "original_values": original_values}, "ab_original_eval_failed"
+            original_values.append(float(metric_value))
 
-    source_path.write_text(candidate_source)
+        candidate_median = float(statistics.median(candidate_values))
+        original_median = float(statistics.median(original_values))
+        ok = is_better(
+            candidate_median,
+            original_median,
+            higher_is_better=higher_is_better,
+            min_improvement_abs=min_improvement_abs,
+            min_improvement_rel=min_improvement_rel,
+        )
+        if ok:
+            restore_source = candidate_source
 
-    candidate_median = float(statistics.median(candidate_values))
-    original_median = float(statistics.median(original_values))
-    ok = is_better(
-        candidate_median,
-        original_median,
-        higher_is_better,
-        min_improvement_abs=min_improvement_abs,
-        min_improvement_rel=min_improvement_rel,
-    )
-
-    details = {
-        "repeats": repeats,
-        "candidate_values": candidate_values,
-        "original_values": original_values,
-        "candidate_median": candidate_median,
-        "original_median": original_median,
-    }
-    return ok, details, "ab_ok" if ok else "ab_not_better"
+        details = {
+            "repeats": repeats,
+            "candidate_values": candidate_values,
+            "original_values": original_values,
+            "candidate_median": candidate_median,
+            "original_median": original_median,
+        }
+        return ok, details, "ab_ok" if ok else "ab_not_better"
+    finally:
+        source_path.write_text(restore_source)
 
 
 def write_iteration_artifact(
@@ -987,7 +994,15 @@ def request_openai_candidate(
         return None, {"reason": "OPENAI_API_KEY not set"}
 
     base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+    parsed_base_url = urllib.parse.urlparse(base_url)
+    if parsed_base_url.scheme not in {"https", "http"}:
+        return None, {"reason": "invalid_base_url_scheme", "url": base_url[:200]}
+    if parsed_base_url.scheme == "http" and parsed_base_url.hostname not in {"127.0.0.1", "localhost"}:
+        return None, {"reason": "invalid_base_url_host", "url": base_url[:200]}
     url = f"{base_url}/chat/completions"
+    parsed_url = urllib.parse.urlparse(url)
+    if parsed_url.scheme not in {"https", "http"} or not parsed_url.netloc:
+        return None, {"reason": "invalid_request_url", "url": url[:200]}
 
     payload = {
         "model": model,
@@ -1034,8 +1049,8 @@ def request_openai_candidate(
 def is_better(
     value: float,
     best: float,
-    higher_is_better: bool,
     *,
+    higher_is_better: bool,
     min_improvement_abs: float = 0.0,
     min_improvement_rel: float = 0.0,
 ) -> bool:
@@ -1137,12 +1152,10 @@ def distribution_guard(
     cand_ci = mean_confidence_interval(candidate_values, ci_z)
     base_ci = mean_confidence_interval(baseline_values, ci_z)
 
-    ci_ok = True
     if require_ci_separation:
-        if higher_is_better:
-            ci_ok = cand_ci[0] > base_ci[1]
-        else:
-            ci_ok = cand_ci[1] < base_ci[0]
+        ci_ok = cand_ci[0] > base_ci[1] if higher_is_better else cand_ci[1] < base_ci[0]
+    else:
+        ci_ok = True
 
     stats = {
         "candidate_n": len(candidate_values),
@@ -1333,12 +1346,13 @@ def run_loop(args: argparse.Namespace) -> int:
                 language=language,
                 source_code=current_source,
             )
-            candidate, diagnostics = request_openai_candidate(
+            candidate, llm_diagnostics = request_openai_candidate(
                 model=args.model,
                 system_prompt=f"Return only valid {language} source code.",
                 user_prompt=prompt,
                 temperature=args.temperature,
             )
+            diagnostics.update(llm_diagnostics)
             if candidate is None:
                 candidate, mutation, changed = heuristic_candidate(
                     current_source,
@@ -1382,176 +1396,184 @@ def run_loop(args: argparse.Namespace) -> int:
         mutation_attempts[mutation] = mutation_attempts.get(mutation, 0) + 1
 
         source_path.write_text(candidate)
-        result = prepare.evaluate_target(args.target)
+        try:
+            result = prepare.evaluate_target(args.target)
 
-        metric_value = result.get("metric_value")
-        metric_for_row = float(metric_value) if metric_value is not None else None
-        success = result.get("status") == "success" and metric_value is not None
+            metric_value = result.get("metric_value")
+            metric_for_row = float(metric_value) if metric_value is not None else None
+            success = result.get("status") == "success" and metric_value is not None
 
-        metric_series = parse_metric_series(result.get("debug", {}).get("metric_values"))
-        rel_stdev = None
-        if metric_series is not None and len(metric_series) >= 2:
-            try:
-                rel_stdev = relative_stdev(metric_series)
-                diagnostics["rel_stdev"] = rel_stdev
-            except Exception:  # noqa: BLE001
-                rel_stdev = None
+            metric_series = parse_metric_series(result.get("debug", {}).get("metric_values"))
+            rel_stdev = None
+            if metric_series is not None and len(metric_series) >= 2:
+                try:
+                    rel_stdev = relative_stdev(metric_series)
+                    diagnostics["rel_stdev"] = rel_stdev
+                except Exception:  # noqa: BLE001
+                    rel_stdev = None
 
-        improved = bool(
-            success
-            and is_better(
-                float(metric_value),
-                best_metric,
-                bool(target["higher_is_better"]),
-                min_improvement_abs=min_improvement_abs,
-                min_improvement_rel=effective_rel_threshold,
-            )
-        )
-
-        notes = mutation
-        if diagnostics:
-            notes = f"{notes};diag={diagnostics.get('reason', 'n/a')}"
-
-        if success and rel_stdev is not None and max_rel_stdev_f is not None and rel_stdev > max_rel_stdev_f:
-            improved = False
-            source_path.write_text(current_source)
-            notes = f"rejected_high_variance:{notes};rel_stdev={rel_stdev:.6f}"
-
-        if (
-            improved
-            and metric_series is not None
-            and len(metric_series) >= min_series_samples
-            and len(best_metric_series) >= min_series_samples
-            and (min_effect_sigma > 0.0 or require_ci_separation)
-        ):
-            dist_ok, dist_reason, dist_stats = distribution_guard(
-                candidate_values=metric_series,
-                baseline_values=best_metric_series,
-                higher_is_better=bool(target["higher_is_better"]),
-                min_effect_sigma=min_effect_sigma,
-                ci_z=ci_z,
-                require_ci_separation=require_ci_separation,
-            )
-            diagnostics["distribution"] = dist_stats
-            if not dist_ok:
-                improved = False
-                source_path.write_text(current_source)
-                notes = f"rejected_distribution_{dist_reason}:{notes}"
-
-        best_before = best_metric
-        if improved:
-            confirmed_ok, confirmed_metric, confirmed_values, confirm_reason = confirm_improvement(
-                target_name=args.target,
-                best_metric=best_metric,
-                higher_is_better=bool(target["higher_is_better"]),
-                min_improvement_abs=min_improvement_abs,
-                min_improvement_rel=effective_rel_threshold,
-                repeats=confirm_repeats,
-            )
-            if confirmed_values:
-                diagnostics["confirm_values"] = confirmed_values
-            if confirmed_ok:
-                ab_ok, ab_details, ab_reason = ab_validate_candidate(
-                    source_path=source_path,
-                    target_name=args.target,
-                    candidate_source=candidate,
-                    original_source=current_source,
+            improved = bool(
+                success
+                and is_better(
+                    float(metric_value),
+                    best_metric,
                     higher_is_better=bool(target["higher_is_better"]),
                     min_improvement_abs=min_improvement_abs,
                     min_improvement_rel=effective_rel_threshold,
-                    repeats=ab_repeats,
                 )
-                if ab_details:
-                    diagnostics["ab_validation"] = ab_details
+            )
 
-                if ab_ok:
-                    accepted += 1
-                    blocked_mutations_until.clear()
-                    best_metric = float(metric_value) if confirmed_metric is None else confirmed_metric
-                    if confirmed_metric is not None:
-                        metric_for_row = confirmed_metric
-                    if metric_series is not None and metric_series:
-                        best_metric_series = metric_series
-                    elif confirmed_values:
-                        best_metric_series = [float(v) for v in confirmed_values]
-                    notes = f"accepted:{notes};{confirm_reason};{ab_reason}"
+            notes = mutation
+            if diagnostics:
+                notes = f"{notes};diag={diagnostics.get('reason', 'n/a')}"
+
+            if success and rel_stdev is not None and max_rel_stdev_f is not None and rel_stdev > max_rel_stdev_f:
+                improved = False
+                source_path.write_text(current_source)
+                notes = f"rejected_high_variance:{notes};rel_stdev={rel_stdev:.6f}"
+
+            if (
+                improved
+                and metric_series is not None
+                and len(metric_series) >= min_series_samples
+                and len(best_metric_series) >= min_series_samples
+                and (min_effect_sigma > 0.0 or require_ci_separation)
+            ):
+                dist_ok, dist_reason, dist_stats = distribution_guard(
+                    candidate_values=metric_series,
+                    baseline_values=best_metric_series,
+                    higher_is_better=bool(target["higher_is_better"]),
+                    min_effect_sigma=min_effect_sigma,
+                    ci_z=ci_z,
+                    require_ci_separation=require_ci_separation,
+                )
+                diagnostics["distribution"] = dist_stats
+                if not dist_ok:
+                    improved = False
+                    source_path.write_text(current_source)
+                    notes = f"rejected_distribution_{dist_reason}:{notes}"
+
+            best_before = best_metric
+            if improved:
+                confirmed_ok, confirmed_metric, confirmed_values, confirm_reason = confirm_improvement(
+                    target_name=args.target,
+                    best_metric=best_metric,
+                    higher_is_better=bool(target["higher_is_better"]),
+                    min_improvement_abs=min_improvement_abs,
+                    min_improvement_rel=effective_rel_threshold,
+                    repeats=confirm_repeats,
+                )
+                if confirmed_values:
+                    diagnostics["confirm_values"] = confirmed_values
+                if confirmed_ok:
+                    ab_ok, ab_details, ab_reason = ab_validate_candidate(
+                        source_path=source_path,
+                        target_name=args.target,
+                        candidate_source=candidate,
+                        original_source=current_source,
+                        higher_is_better=bool(target["higher_is_better"]),
+                        min_improvement_abs=min_improvement_abs,
+                        min_improvement_rel=effective_rel_threshold,
+                        repeats=ab_repeats,
+                    )
+                    if ab_details:
+                        diagnostics["ab_validation"] = ab_details
+
+                    if ab_ok:
+                        accepted += 1
+                        blocked_mutations_until.clear()
+                        best_metric = float(metric_value) if confirmed_metric is None else confirmed_metric
+                        if confirmed_metric is not None:
+                            metric_for_row = confirmed_metric
+                        if metric_series is not None and metric_series:
+                            best_metric_series = metric_series
+                        elif confirmed_values:
+                            best_metric_series = [float(v) for v in confirmed_values]
+                        notes = f"accepted:{notes};{confirm_reason};{ab_reason}"
+                    else:
+                        improved = False
+                        source_path.write_text(current_source)
+                        notes = f"rejected_{ab_reason}:{notes};{confirm_reason}"
                 else:
                     improved = False
                     source_path.write_text(current_source)
-                    notes = f"rejected_{ab_reason}:{notes};{confirm_reason}"
+                    notes = f"rejected_{confirm_reason}:{notes}"
             else:
-                improved = False
                 source_path.write_text(current_source)
-                notes = f"rejected_{confirm_reason}:{notes}"
-        else:
-            source_path.write_text(current_source)
-            if success:
-                raw_better = is_better(float(metric_value), best_metric, bool(target["higher_is_better"]))
-                if raw_better and (min_improvement_abs > 0.0 or effective_rel_threshold > 0.0):
-                    notes = f"rejected_below_threshold:{notes}"
+                if success:
+                    raw_better = is_better(
+                        float(metric_value),
+                        best_metric,
+                        higher_is_better=bool(target["higher_is_better"]),
+                    )
+                    if raw_better and (min_improvement_abs > 0.0 or effective_rel_threshold > 0.0):
+                        notes = f"rejected_below_threshold:{notes}"
+                    else:
+                        notes = f"rejected_not_better:{notes}"
                 else:
-                    notes = f"rejected_not_better:{notes}"
-            else:
-                notes = f"rejected_eval_failed:{notes}"
+                    notes = f"rejected_eval_failed:{notes}"
 
-        if not improved:
-            blocked_mutations_until[mutation] = iteration + blocked_mutation_ttl
+            if not improved:
+                blocked_mutations_until[mutation] = iteration + blocked_mutation_ttl
 
-        should_write_artifact = args.artifacts == "all" or (args.artifacts == "accepted" and improved)
-        if should_write_artifact:
-            artifact_source = candidate if improved else current_source
-            write_iteration_artifact(
-                target_name=args.target,
-                run_label=run_label,
+            should_write_artifact = args.artifacts == "all" or (args.artifacts == "accepted" and improved)
+            if should_write_artifact:
+                artifact_source = candidate if improved else current_source
+                write_iteration_artifact(
+                    target_name=args.target,
+                    run_label=run_label,
+                    iteration=iteration,
+                    source_path=source_path,
+                    language=language,
+                    previous_source=current_source,
+                    candidate_source=artifact_source,
+                    mutation=mutation,
+                    accepted=improved,
+                    best_before=best_before,
+                    best_after=best_metric,
+                    diagnostics=diagnostics,
+                    result=result,
+                    runtime_env=run_env,
+                )
+
+            prepare.append_result_row(
+                target=args.target,
                 iteration=iteration,
-                source_path=source_path,
-                language=language,
-                previous_source=current_source,
-                candidate_source=artifact_source,
-                mutation=mutation,
-                accepted=improved,
-                best_before=best_before,
-                best_after=best_metric,
-                diagnostics=diagnostics,
-                result=result,
-                runtime_env=run_env,
+                status=result.get("status", "failed") if success else "failed",
+                metric_name=target["metric_name"],
+                metric_value=metric_for_row,
+                higher_is_better=bool(target["higher_is_better"]),
+                check_s=float(result.get("check_s", 0.0)),
+                info_or_bench_s=float(result.get("info_or_bench_s", 0.0)),
+                execute_s=float(result.get("execute_s", 0.0)),
+                notes=f"{notes};run={run_label}",
             )
 
-        prepare.append_result_row(
-            target=args.target,
-            iteration=iteration,
-            status=result.get("status", "failed") if success else "failed",
-            metric_name=target["metric_name"],
-            metric_value=metric_for_row,
-            higher_is_better=bool(target["higher_is_better"]),
-            check_s=float(result.get("check_s", 0.0)),
-            info_or_bench_s=float(result.get("info_or_bench_s", 0.0)),
-            execute_s=float(result.get("execute_s", 0.0)),
-            notes=f"{notes};run={run_label}",
-        )
-
-        prepare.append_log(
-            {
-                "event": "loop_iteration",
-                "timestamp": prepare.now_iso(),
-                "target": args.target,
-                "iteration": iteration,
-                "mutation": mutation,
-                "accepted": improved,
-                "best_metric": best_metric,
-                "effective_threshold": threshold_diag,
-                "result": {
-                    "status": result.get("status"),
-                    "metric_name": result.get("metric_name"),
-                    "metric_value": result.get("metric_value"),
-                    "notes": result.get("notes"),
+            prepare.append_log(
+                {
+                    "event": "loop_iteration",
+                    "timestamp": prepare.now_iso(),
+                    "target": args.target,
+                    "iteration": iteration,
+                    "mutation": mutation,
+                    "accepted": improved,
+                    "best_metric": best_metric,
+                    "effective_threshold": threshold_diag,
+                    "result": {
+                        "status": result.get("status"),
+                        "metric_name": result.get("metric_name"),
+                        "metric_value": result.get("metric_value"),
+                        "notes": result.get("notes"),
+                    },
+                    "diagnostics": diagnostics,
                 },
-                "diagnostics": diagnostics,
-            }
-        )
+            )
 
-        if args.max_accepted and accepted >= args.max_accepted:
-            break
+            if args.max_accepted and accepted >= args.max_accepted:
+                break
+        except BaseException:
+            source_path.write_text(current_source)
+            raise
 
     print(
         json.dumps(

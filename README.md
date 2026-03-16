@@ -3,6 +3,7 @@
 AutoPoseidon is a reproducible autoresearch harness for cryptographic circuit optimization.
 
 This scaffold focuses on what is quickly verifiable:
+
 - autonomous iteration loop
 - measurable metric deltas
 - deterministic accept/reject policy
@@ -39,6 +40,7 @@ python3 train.py --target cairo_poseidon_style_t8 --iterations 12 --max-accepted
 ## Karpathy-Compatible Mode
 
 The repo now supports the same top-level workflow shape:
+
 - `prepare.py` (fixed)
 - `train.py` (agent loop / editable)
 - `program.md` (human instructions)
@@ -65,6 +67,7 @@ python3 portfolio_loop.py --rounds 2 --batch-iterations 4 --target-overrides-jso
 ```
 
 This writes:
+
 - `portfolio_report.md`
 - `portfolio_report.json`
 
@@ -75,6 +78,7 @@ python3 evidence_pack.py
 ```
 
 This writes:
+
 - `evidence/manifest.json`
 - `evidence/summary.md`
 - `evidence/retained_artifacts/*`
@@ -108,6 +112,7 @@ Lean command targets use warmup + repeated runs with median aggregation for more
 Targets can optionally trim outliers before aggregation with `trim_extremes`.
 For noisy throughput metrics, acceptance also uses relative improvement thresholds from `config/targets.json`.
 Thresholds can be static (`fixed`) or noise-adaptive (`adaptive` / `floor`) via:
+
 - `min_improvement_rel_mode`
 - `min_improvement_rel_sigma`
 - `min_improvement_rel_min`
@@ -119,6 +124,7 @@ Source-level command targets can additionally require distribution separation
 They can also run post-accept A/B replay (`ab_repeats`) to confirm patched vs original.
 Rejected mutations can be temporarily cooled down (`blocked_mutation_ttl`) to encourage broader exploration.
 Optional runtime controls are supported during benchmark commands:
+
 - `AUTORESEARCH_NICE=<level>` (process niceness)
 - `AUTORESEARCH_CPU_AFFINITY=<cpu-list>` (uses `taskset -c` when available)
 
@@ -140,10 +146,12 @@ python3 train.py --target leanmultisig_poseidon16_src_fast --iterations 5 --max-
 ```
 
 Additional source-level targets are also available for deeper Poseidon2 hotspots:
+
 - `leanmultisig_poseidon16_table_src_fast`
 - `leanmultisig_poseidon2_neon_src_fast`
 
 Reference implementation context can be inspected in:
+
 - `work/leanMultisig`
 - `work/leanSig`
 
@@ -162,6 +170,7 @@ The loop falls back to heuristics automatically if an API call fails.
 ## Acceptance Policy
 
 A candidate is accepted only when:
+
 - evaluation succeeds (`scarb build` + `scarb test` for Cairo targets, or the equivalent target-specific checks)
 - metric strictly improves relative to best-so-far
 - optional noise guards pass (`max_rel_stdev`, distribution/effect-size gate for command targets)

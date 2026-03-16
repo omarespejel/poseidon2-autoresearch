@@ -7,6 +7,7 @@ import argparse
 import csv
 import datetime as dt
 import json
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -19,7 +20,8 @@ PORTFOLIO_JSON = ROOT / "portfolio_report.json"
 DEFAULT_REPORT = ROOT / "readiness_report.md"
 
 # Public Synthesis timeline marker observed on-site.
-BUILD_CLOSE_UTC = dt.datetime(2026, 3, 22, 17, 0, 0, tzinfo=dt.timezone.utc)
+DEFAULT_BUILD_CLOSE_UTC = dt.datetime(2026, 3, 22, 17, 0, 0, tzinfo=dt.timezone.utc)
+INFORMATIONAL_CHECKS = {"recent_activity_24h"}
 
 
 @dataclass
@@ -70,11 +72,21 @@ def load_json(path: Path) -> dict[str, Any] | None:
     return None
 
 
+def resolve_build_close_utc(raw: str) -> dt.datetime:
+    parsed = parse_iso(raw)
+    if parsed is None:
+        raise ValueError(f"invalid ISO-8601 timestamp: {raw}")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.astimezone(dt.timezone.utc)
+
+
 def build_checks(
     *,
     manifest: dict[str, Any] | None,
     portfolio: dict[str, Any] | None,
     rows: list[dict[str, str]],
+    build_close_utc: dt.datetime,
 ) -> list[CheckResult]:
     checks: list[CheckResult] = []
 
@@ -131,27 +143,28 @@ def build_checks(
         details = f"latest_result={ts.isoformat()} age_hours={age_h:.2f}"
     checks.append(CheckResult(name="recent_activity_24h", ok=recent_ok, details=details))
 
-    remaining_h = (BUILD_CLOSE_UTC - now_utc()).total_seconds() / 3600.0
+    remaining_h = (build_close_utc - now_utc()).total_seconds() / 3600.0
     checks.append(
         CheckResult(
             name="before_build_close",
             ok=remaining_h > 0.0,
-            details=f"hours_to_build_close={remaining_h:.2f} (deadline={BUILD_CLOSE_UTC.isoformat()})",
+            details=f"hours_to_build_close={remaining_h:.2f} (deadline={build_close_utc.isoformat()})",
         )
     )
 
     return checks
 
 
-def write_markdown_report(path: Path, checks: list[CheckResult]) -> None:
-    ready = all(c.ok for c in checks if c.name != "recent_activity_24h")
+def write_markdown_report(path: Path, checks: list[CheckResult], *, build_close_utc: dt.datetime) -> None:
+    # Fresh activity is informative but not a hard blocker once the evidence pack is assembled.
+    ready = all(c.ok for c in checks if c.name not in INFORMATIONAL_CHECKS)
     now = now_utc().isoformat()
 
     lines: list[str] = []
     lines.append("# AutoPoseidon Readiness Report")
     lines.append("")
     lines.append(f"- generated_at: `{now}`")
-    lines.append(f"- build_close_utc: `{BUILD_CLOSE_UTC.isoformat()}`")
+    lines.append(f"- build_close_utc: `{build_close_utc.isoformat()}`")
     lines.append(f"- overall_ready: `{'yes' if ready else 'no'}`")
     lines.append("")
     lines.append("| check | ok | details |")
@@ -175,25 +188,35 @@ def write_markdown_report(path: Path, checks: list[CheckResult]) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Check AutoPoseidon submission readiness")
     parser.add_argument("--report", default=str(DEFAULT_REPORT), help="Path to write markdown report")
+    parser.add_argument(
+        "--build-close-utc",
+        default=DEFAULT_BUILD_CLOSE_UTC.isoformat(),
+        help="ISO-8601 build-close timestamp in UTC",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    try:
+        build_close_utc = resolve_build_close_utc(args.build_close_utc)
+    except ValueError as exc:
+        print(f"Invalid --build-close-utc: {exc}", file=sys.stderr)
+        return 2
 
     manifest = load_json(EVIDENCE_MANIFEST)
     portfolio = load_json(PORTFOLIO_JSON)
     rows = read_results_rows()
-    checks = build_checks(manifest=manifest, portfolio=portfolio, rows=rows)
+    checks = build_checks(manifest=manifest, portfolio=portfolio, rows=rows, build_close_utc=build_close_utc)
 
     report_path = Path(args.report)
-    write_markdown_report(report_path, checks)
+    write_markdown_report(report_path, checks, build_close_utc=build_close_utc)
 
     payload = {
         "ok": True,
         "generated_at": now_utc().isoformat(),
         "report": str(report_path),
-        "build_close_utc": BUILD_CLOSE_UTC.isoformat(),
+        "build_close_utc": build_close_utc.isoformat(),
         "checks": [{"name": c.name, "ok": c.ok, "details": c.details} for c in checks],
     }
     print(json.dumps(payload, indent=2, sort_keys=True))

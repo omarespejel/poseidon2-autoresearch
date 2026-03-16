@@ -33,7 +33,7 @@ class RunResult:
 
 
 def run(argv: list[str]) -> RunResult:
-    proc = subprocess.run(argv, cwd=str(ROOT), text=True, capture_output=True)
+    proc = subprocess.run(argv, cwd=str(ROOT), text=True, capture_output=True, check=False)
     return RunResult(argv=argv, code=proc.returncode, stdout=proc.stdout, stderr=proc.stderr)
 
 
@@ -104,7 +104,7 @@ def write_report(
     lines.append("## Latest Metrics")
     lines.append("")
     lines.append("| target | status | metric | value | best | notes |")
-    lines.append("|---|---:|---|---:|---:|---|")
+    lines.append("|---|---|---|---:|---:|---|")
 
     for target, row in latest.items():
         lines.append(
@@ -174,6 +174,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         loop_payload = json.loads(loop_res.stdout.strip() or "{}")
     except json.JSONDecodeError:
+        sys.stderr.write("Warning: train.py returned non-JSON stdout; continuing with results.tsv as source of truth\n")
+        if loop_res.stdout.strip():
+            sys.stderr.write(loop_res.stdout.strip()[-1000:] + "\n")
         loop_payload = {}
 
     # Real targets (EF-adjacent stack).
@@ -192,6 +195,7 @@ def main(argv: list[str] | None = None) -> int:
 
     rows = parse_results()
     accepts = count_accepts(rows, args.loop_target)
+    loop_accepts_reported = loop_payload.get("accepted")
     write_report(
         rows=rows,
         loop_target=args.loop_target,
@@ -200,7 +204,18 @@ def main(argv: list[str] | None = None) -> int:
         loop_accepts=accepts,
     )
 
-    print(json.dumps({"ok": True, "report": str(REPORT), "rows": len(rows), "accepted": accepts}, indent=2))
+    print(
+        json.dumps(
+            {
+                "ok": True,
+                "report": str(REPORT),
+                "rows": len(rows),
+                "accepted": accepts,
+                "loop_accepts_reported": loop_accepts_reported,
+            },
+            indent=2,
+        )
+    )
     return 0
 
 

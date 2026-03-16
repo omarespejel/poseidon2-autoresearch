@@ -23,8 +23,7 @@ pub fn hash8(
     a6: felt252,
     a7: felt252,
 ) -> felt252 {
-    let mut h = poseidon_hash_span(array![a0, a1, a2, a3, a4, a5, a6, a7].span());
-    h
+    poseidon_hash_span(array![a0, a1, a2, a3, a4, a5, a6, a7].span())
 }
 
 #[cfg(test)]
@@ -39,8 +38,12 @@ mod tests {
     }
 
     #[test]
-    fn hash8_stable_nonzero() {
-        let h = hash8(10, 20, 30, 40, 50, 60, 70, 80);
-        assert(h != 0, 'unexpected zero hash');
+    fn hash8_matches_known_vector() {
+        assert_eq!(hash8(1, 2, 3, 4, 5, 6, 7, 8), 142523731258509939608696022271238521916410456401611624853849835202137558864);
+    }
+
+    #[test]
+    fn hash8_matches_zero_vector() {
+        assert_eq!(hash8(0, 0, 0, 0, 0, 0, 0, 0), 2975145535556472711340937403264375774159340593752652611583194611116420827365);
     }
 }

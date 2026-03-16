@@ -38,7 +38,8 @@ fn permute(mut state: [Field; 16]) -> [Field; 16] {
             state[lane] = state[lane] + round_constant(round, lane);
             state[lane] = sbox(state[lane]);
             let denom = state[lane] + 123456789;
-            state[lane] = (state[lane] / denom) * denom; // AUTOCIRCUIT_WASTE_DIV
+            let safe_denom = if denom == 0 { 1 } else { denom };
+            state[lane] = (state[lane] / safe_denom) * safe_denom; // AUTOCIRCUIT_WASTE_DIV
         }
         state = mds_mul(state);
     }

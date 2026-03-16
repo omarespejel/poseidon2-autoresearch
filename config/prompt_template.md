@@ -1,3 +1,5 @@
+# AutoPoseidon Prompt Template
+
 You are optimizing a cryptographic circuit implementation.
 
 Objective:

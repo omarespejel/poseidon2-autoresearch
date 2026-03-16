@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from target_config import load_targets_file
+
 ROOT = Path(__file__).resolve().parent
 TARGETS_FILE = ROOT / "config" / "targets.json"
 RESULTS_FILE = ROOT / "results.tsv"
@@ -53,8 +55,7 @@ class AcceptedRecord:
 
 
 def load_targets() -> dict[str, dict[str, Any]]:
-    data = json.loads(TARGETS_FILE.read_text())
-    return data["targets"]
+    return load_targets_file(TARGETS_FILE)
 
 
 def read_results() -> list[dict[str, str]]:
@@ -64,7 +65,7 @@ def read_results() -> list[dict[str, str]]:
         return list(csv.DictReader(f, delimiter="\t"))
 
 
-def parse_float(raw: str) -> float | None:
+def parse_float(raw: str | None) -> float | None:
     if raw is None:
         return None
     token = raw.strip()
@@ -129,7 +130,7 @@ def metadata_run_label(metadata_file: Path) -> str | None:
     return None
 
 
-def artifact_match_score(metadata_file: Path, row_ts: dt.datetime | None) -> float:
+def artifact_match_score(metadata_file: Path, row_ts: dt.datetime | None) -> float | None:
     if row_ts is None:
         return 0.0
     ts = metadata_timestamp(metadata_file)
@@ -137,7 +138,7 @@ def artifact_match_score(metadata_file: Path, row_ts: dt.datetime | None) -> flo
         try:
             return abs(metadata_file.stat().st_mtime - row_ts.timestamp())
         except OSError:
-            return float("inf")
+            return None
     return abs((ts - row_ts).total_seconds())
 
 
@@ -162,9 +163,19 @@ def find_artifact_metadata(
     if not candidates:
         return None, None, None
 
-    ranked = sorted(candidates, key=lambda p: artifact_match_score(p, row_ts))
-    metadata = ranked[0]
-    score = artifact_match_score(metadata, row_ts)
+    ranked = sorted(
+        (
+            (score, candidate)
+            for candidate in candidates
+            for score in [artifact_match_score(candidate, row_ts)]
+            if score is not None
+        ),
+        key=lambda item: item[0],
+    )
+    if not ranked:
+        return None, None, None
+
+    score, metadata = ranked[0]
     if row_ts is not None and score > MAX_ARTIFACT_MATCH_AGE_S:
         return None, None, score
 
@@ -298,6 +309,12 @@ def read_env_commit(env_file: Path | None) -> str | None:
     return None
 
 
+def normalize_text_bytes(raw: bytes) -> bytes:
+    if raw.startswith(b"\xef\xbb\xbf"):
+        raw = raw[3:]
+    return raw.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+
+
 def is_retained(*, source_file: Path | None, artifact_iter_dir: Path | None) -> bool:
     if source_file is None or artifact_iter_dir is None or not source_file.exists():
         return False
@@ -305,7 +322,9 @@ def is_retained(*, source_file: Path | None, artifact_iter_dir: Path | None) -> 
     if not after_candidates:
         return False
     try:
-        return source_file.read_text() == after_candidates[0].read_text()
+        source_bytes = normalize_text_bytes(source_file.read_bytes())
+        after_bytes = normalize_text_bytes(after_candidates[0].read_bytes())
+        return source_bytes == after_bytes
     except OSError:
         return False
 
@@ -371,7 +390,7 @@ def collect_accepted_rows(targets: dict[str, dict[str, Any]], rows: list[dict[st
 
 def write_manifest(*, out_dir: Path, accepted: list[AcceptedRecord], total_rows: int) -> Path:
     manifest = {
-        "generated_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+        "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         "results_file": str(RESULTS_FILE),
         "agent_log_file": str(LOG_FILE),
         "rows_total": total_rows,
