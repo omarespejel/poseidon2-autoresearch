@@ -10,6 +10,8 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
+import platform
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -41,6 +43,42 @@ def portfolio_log(verbose: int, message: str, *, level: int = 1) -> None:
     if verbose < level:
         return
     print(f"[portfolio] {message}", file=sys.stderr, flush=True)
+
+
+def resolve_poseidon_arch() -> str:
+    override = os.getenv("POSEIDON_ARCH", "").strip().lower()
+    if override in {"arm64", "aarch64", "arm", "neon"}:
+        return "arm64"
+    if override in {"x86_64", "amd64", "x86", "avx2", "avx512"}:
+        return "x86_64"
+
+    machine = platform.machine().lower()
+    processor = platform.processor().lower()
+    if any(token in machine for token in ("arm64", "aarch64", "arm")) or any(
+        token in processor for token in ("arm", "apple")
+    ):
+        return "arm64"
+    if machine in {"x86_64", "amd64", "x86", "i386", "i686"} or any(
+        token in processor for token in ("intel", "x86")
+    ):
+        return "x86_64"
+    return "unknown"
+
+
+def default_targets_arg() -> str:
+    targets = [
+        "leanmultisig_poseidon16_src_fast",
+        "leanmultisig_poseidon16_table_src_fast",
+        "leanmultisig_poseidon2_monty_core_src_fast",
+    ]
+    arch = resolve_poseidon_arch()
+    if arch == "arm64":
+        targets.append("leanmultisig_poseidon2_neon_src_fast")
+    elif arch == "x86_64":
+        targets.append("leanmultisig_poseidon2_avx2_src_fast")
+    else:
+        targets.append("leanmultisig_poseidon2_no_packing_src_fast")
+    return ",".join(targets)
 
 
 def resolve_state_path(path_value: str) -> Path:
@@ -197,7 +235,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--targets",
-        default="leanmultisig_poseidon16_src_fast,leanmultisig_poseidon16_table_src_fast,leanmultisig_poseidon2_neon_src_fast",
+        default=default_targets_arg(),
         help="Comma-separated target list to cycle through",
     )
     parser.add_argument(

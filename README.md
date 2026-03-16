@@ -183,6 +183,7 @@ Before long runs, measure target noise empirically:
 ```bash
 python3 prepare.py calibrate --target leanmultisig_poseidon16_src_fast --samples 5
 python3 prepare.py calibrate --target leanmultisig_poseidon16_table_src_fast --samples 5
+python3 prepare.py calibrate --target leanmultisig_poseidon2_monty_core_src_fast --samples 5
 python3 prepare.py calibrate --target leanmultisig_poseidon2_neon_src_fast --samples 5
 python3 prepare.py calibrate --target leanmultisig_poseidon2_avx2_src_fast --samples 5
 python3 prepare.py calibrate --target leanmultisig_poseidon2_no_packing_src_fast --samples 5
@@ -198,9 +199,10 @@ python3 train.py --target leanmultisig_poseidon16_src_fast --iterations 5 --max-
 Additional source-level targets are also available for deeper Poseidon2 hotspots:
 
 - `leanmultisig_poseidon16_table_src_fast`
+- `leanmultisig_poseidon2_monty_core_src_fast`
 - `leanmultisig_poseidon2_neon_src_fast`
 - `leanmultisig_poseidon2_avx2_src_fast`
-- `leanmultisig_poseidon2_no_packing_src_fast`
+- `leanmultisig_poseidon2_no_packing_src_fast` (wrapper fallback target)
 
 Reference implementation context can be inspected in:
 

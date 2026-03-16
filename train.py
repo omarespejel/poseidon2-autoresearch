@@ -735,6 +735,69 @@ def rust_mutator_no_packing_external_inline(source: str) -> tuple[str, str, bool
     return source.replace(marker, "    #[inline(always)]\n" + marker, 1), "rust_no_packing_external_inline", True
 
 
+def rust_mutator_monty_internal_for_loop(source: str) -> tuple[str, str, bool]:
+    marker = "self.internal_constants.iter().for_each(|rc| {"
+    idx = source.find(marker)
+    if idx == -1:
+        return source, "rust_monty_internal_for_loop:pattern_missing", False
+
+    tail = source[idx:].replace(marker, "for rc in &self.internal_constants {", 1)
+    close = tail.find("\n        })")
+    if close == -1:
+        return source, "rust_monty_internal_for_loop:closing_missing", False
+    tail = tail[:close] + "\n        }" + tail[close + len("\n        })") :]
+    return source[:idx] + tail, "rust_monty_internal_for_loop", True
+
+
+def rust_mutator_monty_internal_for_copied(source: str) -> tuple[str, str, bool]:
+    marker = "self.internal_constants.iter().for_each(|rc| {"
+    idx = source.find(marker)
+    if idx == -1:
+        return source, "rust_monty_internal_for_copied:pattern_missing", False
+
+    tail = source[idx:].replace(marker, "for rc in self.internal_constants.iter().copied() {", 1)
+    close = tail.find("\n        })")
+    if close == -1:
+        return source, "rust_monty_internal_for_copied:closing_missing", False
+    tail = tail[:close] + "\n        }" + tail[close + len("\n        })") :]
+    tail = tail.replace("state[0] += *rc;", "state[0] += rc;", 1)
+    return source[:idx] + tail, "rust_monty_internal_for_copied", True
+
+
+def rust_mutator_monty_s0_cache_generic(source: str) -> tuple[str, str, bool]:
+    old = (
+        "        let part_sum: R = state[1..].iter().copied().sum();\n"
+        "        let full_sum = part_sum + state[0];\n"
+        "        state[0] = part_sum - state[0];"
+    )
+    new = (
+        "        let part_sum: R = state[1..].iter().copied().sum();\n"
+        "        let s0 = state[0];\n"
+        "        let full_sum = part_sum + s0;\n"
+        "        state[0] = part_sum - s0;"
+    )
+    if old not in source:
+        return source, "rust_monty_s0_cache_generic:pattern_missing", False
+    return source.replace(old, new, 1), "rust_monty_s0_cache_generic", True
+
+
+def rust_mutator_monty_s0_cache_internal(source: str) -> tuple[str, str, bool]:
+    old = (
+        "            let part_sum: MontyField31<FP> = state[1..].iter().copied().sum();\n"
+        "            let full_sum = part_sum + state[0];\n"
+        "            state[0] = part_sum - state[0];"
+    )
+    new = (
+        "            let part_sum: MontyField31<FP> = state[1..].iter().copied().sum();\n"
+        "            let s0 = state[0];\n"
+        "            let full_sum = part_sum + s0;\n"
+        "            state[0] = part_sum - s0;"
+    )
+    if old not in source:
+        return source, "rust_monty_s0_cache_internal:pattern_missing", False
+    return source.replace(old, new, 1), "rust_monty_s0_cache_internal", True
+
+
 def rust_mutator_hoist_log_num_cols(source: str) -> tuple[str, str, bool]:
     marker = "let log_num_cols = log2_ceil_usize(num_cols);"
     if marker in source:
@@ -844,6 +907,15 @@ def rust_heuristic_candidate(
             [
                 rust_mutator_no_packing_internal_inline,
                 rust_mutator_no_packing_external_inline,
+            ]
+        )
+    if path.endswith("crates/backend/koala-bear/src/monty_31/poseidon2_monty.rs"):
+        operators.extend(
+            [
+                rust_mutator_monty_internal_for_loop,
+                rust_mutator_monty_internal_for_copied,
+                rust_mutator_monty_s0_cache_generic,
+                rust_mutator_monty_s0_cache_internal,
             ]
         )
 

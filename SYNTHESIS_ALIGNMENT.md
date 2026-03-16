@@ -22,6 +22,7 @@ Primary source for required capabilities:
 Active targets for practical performance improvements:
 - `leanmultisig_poseidon16_src_fast`
 - `leanmultisig_poseidon16_table_src_fast`
+- `leanmultisig_poseidon2_monty_core_src_fast`
 - `leanmultisig_poseidon2_neon_src_fast`
 
 These target Lean/Poseidon2 Rust source hotspots and optimize `poseidons_per_s` with repeated benchmark gates.
