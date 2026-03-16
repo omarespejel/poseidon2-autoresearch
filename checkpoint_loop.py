@@ -27,6 +27,7 @@ READINESS = ROOT / "readiness_check.py"
 REPORT_JSON = ROOT / "checkpoint_report.json"
 REPORT_MD = ROOT / "checkpoint_report.md"
 DEFAULT_OVERRIDES_PATH = ROOT / "work" / "checkpoint_target_overrides.json"
+DEFAULT_PORTFOLIO_STATE_PATH = ROOT / "work" / "checkpoint_portfolio_state.json"
 WORK_DIR = DEFAULT_OVERRIDES_PATH.parent
 
 
@@ -85,39 +86,52 @@ def clamp_optional(value: float, *, floor: float = 0.0, cap: float | None = None
     return out
 
 
+def parse_optional_float(raw: Any) -> float | None:
+    try:
+        return float(raw)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def build_cycle_overrides(
     *,
     calibration: dict[str, dict[str, Any]],
+    min_samples: int,
     rel_floor: float,
     rel_cap: float | None,
     noise_multiplier: float,
     noise_floor: float,
+    noise_floor_ratio: float,
     noise_cap: float | None,
     force_fixed_mode: bool,
 ) -> dict[str, dict[str, Any]]:
     overrides: dict[str, dict[str, Any]] = {}
     for target, stats in calibration.items():
+        try:
+            samples_success = int(stats.get("samples_success", 0))
+        except Exception:  # noqa: BLE001
+            samples_success = 0
+        if samples_success < max(1, min_samples):
+            continue
+
         row: dict[str, Any] = {}
 
-        rec_rel = stats.get("recommended_min_improvement_rel")
-        try:
-            rec_rel_f = float(rec_rel)
-        except Exception:  # noqa: BLE001
-            rec_rel_f = None
+        rec_rel_f = parse_optional_float(stats.get("recommended_min_improvement_rel"))
         if rec_rel_f is not None:
             row["min_improvement_rel"] = clamp_optional(rec_rel_f, floor=max(0.0, rel_floor), cap=rel_cap)
             if force_fixed_mode:
                 row["min_improvement_rel_mode"] = "fixed"
 
-        rel_stdev = stats.get("rel_stdev")
-        try:
-            rel_stdev_f = float(rel_stdev)
-        except Exception:  # noqa: BLE001
-            rel_stdev_f = None
+        rel_stdev_f = parse_optional_float(stats.get("rel_stdev"))
         if rel_stdev_f is not None:
+            configured_noise_floor = 0.0
+            configured_noise_f = parse_optional_float(stats.get("configured_max_rel_stdev"))
+            if configured_noise_f is not None:
+                configured_noise_floor = max(0.0, configured_noise_f * max(0.0, noise_floor_ratio))
+
             guard = clamp_optional(
                 rel_stdev_f * max(0.0, noise_multiplier),
-                floor=max(0.0, noise_floor),
+                floor=max(0.0, noise_floor, configured_noise_floor),
                 cap=noise_cap,
             )
             row["max_rel_stdev"] = guard
@@ -126,6 +140,22 @@ def build_cycle_overrides(
             overrides[target] = row
 
     return overrides
+
+
+def override_skip_reason(*, stats: dict[str, Any], min_samples: int) -> str | None:
+    try:
+        samples_success = int(stats.get("samples_success", 0))
+    except Exception:  # noqa: BLE001
+        samples_success = 0
+    min_samples = max(1, min_samples)
+    if samples_success < min_samples:
+        return f"samples_success={samples_success} < override_min_samples={min_samples}"
+
+    rec_rel = parse_optional_float(stats.get("recommended_min_improvement_rel"))
+    rel_stdev = parse_optional_float(stats.get("rel_stdev"))
+    if rec_rel is None and rel_stdev is None:
+        return "missing calibration data (recommended_min_improvement_rel and rel_stdev unavailable)"
+    return None
 
 
 def write_reports(payload: dict[str, Any]) -> None:
@@ -142,6 +172,9 @@ def write_reports(payload: dict[str, Any]) -> None:
     lines.append(f"- calibration samples: `{cfg['calibration_samples']}`")
     lines.append(f"- batch iterations: `{cfg['batch_iterations']}`")
     lines.append(f"- batch max accepted: `{cfg['batch_max_accepted']}`")
+    lines.append(f"- schedule: `{cfg['schedule']}`")
+    if cfg.get("schedule") == "ucb":
+        lines.append(f"- ucb explore: `{cfg['ucb_explore']}`")
     lines.append(f"- auto threshold overrides: `{cfg['auto_threshold_overrides']}`")
     if cfg.get("auto_threshold_overrides"):
         lines.append(f"- overrides path: `{cfg['overrides_path']}`")
@@ -190,6 +223,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-iterations", type=int, default=6, help="Train iterations per target in each cycle")
     parser.add_argument("--batch-max-accepted", type=int, default=1, help="Max accepted edits per target per cycle")
     parser.add_argument(
+        "--schedule",
+        choices=["round_robin", "ucb"],
+        default="round_robin",
+        help="Scheduling strategy passed to portfolio_loop.py",
+    )
+    parser.add_argument("--ucb-explore", type=float, default=0.75, help="UCB exploration strength for portfolio scheduling")
+    parser.add_argument(
         "--artifacts",
         choices=["none", "accepted", "all"],
         default="accepted",
@@ -209,12 +249,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--override-rel-floor", type=float, default=0.0, help="Lower bound for relative threshold overrides")
     parser.add_argument("--override-rel-cap", type=float, default=0.05, help="Upper cap for relative threshold overrides")
     parser.add_argument(
+        "--override-min-samples",
+        type=int,
+        default=3,
+        help="Minimum successful calibration samples required before generating overrides",
+    )
+    parser.add_argument(
         "--override-noise-multiplier",
         type=float,
         default=2.0,
         help="Multiply rel_stdev to derive max_rel_stdev override",
     )
     parser.add_argument("--override-noise-floor", type=float, default=0.0, help="Lower bound for max_rel_stdev overrides")
+    parser.add_argument(
+        "--override-noise-floor-ratio",
+        type=float,
+        default=0.5,
+        help="Configured max_rel_stdev ratio used as additional floor when generating noise overrides; expected range is [0.0, 1.0]",
+    )
     parser.add_argument("--override-noise-cap", type=float, default=0.25, help="Upper cap for max_rel_stdev overrides")
     parser.add_argument(
         "--override-force-fixed-mode",
@@ -225,6 +277,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--overrides-path",
         default=str(DEFAULT_OVERRIDES_PATH),
         help="Path for generated target-overrides JSON file",
+    )
+    parser.add_argument(
+        "--portfolio-state-json",
+        default=str(DEFAULT_PORTFOLIO_STATE_PATH),
+        help="Path for persisted portfolio scheduling state when using UCB scheduling",
     )
     parser.add_argument("--skip-evidence", action="store_true", help="Skip evidence/readiness refresh")
     parser.add_argument("--nice", default="", help="AUTORESEARCH_NICE value for subprocesses")
@@ -237,15 +294,24 @@ def main(argv: list[str] | None = None) -> int:
     if not targets:
         print("No optimization targets configured", file=sys.stderr)
         return 2
+    if args.ucb_explore < 0.0:
+        print("--ucb-explore must be >= 0", file=sys.stderr)
+        return 2
 
     extra_env: dict[str, str] = {}
     if args.nice:
         extra_env["AUTORESEARCH_NICE"] = args.nice
     WORK_DIR.mkdir(parents=True, exist_ok=True)
+    effective_noise_floor_ratio = min(1.0, max(0.0, args.override_noise_floor_ratio))
 
-    bootstrap_targets = list(dict.fromkeys([*targets, args.cross_target.strip()] if args.cross_target.strip() else targets))
+    bootstrap_targets = list(
+        dict.fromkeys([*targets, args.cross_target.strip()] if args.cross_target.strip() else targets)
+    )
     for target in bootstrap_targets:
         must_run([sys.executable, str(PREPARE), "bootstrap", "--target", target], extra_env=extra_env)
+    portfolio_state_path = resolve_overrides_path(args.portfolio_state_json)
+    if args.schedule == "ucb" and portfolio_state_path.exists():
+        portfolio_state_path.unlink()
 
     cycles: list[dict[str, Any]] = []
     total_accepted = 0
@@ -290,22 +356,33 @@ def main(argv: list[str] | None = None) -> int:
         cycle_data["max_rel_stdev"] = max_rel_stdev
 
         cycle_overrides: dict[str, dict[str, Any]] = {}
+        skipped_overrides: dict[str, str] = {}
         overrides_path = resolve_overrides_path(args.overrides_path)
         if args.auto_threshold_overrides:
             rel_cap = args.override_rel_cap if args.override_rel_cap > 0.0 else None
             noise_cap = args.override_noise_cap if args.override_noise_cap > 0.0 else None
             cycle_overrides = build_cycle_overrides(
                 calibration=cycle_data["calibration"],
+                min_samples=args.override_min_samples,
                 rel_floor=args.override_rel_floor,
                 rel_cap=rel_cap,
                 noise_multiplier=args.override_noise_multiplier,
                 noise_floor=args.override_noise_floor,
+                noise_floor_ratio=effective_noise_floor_ratio,
                 noise_cap=noise_cap,
                 force_fixed_mode=args.override_force_fixed_mode,
             )
+            for target_name, stats in cycle_data["calibration"].items():
+                if target_name in cycle_overrides:
+                    continue
+                reason = override_skip_reason(stats=stats, min_samples=args.override_min_samples)
+                if reason:
+                    skipped_overrides[target_name] = reason
             overrides_path.parent.mkdir(parents=True, exist_ok=True)
             overrides_path.write_text(json.dumps(cycle_overrides, indent=2, sort_keys=True) + "\n")
             cycle_data["target_overrides"] = cycle_overrides
+            if skipped_overrides:
+                cycle_data["target_overrides_skipped"] = skipped_overrides
             cycle_data["target_overrides_path"] = str(overrides_path)
 
         portfolio_argv = [
@@ -319,11 +396,17 @@ def main(argv: list[str] | None = None) -> int:
             str(args.batch_iterations),
             "--batch-max-accepted",
             str(args.batch_max_accepted),
+            "--schedule",
+            args.schedule,
+            "--ucb-explore",
+            str(args.ucb_explore),
             "--artifacts",
             args.artifacts,
             "--confirm-repeats",
             str(args.confirm_repeats),
         ]
+        if args.schedule == "ucb":
+            portfolio_argv.extend(["--state-json", str(portfolio_state_path)])
         if args.auto_threshold_overrides:
             portfolio_argv.extend(["--target-overrides-json", str(overrides_path)])
         portfolio_payload, _ = must_json(portfolio_argv, extra_env=extra_env)
@@ -371,17 +454,22 @@ def main(argv: list[str] | None = None) -> int:
             "sigma_multiplier": args.sigma_multiplier,
             "batch_iterations": args.batch_iterations,
             "batch_max_accepted": args.batch_max_accepted,
+            "schedule": args.schedule,
+            "ucb_explore": args.ucb_explore,
             "artifacts": args.artifacts,
             "confirm_repeats": args.confirm_repeats,
             "cross_target": args.cross_target,
             "auto_threshold_overrides": args.auto_threshold_overrides,
             "override_rel_floor": args.override_rel_floor,
             "override_rel_cap": args.override_rel_cap,
+            "override_min_samples": args.override_min_samples,
             "override_noise_multiplier": args.override_noise_multiplier,
             "override_noise_floor": args.override_noise_floor,
+            "override_noise_floor_ratio": effective_noise_floor_ratio,
             "override_noise_cap": args.override_noise_cap,
             "override_force_fixed_mode": args.override_force_fixed_mode,
             "overrides_path": str(resolve_overrides_path(args.overrides_path)),
+            "portfolio_state_json": str(portfolio_state_path) if args.schedule == "ucb" else "",
             "nice": args.nice,
         },
         "total_accepted": total_accepted,
