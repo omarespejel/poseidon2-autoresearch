@@ -90,7 +90,7 @@ def must_run_json(argv: list[str], *, label: str, stream_stderr: bool = False) -
     return payload if isinstance(payload, dict) else {"parse_error": True, "stdout_tail": raw[-2000:]}
 
 
-def reset_outputs() -> None:
+def reset_outputs(mutation_memory_path: Path = MUTATION_MEMORY) -> None:
     RESULTS.write_text(
         "timestamp\ttarget\titeration\tstatus\tmetric_name\tmetric_value\tbest_value\tdelta\tcheck_s\tinfo_or_bench_s\texecute_s\tnotes\n"
     )
@@ -101,7 +101,10 @@ def reset_outputs() -> None:
     for path in (EVIDENCE_DIR, SUBMISSION_DIR):
         if path.exists():
             shutil.rmtree(path)
-    for path in (MUTATION_MEMORY, MUTATION_MEMORY.with_suffix(MUTATION_MEMORY.suffix + ".lock")):
+    for path in (
+        mutation_memory_path,
+        mutation_memory_path.with_suffix(mutation_memory_path.suffix + ".lock"),
+    ):
         if path.exists():
             path.unlink()
 
@@ -424,7 +427,10 @@ def main(argv: list[str] | None = None) -> int:
     start_row_count = 0 if args.fresh or not RESULTS.exists() else len(parse_results())
 
     if args.fresh:
-        reset_outputs()
+        memory_path = Path(args.mutation_memory_file) if args.mutation_memory_file else MUTATION_MEMORY
+        if not memory_path.is_absolute():
+            memory_path = ROOT / memory_path
+        reset_outputs(memory_path)
 
     # Baseline and loop target optimization.
     must_run(

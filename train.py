@@ -1753,10 +1753,17 @@ def run_loop(args: argparse.Namespace) -> int:
         # Persist seeded history to disk before iterations start so per-iteration
         # read/modify/write updates do not discard in-process seeded state.
         lock_path = mutation_memory_path.with_suffix(mutation_memory_path.suffix + ".lock")
-        with file_lock(lock_path):
-            mutation_memory = load_mutation_memory(mutation_memory_path)
-            seed_mutation_memory_from_results(mutation_memory)
-            save_mutation_memory(mutation_memory_path, mutation_memory)
+        try:
+            with file_lock(lock_path):
+                mutation_memory = load_mutation_memory(mutation_memory_path)
+                seed_mutation_memory_from_results(mutation_memory)
+                save_mutation_memory(mutation_memory_path, mutation_memory)
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"[train] Warning: mutation memory bootstrap failed ({exc}); continuing without memory",
+                file=sys.stderr,
+            )
+            mutation_memory = None
 
     max_iterations = args.iterations if args.iterations > 0 else None
     iterations_label = str(args.iterations) if max_iterations is not None else "infinite"
