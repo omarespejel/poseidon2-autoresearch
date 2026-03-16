@@ -473,6 +473,37 @@ def build_parser() -> argparse.ArgumentParser:
         help="Agent name passed to submission_pack.py",
     )
     parser.add_argument(
+        "--operator-wallet",
+        default=os.getenv("AUTORESEARCH_OPERATOR_WALLET", ""),
+        help="Operator wallet forwarded to submission_pack.py",
+    )
+    parser.add_argument(
+        "--erc8004-identity",
+        default=os.getenv("AUTORESEARCH_ERC8004_IDENTITY", ""),
+        help="ERC-8004 identity forwarded to submission_pack.py",
+    )
+    parser.add_argument(
+        "--erc8004-registration-tx",
+        default=os.getenv("AUTORESEARCH_ERC8004_TX", ""),
+        help="ERC-8004 registration tx hash/url forwarded to submission_pack.py",
+    )
+    parser.add_argument(
+        "--additional-receipt",
+        action="append",
+        default=[],
+        help="Additional onchain receipt forwarded to submission_pack.py (repeatable)",
+    )
+    parser.add_argument(
+        "--submission-project-url",
+        default="",
+        help="Optional project URL forwarded to submission_pack.py",
+    )
+    parser.add_argument(
+        "--submission-notes",
+        default="",
+        help="Optional submission notes forwarded to submission_pack.py",
+    )
+    parser.add_argument(
         "--readiness-build-close-utc",
         default="",
         help="Optional override for readiness_check --build-close-utc",
@@ -588,11 +619,25 @@ def main(argv: list[str] | None = None) -> int:
             str(SUBMISSION_PACK),
             "--agent-name",
             args.agent_name,
+            "--operator-wallet",
+            args.operator_wallet.strip(),
+            "--erc8004-identity",
+            args.erc8004_identity.strip(),
+            "--erc8004-registration-tx",
+            args.erc8004_registration_tx.strip(),
             "--task-category",
             "cryptographic_optimization",
             "--task-category",
             "autonomous_research",
         ]
+        if args.submission_project_url.strip():
+            submission_argv.extend(["--project-url", args.submission_project_url.strip()])
+        if args.submission_notes.strip():
+            submission_argv.extend(["--submission-notes", args.submission_notes.strip()])
+        for receipt in args.additional_receipt:
+            receipt_value = str(receipt).strip()
+            if receipt_value:
+                submission_argv.extend(["--additional-receipt", receipt_value])
         if args.strict_submission:
             submission_argv.append("--strict")
         submission_payload = must_run_json(

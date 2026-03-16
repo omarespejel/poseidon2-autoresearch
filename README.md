@@ -91,6 +91,13 @@ python3 campaign.py --synthesis-cook --git-checkpoint-mode accepted --git-checkp
 
 # enforce identity fields for canonical submission artifacts
 python3 campaign.py --synthesis-cook --strict-submission
+
+# fill ERC-8004 identity + receipts in one pass (required for strict readiness)
+python3 campaign.py --synthesis-cook --strict-submission \
+  --operator-wallet 0xYOUR_OPERATOR_WALLET \
+  --erc8004-identity your-erc8004-identity \
+  --erc8004-registration-tx https://basescan.org/tx/0xYOUR_REGISTRATION_TX \
+  --additional-receipt https://basescan.org/tx/0xYOUR_AGENT_ACTION_TX
 ```
 
 Track requirement mapping is documented in `SYNTHESIS_ALIGNMENT.md`.
