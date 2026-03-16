@@ -1725,17 +1725,16 @@ def mutation_memory_counts(
         if isinstance(raw_targets, dict):
             target_counts = raw_targets.get(target_name)
 
-        local_accepted = 0.0
-        local_rejected = 0.0
-        if isinstance(language_counts, dict):
-            local_accepted += max(0.0, float(language_counts.get("accepted", 0) or 0.0))
-            local_rejected += max(0.0, float(language_counts.get("rejected", 0) or 0.0))
         if isinstance(target_counts, dict):
-            local_accepted += max(0.0, float(target_counts.get("accepted", 0) or 0.0))
-            local_rejected += max(0.0, float(target_counts.get("rejected", 0) or 0.0))
-
-        if local_accepted + local_rejected > 0.0:
-            return (local_accepted, local_rejected)
+            target_accepted = max(0.0, float(target_counts.get("accepted", 0) or 0.0))
+            target_rejected = max(0.0, float(target_counts.get("rejected", 0) or 0.0))
+            if target_accepted + target_rejected > 0.0:
+                return (target_accepted, target_rejected)
+        if isinstance(language_counts, dict):
+            language_accepted = max(0.0, float(language_counts.get("accepted", 0) or 0.0))
+            language_rejected = max(0.0, float(language_counts.get("rejected", 0) or 0.0))
+            if language_accepted + language_rejected > 0.0:
+                return (language_accepted, language_rejected)
         return (accepted_total, rejected_total)
 
     direct = entry_counts(mutation)
@@ -1794,27 +1793,152 @@ def required_snippets_from_target(target_config: dict[str, Any]) -> list[str]:
     return out
 
 
-def required_snippet_profile(source: str, snippets: list[str]) -> dict[str, int]:
+def strip_rust_comments_and_literals(source: str) -> str:
+    """Remove Rust comments and string/char literals for guardrail substring checks."""
+    out: list[str] = []
+    n = len(source)
+    i = 0
+    state = "code"
+    block_depth = 0
+    string_quote = ""
+    raw_hashes = 0
+    escape = False
+
+    while i < n:
+        ch = source[i]
+        nxt = source[i + 1] if i + 1 < n else ""
+
+        if state == "code":
+            if ch == "/" and nxt == "/":
+                out.extend([" ", " "])
+                i += 2
+                state = "line_comment"
+                continue
+            if ch == "/" and nxt == "*":
+                out.extend([" ", " "])
+                i += 2
+                state = "block_comment"
+                block_depth = 1
+                continue
+            if ch in {"'", '"'}:
+                out.append(ch)
+                i += 1
+                state = "string_or_char"
+                string_quote = ch
+                escape = False
+                continue
+
+            if ch == "r":
+                j = i + 1
+                while j < n and source[j] == "#":
+                    j += 1
+                if j < n and source[j] == '"':
+                    out.extend(" " * (j - i + 1))
+                    i = j + 1
+                    state = "raw_string"
+                    raw_hashes = j - (i - (j - i + 1) + 1)  # replaced below for clarity
+                    raw_hashes = j - (i - 1) - 1
+                    continue
+
+            out.append(ch)
+            i += 1
+            continue
+
+        if state == "line_comment":
+            if ch == "\n":
+                out.append("\n")
+                state = "code"
+            else:
+                out.append(" ")
+            i += 1
+            continue
+
+        if state == "block_comment":
+            if ch == "/" and nxt == "*":
+                out.extend([" ", " "])
+                i += 2
+                block_depth += 1
+                continue
+            if ch == "*" and nxt == "/":
+                out.extend([" ", " "])
+                i += 2
+                block_depth -= 1
+                if block_depth <= 0:
+                    state = "code"
+                continue
+            out.append("\n" if ch == "\n" else " ")
+            i += 1
+            continue
+
+        if state == "string_or_char":
+            if escape:
+                out.append(" " if ch != "\n" else "\n")
+                escape = False
+                i += 1
+                continue
+            if ch == "\\":
+                out.append(" ")
+                escape = True
+                i += 1
+                continue
+            if ch == string_quote:
+                out.append(ch)
+                i += 1
+                state = "code"
+                continue
+            out.append("\n" if ch == "\n" else " ")
+            i += 1
+            continue
+
+        if state == "raw_string":
+            if ch == '"' and raw_hashes >= 0:
+                hashes = source[i + 1 : i + 1 + raw_hashes]
+                if len(hashes) == raw_hashes and all(token == "#" for token in hashes):
+                    out.append(" ")
+                    out.extend(" " * raw_hashes)
+                    i += 1 + raw_hashes
+                    state = "code"
+                    continue
+            out.append("\n" if ch == "\n" else " ")
+            i += 1
+            continue
+
+    return "".join(out)
+
+
+def normalized_source_for_required_snippets(source: str, *, language: str) -> str:
+    if language.lower() == "rust":
+        return strip_rust_comments_and_literals(source)
+    return source
+
+
+def required_snippet_id(snippet: str) -> str:
+    return hashlib.sha256(snippet.encode("utf-8")).hexdigest()[:12]
+
+
+def required_snippet_profile(source: str, snippets: list[str], *, language: str) -> dict[str, int]:
+    normalized = normalized_source_for_required_snippets(source, language=language)
     profile: dict[str, int] = {}
     for snippet in snippets:
-        count = source.count(snippet)
-        if count > 0:
-            profile[snippet] = count
+        profile[snippet] = normalized.count(snippet)
     return profile
 
 
-def required_snippet_guard(candidate: str, profile: dict[str, int]) -> tuple[bool, dict[str, Any]]:
+def required_snippet_guard(candidate: str, profile: dict[str, int], *, language: str) -> tuple[bool, dict[str, Any]]:
     if not profile:
         return True, {"required_snippets": 0, "violations": []}
 
+    normalized = normalized_source_for_required_snippets(candidate, language=language)
     violations: list[dict[str, Any]] = []
     for snippet, required in profile.items():
-        observed = candidate.count(snippet)
+        if required <= 0:
+            continue
+        observed = normalized.count(snippet)
         if observed >= required:
             continue
         violations.append(
             {
-                "id": hashlib.sha1(snippet.encode("utf-8")).hexdigest()[:12],
+                "id": required_snippet_id(snippet),
                 "required": required,
                 "observed": observed,
             }
@@ -2342,16 +2466,31 @@ def run_loop(args: argparse.Namespace) -> int:
     max_rel_stdev = target.get("max_rel_stdev")
     max_rel_stdev_f = float(max_rel_stdev) if max_rel_stdev is not None else None
     required_snippets = required_snippets_from_target(target)
-    required_snippet_counts = required_snippet_profile(source_path.read_text(), required_snippets)
-    if required_snippets and not required_snippet_counts:
-        train_log(
-            args,
-            (
-                "required_snippets configured but none were matched in source; "
-                "skipping snippet-preservation guardrail for this target"
-            ),
-            level=1,
+    required_snippet_counts = required_snippet_profile(
+        source_path.read_text(),
+        required_snippets,
+        language=language_norm,
+    )
+    missing_required_snippets = [snippet for snippet, count in required_snippet_counts.items() if count <= 0]
+    if missing_required_snippets:
+        missing_preview = ", ".join(required_snippet_id(snippet) for snippet in missing_required_snippets[:10])
+        if len(missing_required_snippets) > 10:
+            missing_preview = f"{missing_preview}, ..."
+        message = (
+            "required_snippets misconfigured: configured snippets are not present in the baseline source. "
+            f"missing_ids={missing_preview}"
         )
+        print(message, file=sys.stderr)
+        prepare.append_log(
+            {
+                "event": "loop_start_failed",
+                "timestamp": prepare.now_iso(),
+                "target": args.target,
+                "reason": "required_snippets_missing_in_baseline",
+                "missing_required_snippets": [required_snippet_id(snippet) for snippet in missing_required_snippets],
+            }
+        )
+        return 1
 
     prepare.append_log(
         {
@@ -2555,7 +2694,11 @@ def run_loop(args: argparse.Namespace) -> int:
         mutation_attempts[mutation_key] = mutation_attempts.get(mutation_key, 0) + 1
         train_log(args, f"iter {iteration}: evaluating mutation={mutation_key}", level=2)
 
-        guard_ok, guard_details = required_snippet_guard(candidate, required_snippet_counts)
+        guard_ok, guard_details = required_snippet_guard(
+            candidate,
+            required_snippet_counts,
+            language=language_norm,
+        )
         if not guard_ok:
             diagnostics["required_snippets"] = guard_details
             blocked_mutations_until[mutation_key] = iteration + blocked_mutation_ttl
@@ -2714,6 +2857,12 @@ def run_loop(args: argparse.Namespace) -> int:
                             best_metric_series = [float(v) for v in confirmed_values]
                         elif metric_series is not None and metric_series:
                             best_metric_series = metric_series
+                        if required_snippets:
+                            required_snippet_counts = required_snippet_profile(
+                                candidate,
+                                required_snippets,
+                                language=language_norm,
+                            )
                         notes = f"accepted:{notes};{confirm_reason};{ab_reason}"
                     else:
                         improved = False
