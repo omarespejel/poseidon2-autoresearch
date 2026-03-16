@@ -294,6 +294,9 @@ def main(argv: list[str] | None = None) -> int:
     if not targets:
         print("No optimization targets configured", file=sys.stderr)
         return 2
+    if args.ucb_explore < 0.0:
+        print("--ucb-explore must be >= 0", file=sys.stderr)
+        return 2
 
     extra_env: dict[str, str] = {}
     if args.nice:

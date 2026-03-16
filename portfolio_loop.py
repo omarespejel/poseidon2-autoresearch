@@ -299,6 +299,9 @@ def main(argv: list[str] | None = None) -> int:
     if not targets:
         print("No targets configured", file=sys.stderr)
         return 2
+    if args.ucb_explore < 0.0:
+        print("--ucb-explore must be >= 0", file=sys.stderr)
+        return 2
 
     state_path = resolve_state_path(args.state_json) if args.state_json else None
     totals = load_totals_state(state_path, targets)
