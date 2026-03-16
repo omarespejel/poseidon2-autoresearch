@@ -299,15 +299,27 @@ def derive_stages(
 ) -> dict[str, int]:
     baseline_rows = [r for r in rows if int(r.get("iteration", "0") or 0) == 0]
     non_baseline_rows = [r for r in rows if int(r.get("iteration", "0") or 0) > 0]
-    verify_count = len(non_baseline_rows)
-    execute_count = max(len(decisions), len(non_baseline_rows))
+    decision_count = len(decisions)
+    non_baseline_count = len(non_baseline_rows)
+    has_activity = bool(rows or loop_start or decisions)
+
+    discover_count = max(
+        1 if baseline_rows else 0,
+        len(loop_start),
+        1 if decision_count > 0 else 0,
+        1 if non_baseline_count > 0 else 0,
+    )
+    plan_count = max(len(loop_start), 1 if has_activity else 0)
+    execute_count = max(decision_count, non_baseline_count)
+    verify_count = max(decision_count, non_baseline_count)
+    submit_count = 1 if has_activity else 0
 
     return {
-        "discover": max(1 if baseline_rows else 0, len(loop_start)),
-        "plan": max(1, len(loop_start)),
+        "discover": discover_count,
+        "plan": plan_count,
         "execute": execute_count,
         "verify": verify_count,
-        "submit": 1,
+        "submit": submit_count,
     }
 
 
@@ -366,15 +378,29 @@ def derive_conversation_log(
             },
         )
 
-    if not out and loop_start:
-        first_start = loop_start[0]
-        push(
-            stage="discover",
-            timestamp=first_start.get("timestamp"),
-            target=str(first_start.get("target", "")),
-            iteration=0,
-            summary="Initialized target context and baseline assumptions",
+    if not out:
+        first_start = loop_start[0] if loop_start else {}
+        first_row = rows[0] if rows else {}
+        first_decision = decisions[0] if decisions else {}
+        fallback_ts = (
+            first_start.get("timestamp")
+            or first_row.get("timestamp")
+            or first_decision.get("timestamp")
+            or now_iso()
         )
+        fallback_target = (
+            str(first_start.get("target", ""))
+            or str(first_row.get("target", ""))
+            or str(first_decision.get("target", ""))
+        )
+        if rows or loop_start or decisions:
+            push(
+                stage="discover",
+                timestamp=fallback_ts,
+                target=fallback_target,
+                iteration=0,
+                summary="Initialized target context and baseline assumptions",
+            )
 
     for event in loop_start:
         compute_budget = event.get("compute_budget") if isinstance(event.get("compute_budget"), dict) else {}
@@ -389,6 +415,21 @@ def derive_conversation_log(
                 "max_iterations": compute_budget.get("max_iterations"),
                 "max_accepted": compute_budget.get("max_accepted"),
                 "max_runtime_seconds": compute_budget.get("max_runtime_seconds"),
+            },
+        )
+
+    if not loop_start and (rows or decisions):
+        first_row = rows[0] if rows else {}
+        first_decision = decisions[0] if decisions else {}
+        push(
+            stage="plan",
+            timestamp=first_row.get("timestamp") or first_decision.get("timestamp") or now_iso(),
+            target=str(first_row.get("target", "")) or str(first_decision.get("target", "")),
+            summary="Recovered planning context from persisted run artifacts",
+            details={
+                "mode": "reconstructed",
+                "source": "results.tsv_and_decisions",
+                "reason": "loop_start_missing",
             },
         )
 

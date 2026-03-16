@@ -1378,21 +1378,20 @@ def seed_mutation_memory_from_results(memory: dict[str, Any]) -> None:
         if not mutation:
             continue
         status_token = cols[3].strip().lower()
-        if status_token in {"accepted", "success"}:
+        notes_token = cols[11].strip().lower()
+
+        # Acceptance is encoded in notes (`accepted:` / `rejected_*:`), not in status.
+        if notes_token.startswith("accepted:"):
+            accepted = True
+        elif notes_token.startswith("rejected_") or notes_token.startswith("rejected:"):
+            accepted = False
+        elif status_token == "accepted":
             accepted = True
         elif status_token == "rejected":
             accepted = False
-        elif status_token in {"failed", "skipped", "timeout", "error", "no_change"}:
-            # Infrastructure or no-op outcomes should not penalize mutation ranking.
+        elif status_token in {"success", "failed", "skipped", "timeout", "error", "no_change", ""}:
+            # Evaluation lifecycle statuses are not acceptance signals.
             continue
-        elif not status_token:
-            notes_token = cols[11].strip().lower()
-            if notes_token.startswith("accepted:"):
-                accepted = True
-            elif notes_token.startswith("rejected:"):
-                accepted = False
-            else:
-                continue
         else:
             # Skip unrecognized statuses instead of silently treating as rejection.
             continue
