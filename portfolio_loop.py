@@ -37,6 +37,12 @@ def default_target_state() -> dict[str, Any]:
     return {"batches": 0, "accepted": 0, "best_metric": None, "plateau_streak": 0, "zero_streak": 0}
 
 
+def portfolio_log(verbose: int, message: str, *, level: int = 1) -> None:
+    if verbose < level:
+        return
+    print(f"[portfolio] {message}", file=sys.stderr, flush=True)
+
+
 def resolve_state_path(path_value: str) -> Path:
     path = Path(path_value)
     if not path.is_absolute():
@@ -105,7 +111,12 @@ def run_batch(
     max_accepted: int,
     artifacts: str,
     confirm_repeats: int,
+    verbose: int,
+    debug_command_output: bool,
+    debug_max_chars: int,
     target_overrides_json: str = "",
+    mutation_memory_file: str = "",
+    disable_mutation_memory: bool = False,
 ) -> BatchResult:
     argv = [
         sys.executable,
@@ -121,9 +132,28 @@ def run_batch(
         "--confirm-repeats",
         str(confirm_repeats),
     ]
+    if verbose > 0:
+        argv.extend(["--verbose"] * verbose)
+    if debug_command_output:
+        argv.append("--debug-command-output")
+    argv.extend(["--debug-max-chars", str(max(256, debug_max_chars))])
     if target_overrides_json:
         argv.extend(["--target-overrides-json", target_overrides_json])
-    proc = subprocess.run(argv, cwd=str(ROOT), text=True, capture_output=True, check=False)
+    if mutation_memory_file:
+        argv.extend(["--mutation-memory-file", mutation_memory_file])
+    if disable_mutation_memory:
+        argv.append("--disable-mutation-memory")
+    if verbose > 0:
+        proc = subprocess.run(
+            argv,
+            cwd=str(ROOT),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=None,
+            check=False,
+        )
+    else:
+        proc = subprocess.run(argv, cwd=str(ROOT), text=True, capture_output=True, check=False)
 
     payload: dict[str, Any] = {}
     accepted = 0
@@ -147,18 +177,35 @@ def run_batch(
         accepted=accepted,
         best_metric=best_metric,
         payload=payload,
-        stderr=proc.stderr,
+        stderr=proc.stderr if proc.stderr is not None else "",
     )
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Adaptive multi-target AutoPoseidon runner")
+    parser.add_argument("-v", "--verbose", action="count", default=0, help="Increase stderr verbosity")
+    parser.add_argument(
+        "--debug-command-output",
+        action="store_true",
+        help="Forward command stdout/stderr debugging to train.py/prepare.py",
+    )
+    parser.add_argument(
+        "--debug-max-chars",
+        type=int,
+        default=4000,
+        help="Max chars shown per command stream when debug output is enabled",
+    )
     parser.add_argument(
         "--targets",
         default="leanmultisig_poseidon16_src_fast,leanmultisig_poseidon16_table_src_fast,leanmultisig_poseidon2_neon_src_fast",
         help="Comma-separated target list to cycle through",
     )
-    parser.add_argument("--rounds", type=int, default=4, help="Number of portfolio rounds")
+    parser.add_argument(
+        "--rounds",
+        type=int,
+        default=4,
+        help="Number of portfolio rounds (0 = run indefinitely until stop-after-total-accepted is reached)",
+    )
     parser.add_argument("--batch-iterations", type=int, default=6, help="Iterations per target batch")
     parser.add_argument("--batch-max-accepted", type=int, default=1, help="Max accepted changes per target batch")
     parser.add_argument(
@@ -207,6 +254,16 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="Optional JSON file used to persist per-target scheduling totals across invocations",
     )
+    parser.add_argument(
+        "--mutation-memory-file",
+        default="",
+        help="Optional path forwarded to train.py --mutation-memory-file",
+    )
+    parser.add_argument(
+        "--disable-mutation-memory",
+        action="store_true",
+        help="Disable cross-target mutation replay in child train.py runs",
+    )
     return parser
 
 
@@ -221,6 +278,8 @@ def write_reports(
     ucb_explore: float,
     target_overrides_json: str,
     state_json: str,
+    mutation_memory_file: str,
+    disable_mutation_memory: bool,
 ) -> None:
     REPORT_JSON.write_text(
         json.dumps(
@@ -232,6 +291,8 @@ def write_reports(
                 "ucb_explore": ucb_explore,
                 "target_overrides_json": target_overrides_json,
                 "state_json": state_json,
+                "mutation_memory_file": mutation_memory_file,
+                "disable_mutation_memory": disable_mutation_memory,
                 "totals": totals,
                 "rows": [
                     {
@@ -264,6 +325,9 @@ def write_reports(
         lines.append(f"- target overrides: `{target_overrides_json}`")
     if state_json:
         lines.append(f"- state json: `{state_json}`")
+    if mutation_memory_file:
+        lines.append(f"- mutation memory file: `{mutation_memory_file}`")
+    lines.append(f"- mutation memory disabled: `{str(disable_mutation_memory).lower()}`")
     lines.append("")
     lines.append("## Per Target Totals")
     lines.append("")
@@ -315,6 +379,9 @@ def ucb_score(state: dict[str, Any], *, total_batches: int, explore: float, max_
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.rounds < 0:
+        print("--rounds must be >= 0", file=sys.stderr)
+        return 2
     targets = [t.strip() for t in args.targets.split(",") if t.strip()]
     if not targets:
         print("No targets configured", file=sys.stderr)
@@ -327,9 +394,18 @@ def main(argv: list[str] | None = None) -> int:
     totals = load_totals_state(state_path, targets)
     rows: list[BatchResult] = []
     total_accepted = 0
+    rounds_executed = 0
+    max_rounds = args.rounds if args.rounds > 0 else None
+    rounds_label = str(args.rounds) if max_rounds is not None else "infinite"
 
-    for round_index in range(1, args.rounds + 1):
+    round_index = 0
+    while True:
+        round_index += 1
+        if max_rounds is not None and round_index > max_rounds:
+            break
+        rounds_executed = round_index
         made_progress = False
+        portfolio_log(args.verbose, f"starting round {round_index}/{rounds_label}", level=1)
         remaining_targets = [target for target in targets if totals[target]["plateau_streak"] < args.plateau_threshold]
 
         while remaining_targets:
@@ -348,6 +424,15 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 target = remaining_targets.pop(0)
 
+            portfolio_log(
+                args.verbose,
+                (
+                    f"dispatch target={target} schedule={args.schedule} "
+                    f"plateau_streak={totals[target]['plateau_streak']}"
+                ),
+                level=2,
+            )
+
             state = totals[target]
 
             result = run_batch(
@@ -357,9 +442,25 @@ def main(argv: list[str] | None = None) -> int:
                 max_accepted=args.batch_max_accepted,
                 artifacts=args.artifacts,
                 confirm_repeats=args.confirm_repeats,
+                verbose=args.verbose,
+                debug_command_output=args.debug_command_output,
+                debug_max_chars=args.debug_max_chars,
                 target_overrides_json=args.target_overrides_json,
+                mutation_memory_file=args.mutation_memory_file,
+                disable_mutation_memory=args.disable_mutation_memory,
             )
             rows.append(result)
+            portfolio_log(
+                args.verbose,
+                (
+                    f"round={round_index} target={target} exit={result.code} "
+                    f"accepted={result.accepted} best_metric="
+                    f"{'n/a' if result.best_metric is None else f'{result.best_metric:.6f}'}"
+                ),
+                level=1,
+            )
+            if result.code != 0 and result.stderr.strip():
+                portfolio_log(args.verbose, f"stderr tail:\n{result.stderr[-2000:]}", level=1)
 
             state["batches"] += 1
             state["accepted"] += result.accepted
@@ -388,17 +489,22 @@ def main(argv: list[str] | None = None) -> int:
                     ucb_explore=args.ucb_explore,
                     target_overrides_json=args.target_overrides_json,
                     state_json=args.state_json,
+                    mutation_memory_file=args.mutation_memory_file,
+                    disable_mutation_memory=args.disable_mutation_memory,
                 )
                 print(
                     json.dumps(
                         {
                             "ok": True,
                             "rounds_executed": round_index,
+                            "infinite_rounds": max_rounds is None,
                             "total_accepted": total_accepted,
                             "schedule": args.schedule,
                             "ucb_explore": args.ucb_explore,
                             "target_overrides_json": args.target_overrides_json,
                             "state_json": args.state_json,
+                            "mutation_memory_file": args.mutation_memory_file,
+                            "disable_mutation_memory": args.disable_mutation_memory,
                             "report_md": str(REPORT_MD),
                             "report_json": str(REPORT_JSON),
                         },
@@ -417,13 +523,15 @@ def main(argv: list[str] | None = None) -> int:
     write_reports(
         rows=rows,
         totals=totals,
-        rounds=args.rounds,
+        rounds=rounds_executed,
         batch_iterations=args.batch_iterations,
         batch_max_accepted=args.batch_max_accepted,
         schedule=args.schedule,
         ucb_explore=args.ucb_explore,
         target_overrides_json=args.target_overrides_json,
         state_json=args.state_json,
+        mutation_memory_file=args.mutation_memory_file,
+        disable_mutation_memory=args.disable_mutation_memory,
     )
     save_totals_state(state_path, totals)
 
@@ -431,12 +539,15 @@ def main(argv: list[str] | None = None) -> int:
         json.dumps(
             {
                 "ok": True,
-                "rounds_executed": args.rounds,
+                "rounds_executed": rounds_executed,
+                "infinite_rounds": max_rounds is None,
                 "total_accepted": total_accepted,
                 "schedule": args.schedule,
                 "ucb_explore": args.ucb_explore,
                 "target_overrides_json": args.target_overrides_json,
                 "state_json": args.state_json,
+                "mutation_memory_file": args.mutation_memory_file,
+                "disable_mutation_memory": args.disable_mutation_memory,
                 "report_md": str(REPORT_MD),
                 "report_json": str(REPORT_JSON),
             },

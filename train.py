@@ -10,6 +10,7 @@ This is the canonical loop entrypoint in compatibility mode:
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import difflib
 import json
 import os
@@ -19,10 +20,12 @@ import shutil
 import statistics
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +50,37 @@ ALLOWED_TARGET_OVERRIDE_KEYS = {
     "ab_repeats",
     "blocked_mutation_ttl",
 }
+DEFAULT_MUTATION_MEMORY_FILE = ROOT / "work" / "mutation_memory.json"
+DEFAULT_MUTATION_MEMORY_MAX_ENTRIES = 512
+DEFAULT_MUTATION_MEMORY_STALE_SECONDS = 14 * 24 * 60 * 60
+DEFAULT_MUTATION_MEMORY_ACCEPTED_STALE_MULTIPLIER = 4.0
+DEFAULT_MUTATION_MEMORY_MIN_ACCEPTED_TOTAL = 2
+DEFAULT_MUTATION_MEMORY_MIN_SUCCESS_RATE = 0.30
+
+
+def configure_debug_environment(args: argparse.Namespace) -> None:
+    if args.verbose > 0:
+        existing = os.getenv("AUTORESEARCH_VERBOSE", "").strip()
+        try:
+            existing_level = int(existing) if existing else 0
+        except ValueError:
+            existing_level = 0
+        os.environ["AUTORESEARCH_VERBOSE"] = str(max(existing_level, args.verbose))
+    if args.debug_command_output:
+        os.environ["AUTORESEARCH_DEBUG_COMMAND_OUTPUT"] = "1"
+    os.environ["AUTORESEARCH_DEBUG_MAX_CHARS"] = str(max(256, int(args.debug_max_chars)))
+
+
+def train_log(args: argparse.Namespace, message: str, *, level: int = 1) -> None:
+    if int(getattr(args, "verbose", 0)) < level:
+        return
+    print(f"[train {prepare.now_iso()}] {message}", file=sys.stderr, flush=True)
+
+
+def summarize_notes(notes: str, *, max_len: int = 220) -> str:
+    if len(notes) <= max_len:
+        return notes
+    return f"{notes[:max_len]}... [truncated]"
 
 
 def load_prompt_template() -> str:
@@ -348,6 +382,47 @@ def rust_mutator_neon_internal_for_loop_both(source: str) -> tuple[str, str, boo
     return candidate, "rust_neon_internal_for_loop_both", True
 
 
+def rust_mutator_x86_internal_for_loop(source: str) -> tuple[str, str, bool]:
+    candidate, _, changed = rust_mutator_neon_internal_for_loop(source)
+    if not changed:
+        return source, "rust_x86_internal_for_loop:pattern_missing", False
+    return candidate, "rust_x86_internal_for_loop", True
+
+
+def rust_mutator_x86_internal_for_loop_w24(source: str) -> tuple[str, str, bool]:
+    marker = "self.packed_internal_constants.iter().for_each(|&rc| {"
+    first = source.find(marker)
+    if first == -1:
+        return source, "rust_x86_internal_for_loop_w24:pattern_missing", False
+    second = source.find(marker, first + 1)
+    if second == -1:
+        # Fallback for files that only contain one internal loop.
+        candidate, _, changed = rust_mutator_x86_internal_for_loop(source)
+        if not changed:
+            return source, "rust_x86_internal_for_loop_w24:pattern_missing", False
+        return candidate, "rust_x86_internal_for_loop_w24:fallback_single", True
+    candidate, _, changed = rust_mutator_neon_internal_for_loop_w24(source)
+    if not changed:
+        return source, "rust_x86_internal_for_loop_w24:pattern_missing", False
+    return candidate, "rust_x86_internal_for_loop_w24", True
+
+
+def rust_mutator_x86_internal_for_loop_both(source: str) -> tuple[str, str, bool]:
+    marker = "self.packed_internal_constants.iter().for_each(|&rc| {"
+    occurrences = source.count(marker)
+    if occurrences <= 0:
+        return source, "rust_x86_internal_for_loop_both:pattern_missing", False
+    if occurrences == 1:
+        candidate, _, changed = rust_mutator_x86_internal_for_loop(source)
+        if not changed:
+            return source, "rust_x86_internal_for_loop_both:pattern_missing", False
+        return candidate, "rust_x86_internal_for_loop_both:fallback_single", True
+    candidate, _, changed = rust_mutator_neon_internal_for_loop_both(source)
+    if not changed:
+        return source, "rust_x86_internal_for_loop_both:pattern_missing", False
+    return candidate, "rust_x86_internal_for_loop_both", True
+
+
 def rust_mutator_neon_add_sum_loops(source: str) -> tuple[str, str, bool]:
     rules = [
         (
@@ -511,6 +586,155 @@ def rust_mutator_neon_sum_array_inline_both(source: str) -> tuple[str, str, bool
     return candidate, "rust_neon_sum_array_inline_both", True
 
 
+def _mutate_first_match(
+    source: str,
+    rules: list[tuple[str, str, str]],
+    *,
+    pattern_missing_note: str,
+) -> tuple[str, str, bool]:
+    for old, new, name in rules:
+        if old in source:
+            return source.replace(old, new, 1), name, True
+    return source, pattern_missing_note, False
+
+
+AVX2_SUM_VEC_OLD = (
+    "                ILP::add_sum(\n"
+    "                    &mut internal_state.s_hi,\n"
+    "                    transmute::<PackedMontyField31AVX2<FP>, __m256i>(sum),\n"
+    "                );"
+)
+AVX2_SUM_VEC_NEW = (
+    "                let sum_vec = transmute::<PackedMontyField31AVX2<FP>, __m256i>(sum);\n"
+    "                ILP::add_sum(&mut internal_state.s_hi, sum_vec);"
+)
+AVX512_SUM_VEC_OLD = (
+    "                ILP::add_sum(\n"
+    "                    &mut internal_state.s_hi,\n"
+    "                    transmute::<PackedMontyField31AVX512<FP>, __m512i>(sum),\n"
+    "                );"
+)
+AVX512_SUM_VEC_NEW = (
+    "                let sum_vec = transmute::<PackedMontyField31AVX512<FP>, __m512i>(sum);\n"
+    "                ILP::add_sum(&mut internal_state.s_hi, sum_vec);"
+)
+
+
+def rust_mutator_avx2_add_sum_loops(source: str) -> tuple[str, str, bool]:
+    return _mutate_first_match(
+        source,
+        [
+            (
+                "input.as_mut()[..5]\n                .iter_mut()\n                .for_each(|x| *x = mm256_mod_add(sum, *x, PMP::PACKED_P));",
+                "for x in input.as_mut()[..5].iter_mut() {\n            *x = mm256_mod_add(sum, *x, PMP::PACKED_P);\n        }",
+                "rust_avx_add_sum_head_add",
+            ),
+            (
+                "input.as_mut()[5..8]\n                .iter_mut()\n                .for_each(|x| *x = mm256_mod_sub(sum, *x, PMP::PACKED_P));",
+                "for x in input.as_mut()[5..8].iter_mut() {\n            *x = mm256_mod_sub(sum, *x, PMP::PACKED_P);\n        }",
+                "rust_avx_add_sum_head_sub",
+            ),
+            (
+                "input.as_mut()[8..]\n                .iter_mut()\n                .for_each(|x| *x = signed_add_avx2::<PMP>(sum, *x));",
+                "for x in input.as_mut()[8..].iter_mut() {\n            *x = signed_add_avx2::<PMP>(sum, *x);\n        }",
+                "rust_avx_add_sum_tail_signed",
+            ),
+        ],
+        pattern_missing_note="rust_avx2_add_sum:pattern_missing",
+    )
+
+
+def rust_mutator_avx512_add_sum_loops(source: str) -> tuple[str, str, bool]:
+    return _mutate_first_match(
+        source,
+        [
+            (
+                "input.as_mut()[..5]\n            .iter_mut()\n            .for_each(|x| *x = mm512_mod_add(sum, *x, PMP::PACKED_P));",
+                "for x in input.as_mut()[..5].iter_mut() {\n            *x = mm512_mod_add(sum, *x, PMP::PACKED_P);\n        }",
+                "rust_avx512_add_sum_head_add",
+            ),
+            (
+                "input.as_mut()[5..(8 + Self::NUM_POS)]\n            .iter_mut()\n            .for_each(|x| *x = mm512_mod_sub(sum, *x, PMP::PACKED_P));",
+                "for x in input.as_mut()[5..(8 + Self::NUM_POS)].iter_mut() {\n            *x = mm512_mod_sub(sum, *x, PMP::PACKED_P);\n        }",
+                "rust_avx512_add_sum_mid_sub",
+            ),
+            (
+                "input.as_mut()[8 + Self::NUM_POS..]\n            .iter_mut()\n            .for_each(|x| *x = mm512_mod_add(sum, *x, PMP::PACKED_P));",
+                "for x in input.as_mut()[8 + Self::NUM_POS..].iter_mut() {\n            *x = mm512_mod_add(sum, *x, PMP::PACKED_P);\n        }",
+                "rust_avx512_add_sum_tail_add",
+            ),
+        ],
+        pattern_missing_note="rust_avx512_add_sum:pattern_missing",
+    )
+
+
+def rust_mutator_avx2_sum_vec_hoist(source: str) -> tuple[str, str, bool]:
+    return _mutate_first_match(
+        source,
+        [(AVX2_SUM_VEC_OLD, AVX2_SUM_VEC_NEW, "rust_avx_sum_vec_hoist")],
+        pattern_missing_note="rust_avx_sum_vec_hoist:pattern_missing",
+    )
+
+
+def rust_mutator_avx512_sum_vec_hoist(source: str) -> tuple[str, str, bool]:
+    return _mutate_first_match(
+        source,
+        [(AVX512_SUM_VEC_OLD, AVX512_SUM_VEC_NEW, "rust_avx512_sum_vec_hoist")],
+        pattern_missing_note="rust_avx512_sum_vec_hoist:pattern_missing",
+    )
+
+
+def rust_mutator_avx2_sum_vec_hoist_w24(source: str) -> tuple[str, str, bool]:
+    candidate, changed = replace_nth_occurrence(source, AVX2_SUM_VEC_OLD, AVX2_SUM_VEC_NEW, 2)
+    if changed:
+        return candidate, "rust_avx_sum_vec_hoist_w24", True
+    return source, "rust_avx_sum_vec_hoist_w24:pattern_missing", False
+
+
+def rust_mutator_avx512_sum_vec_hoist_w24(source: str) -> tuple[str, str, bool]:
+    candidate, changed = replace_nth_occurrence(source, AVX512_SUM_VEC_OLD, AVX512_SUM_VEC_NEW, 2)
+    if changed:
+        return candidate, "rust_avx512_sum_vec_hoist_w24", True
+    return source, "rust_avx512_sum_vec_hoist_w24:pattern_missing", False
+
+
+def rust_mutator_avx2_sum_vec_hoist_both(source: str) -> tuple[str, str, bool]:
+    if source.count(AVX2_SUM_VEC_OLD) < 2:
+        return source, "rust_avx_sum_vec_hoist_both:pattern_missing", False
+    return source.replace(AVX2_SUM_VEC_OLD, AVX2_SUM_VEC_NEW, 2), "rust_avx_sum_vec_hoist_both", True
+
+
+def rust_mutator_avx512_sum_vec_hoist_both(source: str) -> tuple[str, str, bool]:
+    if source.count(AVX512_SUM_VEC_OLD) < 2:
+        return source, "rust_avx512_sum_vec_hoist_both:pattern_missing", False
+    return (
+        source.replace(AVX512_SUM_VEC_OLD, AVX512_SUM_VEC_NEW, 2),
+        "rust_avx512_sum_vec_hoist_both",
+        True,
+    )
+
+
+def rust_mutator_no_packing_internal_inline(source: str) -> tuple[str, str, bool]:
+    marker = "    fn new_from_constants(internal_constants: Vec<MontyField31<FP>>) -> Self {"
+    if marker not in source:
+        return source, "rust_no_packing_internal_inline:pattern_missing", False
+    if "#[inline(always)]\n    fn new_from_constants(internal_constants: Vec<MontyField31<FP>>) -> Self {" in source:
+        return source, "rust_no_packing_internal_inline:already_present", False
+    return source.replace(marker, "    #[inline(always)]\n" + marker, 1), "rust_no_packing_internal_inline", True
+
+
+def rust_mutator_no_packing_external_inline(source: str) -> tuple[str, str, bool]:
+    marker = "    fn new_from_constants(external_constants: ExternalLayerConstants<MontyField31<FP>, WIDTH>) -> Self {"
+    if marker not in source:
+        return source, "rust_no_packing_external_inline:pattern_missing", False
+    if (
+        "#[inline(always)]\n"
+        "    fn new_from_constants(external_constants: ExternalLayerConstants<MontyField31<FP>, WIDTH>) -> Self {"
+    ) in source:
+        return source, "rust_no_packing_external_inline:already_present", False
+    return source.replace(marker, "    #[inline(always)]\n" + marker, 1), "rust_no_packing_external_inline", True
+
+
 def rust_mutator_hoist_log_num_cols(source: str) -> tuple[str, str, bool]:
     marker = "let log_num_cols = log2_ceil_usize(num_cols);"
     if marker in source:
@@ -561,6 +785,7 @@ def rust_heuristic_candidate(
     blocked_mutations: set[str] | None = None,
     mutation_attempts: dict[str, int] | None = None,
     target_config: dict[str, Any] | None = None,
+    preferred_mutations: list[str] | None = None,
 ) -> tuple[str, str, bool]:
     path = str(source_path).replace("\\", "/").lower()
 
@@ -590,6 +815,37 @@ def rust_heuristic_candidate(
                 rust_mutator_neon_sum_array_inline_both,
             ]
         )
+    if path.endswith("crates/backend/koala-bear/src/monty_31/x86_64_avx2/poseidon2.rs"):
+        operators.extend(
+            [
+                rust_mutator_x86_internal_for_loop,
+                rust_mutator_x86_internal_for_loop_w24,
+                rust_mutator_x86_internal_for_loop_both,
+                rust_mutator_avx2_add_sum_loops,
+                rust_mutator_avx2_sum_vec_hoist,
+                rust_mutator_avx2_sum_vec_hoist_w24,
+                rust_mutator_avx2_sum_vec_hoist_both,
+            ]
+        )
+    if path.endswith("crates/backend/koala-bear/src/monty_31/x86_64_avx512/poseidon2.rs"):
+        operators.extend(
+            [
+                rust_mutator_x86_internal_for_loop,
+                rust_mutator_x86_internal_for_loop_w24,
+                rust_mutator_x86_internal_for_loop_both,
+                rust_mutator_avx512_add_sum_loops,
+                rust_mutator_avx512_sum_vec_hoist,
+                rust_mutator_avx512_sum_vec_hoist_w24,
+                rust_mutator_avx512_sum_vec_hoist_both,
+            ]
+        )
+    if path.endswith("crates/backend/koala-bear/src/monty_31/no_packing/poseidon2.rs"):
+        operators.extend(
+            [
+                rust_mutator_no_packing_internal_inline,
+                rust_mutator_no_packing_external_inline,
+            ]
+        )
 
     operators.extend(
         [
@@ -608,7 +864,19 @@ def rust_heuristic_candidate(
 
     shift = (iteration - 1) % len(operators)
     ordered = operators[shift:] + operators[:shift]
-    candidates: list[tuple[int, int, int, str, str]] = []
+    preferred_rank = {name: idx for idx, name in enumerate(preferred_mutations or [])}
+
+    def preference_for_label(label: str) -> tuple[int, int]:
+        if label in preferred_rank:
+            return (0, preferred_rank[label])
+        if "+" in label:
+            parts = [part.strip() for part in label.split("+") if part.strip()]
+            part_ranks = [preferred_rank[part] for part in parts if part in preferred_rank]
+            if part_ranks:
+                return (1, min(part_ranks))
+        return (2, 1_000_000)
+
+    candidates: list[tuple[int, int, int, int, int, str, str]] = []
     single_candidates: list[tuple[int, str, str]] = []
     attempts = mutation_attempts or {}
 
@@ -626,7 +894,10 @@ def rust_heuristic_candidate(
         if not changed:
             continue
         single_candidates.append((idx, candidate, mutation))
-        candidates.append((single_tier, attempts.get(mutation, 0), idx, candidate, mutation))
+        pref_class, pref_rank_value = preference_for_label(mutation)
+        candidates.append(
+            (single_tier, pref_class, pref_rank_value, attempts.get(mutation, 0), idx, candidate, mutation)
+        )
 
     if compound_every > 0 and compound_limit > 0 and single_candidates:
         second_ops = ordered[: min(len(ordered), compound_second_window)]
@@ -649,7 +920,10 @@ def rust_heuristic_candidate(
                 seen_labels.add(combo_mutation)
                 combo_attempts = attempts.get(combo_mutation, attempts.get(mutation_a, 0) + attempts.get(mutation_b, 0))
                 combo_idx = idx_a * 1000 + idx_b
-                candidates.append((compound_tier, combo_attempts, combo_idx, candidate_b, combo_mutation))
+                pref_class, pref_rank_value = preference_for_label(combo_mutation)
+                candidates.append(
+                    (compound_tier, pref_class, pref_rank_value, combo_attempts, combo_idx, candidate_b, combo_mutation)
+                )
                 added += 1
                 if added >= compound_limit:
                     break
@@ -657,8 +931,8 @@ def rust_heuristic_candidate(
                 break
 
     if candidates:
-        candidates.sort(key=lambda x: (x[0], x[1], x[2]))
-        _, _, _, chosen_candidate, chosen_mutation = candidates[0]
+        candidates.sort(key=lambda x: (x[0], x[1], x[2], x[3], x[4]))
+        _, _, _, _, _, chosen_candidate, chosen_mutation = candidates[0]
         return chosen_candidate, chosen_mutation, True
     return source, "rust_no_change", False
 
@@ -671,6 +945,7 @@ def heuristic_candidate(
     blocked_mutations: set[str] | None = None,
     mutation_attempts: dict[str, int] | None = None,
     target_config: dict[str, Any] | None = None,
+    preferred_mutations: list[str] | None = None,
 ) -> tuple[str, str, bool]:
     if language.lower() == "rust":
         rust_candidate, mutation, changed = rust_heuristic_candidate(
@@ -680,10 +955,22 @@ def heuristic_candidate(
             blocked_mutations=blocked_mutations,
             mutation_attempts=mutation_attempts,
             target_config=target_config,
+            preferred_mutations=preferred_mutations,
         )
         if changed:
             return rust_candidate, mutation, True
     return generic_heuristic_candidate(source, iteration)
+
+
+def release_oldest_blocked_mutation(
+    blocked_mutations_until: dict[str, int],
+    active_blocked: set[str],
+) -> str | None:
+    if not active_blocked:
+        return None
+    oldest = min(active_blocked, key=lambda label: (blocked_mutations_until.get(label, 0), label))
+    blocked_mutations_until.pop(oldest, None)
+    return oldest
 
 
 def source_extension(language: str, source_path: Path) -> str:
@@ -810,10 +1097,8 @@ def load_target_overrides(path_value: str | None, *, target_name: str) -> dict[s
     return {key: value for key, value in selected.items() if key in ALLOWED_TARGET_OVERRIDE_KEYS}
 
 
-def extract_mutation_label_from_notes(notes: str) -> str | None:
-    if not notes:
-        return None
-    token = notes.split(";", 1)[0].strip()
+def normalize_mutation_label(token: str) -> str | None:
+    token = token.strip()
     if not token:
         return None
 
@@ -840,6 +1125,15 @@ def extract_mutation_label_from_notes(notes: str) -> str | None:
     if token in {"no_change", "n/a", "rust_no_change", "heuristic_no_change"}:
         return None
     return token
+
+
+def extract_mutation_label_from_notes(notes: str) -> str | None:
+    if not notes:
+        return None
+    token = notes.split(";", 1)[0].strip()
+    if not token:
+        return None
+    return normalize_mutation_label(token)
 
 
 def load_mutation_attempt_counts(target_name: str) -> dict[str, int]:
@@ -869,6 +1163,383 @@ def load_mutation_attempt_counts(target_name: str) -> dict[str, int]:
             continue
         counts[mutation] = counts.get(mutation, 0) + 1
     return counts
+
+
+def infer_mutation_language(*, mutation: str, target_language: str | None = None) -> str:
+    candidate = (target_language or "").strip().lower()
+    if candidate:
+        return candidate
+    if mutation.startswith("rust_"):
+        return "rust"
+    if mutation.startswith("heuristic_"):
+        return "generic"
+    return "unknown"
+
+
+def parse_iso_to_epoch(value: str | None) -> float:
+    if not value:
+        return 0.0
+    try:
+        return dt.datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
+
+
+def atomic_write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+        try:
+            dir_fd = os.open(str(path.parent), os.O_RDONLY)
+        except OSError:
+            dir_fd = None
+        if dir_fd is not None:
+            try:
+                os.fsync(dir_fd)
+            except OSError:
+                # Directory fsync is best-effort for durability and can fail on some filesystems.
+                pass
+            finally:
+                os.close(dir_fd)
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+@contextmanager
+def file_lock(lock_path: Path) -> Any:
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_file = lock_path.open("a+", encoding="utf-8")
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            lock_file.seek(0, os.SEEK_END)
+            if lock_file.tell() == 0:
+                lock_file.write("\0")
+                lock_file.flush()
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            return
+
+        import fcntl
+
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    finally:
+        lock_file.close()
+
+
+def load_mutation_memory(path: Path) -> dict[str, Any]:
+    base: dict[str, Any] = {"version": 1, "updated_at": None, "seeded_from_results": False, "mutations": {}}
+    if path.exists():
+        try:
+            payload = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return base
+        if isinstance(payload, dict):
+            payload.setdefault("version", 1)
+            payload.setdefault("updated_at", None)
+            payload.setdefault("seeded_from_results", False)
+            payload.setdefault("mutations", {})
+            if isinstance(payload.get("mutations"), dict):
+                return payload
+    return base
+
+
+def seed_mutation_memory_from_results(memory: dict[str, Any]) -> None:
+    if bool(memory.get("seeded_from_results")):
+        return
+
+    mutations = memory.get("mutations")
+    if not isinstance(mutations, dict):
+        memory["mutations"] = {}
+        mutations = memory["mutations"]
+
+    targets = prepare.load_targets()
+    target_language_map: dict[str, str] = {}
+    for target_name, cfg in targets.items():
+        language = str(cfg.get("language", "")).strip().lower()
+        if language:
+            target_language_map[target_name] = language
+            continue
+        source_file = str(cfg.get("source_file", ""))
+        if source_file.endswith(".rs"):
+            target_language_map[target_name] = "rust"
+
+    results_file = ROOT / "results.tsv"
+    if not results_file.exists():
+        memory["seeded_from_results"] = True
+        return
+    rows = results_file.read_text().splitlines()
+    if len(rows) <= 1:
+        memory["seeded_from_results"] = True
+        return
+
+    for row in rows[1:]:
+        cols = row.split("\t")
+        if len(cols) < 12:
+            continue
+        target_name = cols[1]
+        try:
+            iteration = int(cols[2])
+        except Exception:  # noqa: BLE001
+            iteration = 0
+        if iteration <= 0:
+            continue
+        mutation = extract_mutation_label_from_notes(cols[11])
+        if not mutation:
+            continue
+        status_token = cols[3].strip().lower()
+        if status_token in {"accepted", "success"}:
+            accepted = True
+        elif status_token == "rejected":
+            accepted = False
+        elif status_token in {"failed", "skipped", "timeout", "error", "no_change"}:
+            # Infrastructure or no-op outcomes should not penalize mutation ranking.
+            continue
+        elif not status_token:
+            notes_token = cols[11].strip().lower()
+            if notes_token.startswith("accepted:"):
+                accepted = True
+            elif notes_token.startswith("rejected:"):
+                accepted = False
+            else:
+                continue
+        else:
+            # Skip unrecognized statuses instead of silently treating as rejection.
+            continue
+        update_mutation_memory(
+            memory,
+            mutation=mutation,
+            accepted=accepted,
+            target_name=target_name,
+            language=infer_mutation_language(mutation=mutation, target_language=target_language_map.get(target_name)),
+            timestamp=cols[0],
+            metric_before=None,
+            metric_after=None,
+            compact=False,
+        )
+    compact_mutation_memory(mutations, now_epoch=time.time())
+    memory["seeded_from_results"] = True
+
+
+def save_mutation_memory(path: Path, memory: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    memory["updated_at"] = prepare.now_iso()
+    atomic_write_text(path, json.dumps(memory, indent=2, sort_keys=True) + "\n")
+
+
+def _increment_stat(container: dict[str, Any], key: str, accepted: bool) -> None:
+    entry = container.setdefault(key, {"accepted": 0, "rejected": 0})
+    if not isinstance(entry, dict):
+        return
+    field = "accepted" if accepted else "rejected"
+    entry[field] = int(entry.get(field, 0)) + 1
+
+
+def compact_mutation_memory(
+    mutations: dict[str, Any],
+    *,
+    now_epoch: float,
+    stale_seconds: int = DEFAULT_MUTATION_MEMORY_STALE_SECONDS,
+    max_entries: int = DEFAULT_MUTATION_MEMORY_MAX_ENTRIES,
+    accepted_stale_multiplier: float = DEFAULT_MUTATION_MEMORY_ACCEPTED_STALE_MULTIPLIER,
+) -> None:
+    if stale_seconds > 0:
+        cutoff = now_epoch - float(stale_seconds)
+        accepted_cutoff: float | None = None
+        if accepted_stale_multiplier > 0:
+            accepted_cutoff = now_epoch - (float(stale_seconds) * float(accepted_stale_multiplier))
+        stale_keys: list[str] = []
+        for mutation, raw in mutations.items():
+            if not isinstance(raw, dict):
+                stale_keys.append(mutation)
+                continue
+            accepted_total = int(raw.get("accepted_total", 0))
+            last_seen_epoch = parse_iso_to_epoch(raw.get("last_seen_at"))
+            if accepted_total > 0:
+                if accepted_cutoff is not None and last_seen_epoch and last_seen_epoch < accepted_cutoff:
+                    stale_keys.append(mutation)
+                continue
+            if last_seen_epoch and last_seen_epoch < cutoff:
+                stale_keys.append(mutation)
+        for key in stale_keys:
+            mutations.pop(key, None)
+
+    if max_entries <= 0 or len(mutations) <= max_entries:
+        return
+
+    ranked: list[tuple[int, int, float, float, str]] = []
+    for mutation, raw in mutations.items():
+        if not isinstance(raw, dict):
+            ranked.append((0, 0, 0.0, 0.0, mutation))
+            continue
+        accepted_total = int(raw.get("accepted_total", 0))
+        rejected_total = int(raw.get("rejected_total", 0))
+        last_seen = parse_iso_to_epoch(raw.get("last_seen_at"))
+        latest_gain = float(raw.get("latest_gain", 0.0) or 0.0)
+        ranked.append((1 if accepted_total > 0 else 0, accepted_total - rejected_total, latest_gain, last_seen, mutation))
+
+    ranked.sort(reverse=True)
+    keep = {mutation for _, _, _, _, mutation in ranked[:max_entries]}
+    for mutation in list(mutations.keys()):
+        if mutation not in keep:
+            mutations.pop(mutation, None)
+
+
+def update_mutation_memory(
+    memory: dict[str, Any],
+    *,
+    mutation: str,
+    accepted: bool,
+    target_name: str,
+    language: str,
+    timestamp: str,
+    metric_before: float | None,
+    metric_after: float | None,
+    compact: bool = True,
+) -> None:
+    mutations = memory.setdefault("mutations", {})
+    if not isinstance(mutations, dict):
+        return
+
+    entry = mutations.setdefault(
+        mutation,
+        {
+            "accepted_total": 0,
+            "rejected_total": 0,
+            "last_seen_at": None,
+            "last_accepted_at": None,
+            "last_rejected_at": None,
+            "languages": {},
+            "targets": {},
+            "latest_gain": None,
+        },
+    )
+    if not isinstance(entry, dict):
+        return
+
+    if accepted:
+        entry["accepted_total"] = int(entry.get("accepted_total", 0)) + 1
+        entry["last_accepted_at"] = timestamp
+    else:
+        entry["rejected_total"] = int(entry.get("rejected_total", 0)) + 1
+        entry["last_rejected_at"] = timestamp
+    entry["last_seen_at"] = timestamp
+
+    languages = entry.setdefault("languages", {})
+    if isinstance(languages, dict):
+        _increment_stat(languages, language, accepted)
+
+    targets = entry.setdefault("targets", {})
+    if isinstance(targets, dict):
+        _increment_stat(targets, target_name, accepted)
+
+    if metric_before is not None and metric_after is not None:
+        entry["latest_gain"] = metric_after - metric_before
+
+    if compact:
+        compact_mutation_memory(mutations, now_epoch=parse_iso_to_epoch(timestamp) or time.time())
+
+
+def update_and_save_mutation_memory(
+    path: Path,
+    current_memory: dict[str, Any],
+    *,
+    mutation: str,
+    accepted: bool,
+    target_name: str,
+    language: str,
+    timestamp: str,
+    metric_before: float | None,
+    metric_after: float | None,
+) -> dict[str, Any]:
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    with file_lock(lock_path):
+        latest = load_mutation_memory(path)
+        update_mutation_memory(
+            latest,
+            mutation=mutation,
+            accepted=accepted,
+            target_name=target_name,
+            language=language,
+            timestamp=timestamp,
+            metric_before=metric_before,
+            metric_after=metric_after,
+        )
+        save_mutation_memory(path, latest)
+
+    current_memory.clear()
+    current_memory.update(latest)
+    return current_memory
+
+
+def preferred_mutations_from_memory(
+    memory: dict[str, Any],
+    *,
+    target_name: str,
+    language: str,
+    limit: int = 8,
+    min_accepted_total: int = DEFAULT_MUTATION_MEMORY_MIN_ACCEPTED_TOTAL,
+    min_success_rate: float = DEFAULT_MUTATION_MEMORY_MIN_SUCCESS_RATE,
+) -> list[str]:
+    mutations = memory.get("mutations")
+    if not isinstance(mutations, dict):
+        return []
+
+    ranked: list[tuple[int, float, int, str]] = []
+    for mutation, raw in mutations.items():
+        if not isinstance(raw, dict):
+            continue
+
+        accepted_total = int(raw.get("accepted_total", 0))
+        rejected_total = int(raw.get("rejected_total", 0))
+        if accepted_total <= 0:
+            continue
+
+        language_ok = False
+        raw_lang = raw.get("languages")
+        if isinstance(raw_lang, dict):
+            lang_entry = raw_lang.get(language)
+            if isinstance(lang_entry, dict) and int(lang_entry.get("accepted", 0)) > 0:
+                language_ok = True
+        if not language_ok and language == "rust" and mutation.startswith("rust_"):
+            language_ok = True
+        if not language_ok:
+            continue
+
+        targets = raw.get("targets")
+        has_current_target_success = False
+        if isinstance(targets, dict):
+            current = targets.get(target_name)
+            if isinstance(current, dict) and int(current.get("accepted", 0)) > 0:
+                has_current_target_success = True
+
+        cross_target_tier = 0 if has_current_target_success else 1
+        total = accepted_total + max(0, rejected_total)
+        success_rate = accepted_total / total if total > 0 else 0.0
+        if accepted_total < max(0, min_accepted_total) and success_rate < max(0.0, min_success_rate):
+            continue
+        ranked.append((cross_target_tier, -success_rate, -accepted_total, mutation))
+
+    ranked.sort()
+    return [mutation for _, _, _, mutation in ranked[:limit]]
 
 
 def make_run_label() -> str:
@@ -1272,6 +1943,7 @@ def resolve_min_improvement_rel(
 
 
 def run_loop(args: argparse.Namespace) -> int:
+    configure_debug_environment(args)
     targets = prepare.load_targets()
     if args.target not in targets:
         print(f"Unknown target: {args.target}", file=sys.stderr)
@@ -1304,6 +1976,42 @@ def run_loop(args: argparse.Namespace) -> int:
         language = "Cairo"
     else:
         language = "Source"
+    language_norm = language.strip().lower()
+
+    mutation_memory_path = Path(args.mutation_memory_file)
+    if not mutation_memory_path.is_absolute():
+        mutation_memory_path = ROOT / mutation_memory_path
+    mutation_memory: dict[str, Any] | None = None
+    mutation_memory_enabled = (not args.disable_mutation_memory) and language_norm == "rust"
+    if mutation_memory_enabled:
+        # Persist seeded history to disk before iterations start so per-iteration
+        # read/modify/write updates do not discard in-process seeded state.
+        lock_path = mutation_memory_path.with_suffix(mutation_memory_path.suffix + ".lock")
+        try:
+            with file_lock(lock_path):
+                mutation_memory = load_mutation_memory(mutation_memory_path)
+                seed_mutation_memory_from_results(mutation_memory)
+                save_mutation_memory(mutation_memory_path, mutation_memory)
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"[train] Warning: mutation memory bootstrap failed ({exc}); continuing without memory",
+                file=sys.stderr,
+            )
+            mutation_memory = None
+
+    max_iterations = args.iterations if args.iterations > 0 else None
+    iterations_label = str(args.iterations) if max_iterations is not None else "infinite"
+
+    train_log(
+        args,
+        (
+            f"starting target={args.target} iterations={iterations_label} "
+            f"max_accepted={args.max_accepted or 'none'} "
+            f"max_runtime={args.max_runtime_seconds or 'none'}s "
+            f"artifacts={args.artifacts}"
+        ),
+        level=1,
+    )
 
     baseline = prepare.evaluate_target(args.target)
     if baseline["status"] != "success" or baseline["metric_value"] is None:
@@ -1314,7 +2022,7 @@ def run_loop(args: argparse.Namespace) -> int:
     run_label = make_run_label()
     run_env = runtime_fingerprint(target_name=args.target, target=target, source_path=source_path)
     loop_wall_start = time.perf_counter()
-    stop_reason = "iterations_exhausted"
+    stop_reason = "iterations_exhausted" if max_iterations is not None else "external_stop"
 
     prepare.append_result_row(
         target=args.target,
@@ -1330,6 +2038,15 @@ def run_loop(args: argparse.Namespace) -> int:
     )
 
     best_metric = float(baseline["metric_value"])
+    train_log(
+        args,
+        (
+            f"baseline metric={best_metric:.6f} "
+            f"check_s={baseline['check_s']:.3f} info_or_bench_s={baseline['info_or_bench_s']:.3f} "
+            f"execute_s={baseline['execute_s']:.3f}"
+        ),
+        level=1,
+    )
     baseline_metric_series = parse_metric_series(baseline.get("debug", {}).get("metric_values"))
     best_metric_series = baseline_metric_series if baseline_metric_series else [best_metric]
     accepted = 0
@@ -1353,10 +2070,17 @@ def run_loop(args: argparse.Namespace) -> int:
             "run_label": run_label,
             "runtime_env": run_env,
             "target_overrides": target_overrides,
-            "iterations": args.iterations,
+            "iterations": max_iterations,
             "mode": "openai" if os.getenv("OPENAI_API_KEY") else "heuristic",
+            "mutation_memory": {
+                "enabled": mutation_memory is not None,
+                "path": str(mutation_memory_path),
+                "known_mutations": len((mutation_memory or {}).get("mutations", {}))
+                if isinstance((mutation_memory or {}).get("mutations"), dict)
+                else 0,
+            },
             "compute_budget": {
-                "max_iterations": args.iterations,
+                "max_iterations": max_iterations,
                 "max_accepted": args.max_accepted if args.max_accepted > 0 else None,
                 "max_runtime_seconds": args.max_runtime_seconds if args.max_runtime_seconds > 0 else None,
             },
@@ -1375,7 +2099,12 @@ def run_loop(args: argparse.Namespace) -> int:
     mutation_attempts = load_mutation_attempt_counts(args.target)
     iterations_completed = 0
 
-    for iteration in range(1, args.iterations + 1):
+    iteration = 0
+    while True:
+        iteration += 1
+        if max_iterations is not None and iteration > max_iterations:
+            break
+
         if args.max_runtime_seconds > 0:
             elapsed = time.perf_counter() - loop_wall_start
             if elapsed >= args.max_runtime_seconds:
@@ -1394,6 +2123,15 @@ def run_loop(args: argparse.Namespace) -> int:
                 break
 
         iterations_completed = iteration
+        train_log(
+            args,
+            (
+                f"iter {iteration}/"
+                f"{args.iterations if max_iterations is not None else 'inf'} "
+                f"starting (accepted={accepted}, best={best_metric:.6f})"
+            ),
+            level=1,
+        )
         current_source = source_path.read_text()
 
         mutation = ""
@@ -1401,6 +2139,15 @@ def run_loop(args: argparse.Namespace) -> int:
         active_blocked = {name for name, until in blocked_mutations_until.items() if until >= iteration}
         if active_blocked:
             diagnostics["active_blocked_mutations"] = sorted(active_blocked)
+        preferred_mutations: list[str] = []
+        if mutation_memory is not None and language_norm == "rust":
+            preferred_mutations = preferred_mutations_from_memory(
+                mutation_memory,
+                target_name=args.target,
+                language=language_norm,
+            )
+            if preferred_mutations:
+                diagnostics["preferred_mutations"] = preferred_mutations[:5]
 
         effective_rel_threshold, threshold_diag = resolve_min_improvement_rel(
             target=target,
@@ -1433,6 +2180,7 @@ def run_loop(args: argparse.Namespace) -> int:
                     blocked_mutations=active_blocked,
                     mutation_attempts=mutation_attempts,
                     target_config=target,
+                    preferred_mutations=preferred_mutations,
                 )
                 mutation = f"fallback_{mutation}"
             else:
@@ -1447,9 +2195,42 @@ def run_loop(args: argparse.Namespace) -> int:
                 blocked_mutations=active_blocked,
                 mutation_attempts=mutation_attempts,
                 target_config=target,
+                preferred_mutations=preferred_mutations,
             )
 
+        if (
+            not changed
+            and mutation in {"rust_no_change", "heuristic_no_change"}
+            and bool(target.get("recover_from_no_change", True))
+            and active_blocked
+        ):
+            released = release_oldest_blocked_mutation(blocked_mutations_until, active_blocked)
+            if released:
+                diagnostics["released_blocked_mutation"] = released
+                retry_blocked = {
+                    name for name, until in blocked_mutations_until.items() if until >= iteration
+                }
+                if retry_blocked:
+                    diagnostics["active_blocked_mutations"] = sorted(retry_blocked)
+                else:
+                    diagnostics.pop("active_blocked_mutations", None)
+                candidate, mutation, changed = heuristic_candidate(
+                    current_source,
+                    iteration,
+                    language,
+                    source_path,
+                    blocked_mutations=retry_blocked,
+                    mutation_attempts=mutation_attempts,
+                    target_config=target,
+                    preferred_mutations=preferred_mutations,
+                )
+
         if not changed:
+            train_log(
+                args,
+                f"iter {iteration}: skipped (mutation={mutation}, reason=no_change)",
+                level=1,
+            )
             prepare.append_result_row(
                 target=args.target,
                 iteration=iteration,
@@ -1464,7 +2245,9 @@ def run_loop(args: argparse.Namespace) -> int:
             )
             continue
 
-        mutation_attempts[mutation] = mutation_attempts.get(mutation, 0) + 1
+        mutation_key = normalize_mutation_label(mutation) or mutation
+        mutation_attempts[mutation_key] = mutation_attempts.get(mutation_key, 0) + 1
+        train_log(args, f"iter {iteration}: evaluating mutation={mutation_key}", level=2)
 
         source_path.write_text(candidate)
         try:
@@ -1590,7 +2373,20 @@ def run_loop(args: argparse.Namespace) -> int:
                     notes = f"rejected_eval_failed:{notes}"
 
             if not improved:
-                blocked_mutations_until[mutation] = iteration + blocked_mutation_ttl
+                blocked_mutations_until[mutation_key] = iteration + blocked_mutation_ttl
+
+            if mutation_memory is not None and language_norm == "rust":
+                mutation_memory = update_and_save_mutation_memory(
+                    mutation_memory_path,
+                    mutation_memory,
+                    mutation=mutation_key,
+                    accepted=improved,
+                    target_name=args.target,
+                    language=infer_mutation_language(mutation=mutation_key, target_language=language_norm),
+                    timestamp=prepare.now_iso(),
+                    metric_before=best_before if improved else None,
+                    metric_after=best_metric if improved else None,
+                )
 
             should_write_artifact = args.artifacts == "all" or (args.artifacts == "accepted" and improved)
             if should_write_artifact:
@@ -1625,6 +2421,19 @@ def run_loop(args: argparse.Namespace) -> int:
                 notes=f"{notes};run={run_label}",
             )
 
+            decision = "accepted" if improved else "rejected"
+            metric_s = "n/a" if metric_for_row is None else f"{float(metric_for_row):.6f}"
+            train_log(
+                args,
+                (
+                    f"iter {iteration}: {decision} mutation={mutation_key} status={result.get('status')} "
+                    f"metric={metric_s} best={best_metric:.6f} notes={summarize_notes(notes)}"
+                ),
+                level=1,
+            )
+            if diagnostics:
+                train_log(args, f"iter {iteration} diagnostics={json.dumps(diagnostics, sort_keys=True)}", level=2)
+
             prepare.append_log(
                 {
                     "event": "loop_iteration",
@@ -1632,6 +2441,7 @@ def run_loop(args: argparse.Namespace) -> int:
                     "target": args.target,
                     "iteration": iteration,
                     "mutation": mutation,
+                    "mutation_key": mutation_key,
                     "accepted": improved,
                     "best_metric": best_metric,
                     "effective_threshold": threshold_diag,
@@ -1653,6 +2463,14 @@ def run_loop(args: argparse.Namespace) -> int:
             raise
 
     elapsed_seconds = time.perf_counter() - loop_wall_start
+    train_log(
+        args,
+        (
+            f"completed target={args.target} stop_reason={stop_reason} accepted={accepted} "
+            f"iterations_completed={iterations_completed} best_metric={best_metric:.6f} elapsed_s={elapsed_seconds:.3f}"
+        ),
+        level=1,
+    )
     prepare.append_log(
         {
             "event": "loop_end",
@@ -1665,7 +2483,7 @@ def run_loop(args: argparse.Namespace) -> int:
             "best_metric": best_metric,
             "elapsed_seconds": elapsed_seconds,
             "compute_budget": {
-                "max_iterations": args.iterations,
+                "max_iterations": max_iterations,
                 "max_accepted": args.max_accepted if args.max_accepted > 0 else None,
                 "max_runtime_seconds": args.max_runtime_seconds if args.max_runtime_seconds > 0 else None,
             },
@@ -1678,7 +2496,8 @@ def run_loop(args: argparse.Namespace) -> int:
                 "target": args.target,
                 "best_metric": best_metric,
                 "accepted": accepted,
-                "iterations_requested": args.iterations,
+                "iterations_requested": max_iterations,
+                "infinite_iterations": max_iterations is None,
                 "iterations_completed": iterations_completed,
                 "max_accepted": args.max_accepted,
                 "max_runtime_seconds": args.max_runtime_seconds if args.max_runtime_seconds > 0 else None,
@@ -1695,8 +2514,25 @@ def run_loop(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="AutoPoseidon train loop (Karpathy-compatible entrypoint)")
+    parser.add_argument("-v", "--verbose", action="count", default=0, help="Increase stderr verbosity")
+    parser.add_argument(
+        "--debug-command-output",
+        action="store_true",
+        help="Print captured benchmark/build/test command stdout/stderr (truncated)",
+    )
+    parser.add_argument(
+        "--debug-max-chars",
+        type=int,
+        default=4000,
+        help="Max chars shown per command stream when debug output is enabled",
+    )
     parser.add_argument("--target", default="cairo_poseidon_style_t8", help="Target from config/targets.json")
-    parser.add_argument("--iterations", type=int, default=25, help="Max optimization iterations")
+    parser.add_argument(
+        "--iterations",
+        type=int,
+        default=25,
+        help="Max optimization iterations (0 = run indefinitely until another budget cap triggers)",
+    )
     parser.add_argument("--max-accepted", type=int, default=0, help="Stop after N accepted mutations (0 = no cap)")
     parser.add_argument(
         "--max-runtime-seconds",
@@ -1723,12 +2559,24 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="Optional JSON file with per-target acceptance overrides",
     )
+    parser.add_argument(
+        "--mutation-memory-file",
+        default=str(DEFAULT_MUTATION_MEMORY_FILE),
+        help="Path to persisted mutation replay memory (used for cross-target replay)",
+    )
+    parser.add_argument(
+        "--disable-mutation-memory",
+        action="store_true",
+        help="Disable mutation replay memory and use only per-run heuristics",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.iterations < 0:
+        parser.error("--iterations must be >= 0")
     return run_loop(args)
 
 

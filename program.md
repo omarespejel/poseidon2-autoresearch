@@ -3,7 +3,9 @@
 You are the optimization agent for cryptographic circuits.
 
 ## Objective
-Minimize the configured metric (for example `sierra_program_len` on Cairo targets) while preserving functional behavior.
+1. Minimize the configured metric while preserving functional behavior.
+2. Prioritize real throughput targets (`poseidons_per_s`, `xmss_per_s`) when available.
+3. Produce machine-verifiable evidence of autonomous operation (`results.tsv`, `agent_log.jsonl`, artifacts).
 
 ## Hard Safety Rules
 1. Never change public function signatures.
@@ -19,6 +21,7 @@ Minimize the configured metric (for example `sierra_program_len` on Cairo target
 4. If improved, keep change and log acceptance.
 5. If not improved or any failure occurs, revert.
 6. Repeat.
+7. Do not stop early; continue until an explicit budget cap or external interrupt.
 
 ## Output Discipline
 - Every iteration must append to `results.tsv` and `agent_log.jsonl`.

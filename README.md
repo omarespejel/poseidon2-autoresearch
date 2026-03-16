@@ -38,6 +38,22 @@ python3 prepare.py baseline --target cairo_poseidon_style_t8 --notes baseline
 python3 train.py --target cairo_poseidon_style_t8 --iterations 12 --max-accepted 3
 ```
 
+## Verbose and Debug Runs
+
+Use verbosity when you need to see real-time progress and command-level diagnostics:
+
+```bash
+# loop-level progress (iteration start/result) to stderr
+python3 train.py --target leanmultisig_poseidon16_src_fast --iterations 12 -v
+
+# include captured build/bench stdout+stderr for debugging (truncated)
+python3 train.py --target leanmultisig_poseidon16_src_fast --iterations 4 -vv \
+  --debug-command-output --debug-max-chars 8000
+
+# same debugging flags are available in prepare.py
+python3 prepare.py --verbose --debug-command-output evaluate --target leanmultisig_poseidon16_src_fast
+```
+
 ## Karpathy-Compatible Mode
 
 The repo now supports the same top-level workflow shape:
@@ -47,11 +63,33 @@ The repo now supports the same top-level workflow shape:
 - `program.md` (human instructions)
 
 This keeps compatibility with prompts and workflows written for Karpathy-style autoresearch projects.
-Operational instructions are in `codex_instructions.md`.
-Forward roadmap is in `NEXT_STEPS.md`.
-Date-anchored execution checklist is in `SPRINT_PLAN_2026-03-15_to_2026-03-22.md`.
-Deep external validation notes are in `DEEP_RESEARCH_2026-03-15.md`.
-Noise calibration snapshots are tracked in `calibration_report.md`.
+Use `--iterations 0` to run indefinitely until `--max-accepted` or `--max-runtime-seconds` stops the loop.
+
+## End-To-End Campaign
+
+To run a full track-aligned pipeline (autonomous loop + real Lean baselines + real-source optimization + evidence + submission/readiness artifacts):
+
+```bash
+python3 campaign.py --fresh --synthesis-cook --real-profile fast -v
+```
+
+Useful controls:
+
+```bash
+# add extra real-source optimization rounds
+python3 campaign.py --synthesis-cook --real-optimize-rounds 4
+
+# show the host-aware default source target set (ARM NEON vs x86 AVX2)
+python3 campaign.py --help | rg real-optimize-targets -n
+
+# run loop indefinitely (stopped by max accepted)
+python3 campaign.py --synthesis-cook --loop-iterations 0 --max-accepted 3
+
+# enforce identity fields for canonical submission artifacts
+python3 campaign.py --synthesis-cook --strict-submission
+```
+
+Track requirement mapping is documented in `SYNTHESIS_ALIGNMENT.md`.
 
 ## Adaptive Portfolio Mode
 
@@ -60,6 +98,8 @@ For broader search across multiple Rust hotspots:
 ```bash
 python3 portfolio_loop.py --rounds 4 --batch-iterations 6 --batch-max-accepted 1 --artifacts accepted
 ```
+
+Set `--rounds 0` to run indefinitely until `--stop-after-total-accepted` is reached.
 
 To inject per-target acceptance overrides (for example, from a calibration pass):
 
@@ -130,6 +170,7 @@ Source-level command targets can additionally require distribution separation
 (`min_effect_sigma`, `ci_z`, `require_ci_separation`) before accepting a run.
 They can also run post-accept A/B replay (`ab_repeats`) to confirm patched vs original.
 Rejected mutations can be temporarily cooled down (`blocked_mutation_ttl`) to encourage broader exploration.
+If the search stalls with `no_change`, the loop can release the oldest blocked mutation and retry selection in-place (`recover_from_no_change`, default `true`).
 Optional runtime controls are supported during benchmark commands:
 
 - `AUTORESEARCH_NICE=<level>` (process niceness)
@@ -143,6 +184,8 @@ Before long runs, measure target noise empirically:
 python3 prepare.py calibrate --target leanmultisig_poseidon16_src_fast --samples 5
 python3 prepare.py calibrate --target leanmultisig_poseidon16_table_src_fast --samples 5
 python3 prepare.py calibrate --target leanmultisig_poseidon2_neon_src_fast --samples 5
+python3 prepare.py calibrate --target leanmultisig_poseidon2_avx2_src_fast --samples 5
+python3 prepare.py calibrate --target leanmultisig_poseidon2_no_packing_src_fast --samples 5
 ```
 
 For direct Rust autoresearch against Lean source code:
@@ -156,6 +199,8 @@ Additional source-level targets are also available for deeper Poseidon2 hotspots
 
 - `leanmultisig_poseidon16_table_src_fast`
 - `leanmultisig_poseidon2_neon_src_fast`
+- `leanmultisig_poseidon2_avx2_src_fast`
+- `leanmultisig_poseidon2_no_packing_src_fast`
 
 Reference implementation context can be inspected in:
 
@@ -173,6 +218,27 @@ python3 train.py --target cairo_poseidon_style_t8 --iterations 25
 ```
 
 The loop falls back to heuristics automatically if an API call fails.
+
+## Cross-Target Mutation Replay
+
+Rust targets now share accepted mutation history through persisted replay memory:
+
+- default file: `work/mutation_memory.json`
+- memory is seeded from historical `results.tsv` accepted/rejected rows
+- successful mutations on one Rust target are prioritized on other Rust targets
+
+Controls:
+
+```bash
+# default behavior (memory enabled)
+python3 train.py --target leanmultisig_poseidon16_src_fast --iterations 12
+
+# custom memory file
+python3 train.py --target leanmultisig_poseidon2_neon_src_fast --mutation-memory-file work/custom_memory.json
+
+# disable replay memory
+python3 train.py --target leanmultisig_poseidon2_neon_src_fast --disable-mutation-memory
+```
 
 ## Acceptance Policy
 
