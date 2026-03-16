@@ -10,6 +10,7 @@ This is the canonical loop entrypoint in compatibility mode:
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import difflib
 import json
 import os
@@ -19,10 +20,12 @@ import shutil
 import statistics
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +51,8 @@ ALLOWED_TARGET_OVERRIDE_KEYS = {
     "blocked_mutation_ttl",
 }
 DEFAULT_MUTATION_MEMORY_FILE = ROOT / "work" / "mutation_memory.json"
+DEFAULT_MUTATION_MEMORY_MAX_ENTRIES = 512
+DEFAULT_MUTATION_MEMORY_STALE_SECONDS = 14 * 24 * 60 * 60
 
 
 def load_prompt_template() -> str:
@@ -922,6 +927,66 @@ def infer_mutation_language(*, mutation: str, target_language: str | None = None
     return "unknown"
 
 
+def parse_iso_to_epoch(value: str | None) -> float:
+    if not value:
+        return 0.0
+    try:
+        return dt.datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
+
+
+def atomic_write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+        try:
+            dir_fd = os.open(str(path.parent), os.O_RDONLY)
+        except OSError:
+            dir_fd = None
+        if dir_fd is not None:
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+@contextmanager
+def file_lock(lock_path: Path) -> Any:
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_file = lock_path.open("a+", encoding="utf-8")
+    if os.name == "nt":
+        import msvcrt
+
+        msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+        try:
+            yield
+        finally:
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            lock_file.close()
+        return
+
+    import fcntl
+
+    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+    try:
+        yield
+    finally:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        lock_file.close()
+
+
 def load_mutation_memory(path: Path) -> dict[str, Any]:
     base: dict[str, Any] = {"version": 1, "updated_at": None, "mutations": {}}
     if path.exists():
@@ -978,7 +1043,13 @@ def seed_mutation_memory_from_results(memory: dict[str, Any]) -> None:
         mutation = extract_mutation_label_from_notes(cols[11])
         if not mutation:
             continue
-        accepted = cols[11].strip().startswith("accepted:")
+        status_token = cols[3].strip().lower()
+        if status_token == "accepted":
+            accepted = True
+        elif status_token in {"rejected", "failed", "skipped"}:
+            accepted = False
+        else:
+            accepted = cols[11].strip().startswith("accepted:")
         update_mutation_memory(
             memory,
             mutation=mutation,
@@ -994,7 +1065,59 @@ def seed_mutation_memory_from_results(memory: dict[str, Any]) -> None:
 def save_mutation_memory(path: Path, memory: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     memory["updated_at"] = prepare.now_iso()
-    path.write_text(json.dumps(memory, indent=2, sort_keys=True) + "\n")
+    atomic_write_text(path, json.dumps(memory, indent=2, sort_keys=True) + "\n")
+
+
+def _increment_stat(container: dict[str, Any], key: str, accepted: bool) -> None:
+    entry = container.setdefault(key, {"accepted": 0, "rejected": 0})
+    if not isinstance(entry, dict):
+        return
+    field = "accepted" if accepted else "rejected"
+    entry[field] = int(entry.get(field, 0)) + 1
+
+
+def compact_mutation_memory(
+    mutations: dict[str, Any],
+    *,
+    now_epoch: float,
+    stale_seconds: int = DEFAULT_MUTATION_MEMORY_STALE_SECONDS,
+    max_entries: int = DEFAULT_MUTATION_MEMORY_MAX_ENTRIES,
+) -> None:
+    if stale_seconds > 0:
+        cutoff = now_epoch - float(stale_seconds)
+        stale_keys: list[str] = []
+        for mutation, raw in mutations.items():
+            if not isinstance(raw, dict):
+                stale_keys.append(mutation)
+                continue
+            accepted_total = int(raw.get("accepted_total", 0))
+            if accepted_total > 0:
+                continue
+            last_seen_epoch = parse_iso_to_epoch(raw.get("last_seen_at"))
+            if last_seen_epoch and last_seen_epoch < cutoff:
+                stale_keys.append(mutation)
+        for key in stale_keys:
+            mutations.pop(key, None)
+
+    if max_entries <= 0 or len(mutations) <= max_entries:
+        return
+
+    ranked: list[tuple[int, int, float, float, str]] = []
+    for mutation, raw in mutations.items():
+        if not isinstance(raw, dict):
+            ranked.append((0, 0, 0.0, 0.0, mutation))
+            continue
+        accepted_total = int(raw.get("accepted_total", 0))
+        rejected_total = int(raw.get("rejected_total", 0))
+        last_seen = parse_iso_to_epoch(raw.get("last_seen_at"))
+        latest_gain = float(raw.get("latest_gain", 0.0) or 0.0)
+        ranked.append((1 if accepted_total > 0 else 0, accepted_total - rejected_total, latest_gain, last_seen, mutation))
+
+    ranked.sort(reverse=True)
+    keep = {mutation for _, _, _, _, mutation in ranked[:max_entries]}
+    for mutation in list(mutations.keys()):
+        if mutation not in keep:
+            mutations.pop(mutation, None)
 
 
 def update_mutation_memory(
@@ -1038,24 +1161,48 @@ def update_mutation_memory(
 
     languages = entry.setdefault("languages", {})
     if isinstance(languages, dict):
-        lang_entry = languages.setdefault(language, {"accepted": 0, "rejected": 0})
-        if isinstance(lang_entry, dict):
-            if accepted:
-                lang_entry["accepted"] = int(lang_entry.get("accepted", 0)) + 1
-            else:
-                lang_entry["rejected"] = int(lang_entry.get("rejected", 0)) + 1
+        _increment_stat(languages, language, accepted)
 
     targets = entry.setdefault("targets", {})
     if isinstance(targets, dict):
-        target_entry = targets.setdefault(target_name, {"accepted": 0, "rejected": 0})
-        if isinstance(target_entry, dict):
-            if accepted:
-                target_entry["accepted"] = int(target_entry.get("accepted", 0)) + 1
-            else:
-                target_entry["rejected"] = int(target_entry.get("rejected", 0)) + 1
+        _increment_stat(targets, target_name, accepted)
 
     if metric_before is not None and metric_after is not None:
         entry["latest_gain"] = metric_after - metric_before
+
+    compact_mutation_memory(mutations, now_epoch=parse_iso_to_epoch(timestamp))
+
+
+def update_and_save_mutation_memory(
+    path: Path,
+    current_memory: dict[str, Any],
+    *,
+    mutation: str,
+    accepted: bool,
+    target_name: str,
+    language: str,
+    timestamp: str,
+    metric_before: float | None,
+    metric_after: float | None,
+) -> dict[str, Any]:
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    with file_lock(lock_path):
+        latest = load_mutation_memory(path)
+        update_mutation_memory(
+            latest,
+            mutation=mutation,
+            accepted=accepted,
+            target_name=target_name,
+            language=language,
+            timestamp=timestamp,
+            metric_before=metric_before,
+            metric_after=metric_after,
+        )
+        save_mutation_memory(path, latest)
+
+    current_memory.clear()
+    current_memory.update(latest)
+    return current_memory
 
 
 def preferred_mutations_from_memory(
@@ -1097,7 +1244,7 @@ def preferred_mutations_from_memory(
             if isinstance(current, dict) and int(current.get("accepted", 0)) > 0:
                 has_current_target_success = True
 
-        cross_target_tier = 0 if not has_current_target_success else 1
+        cross_target_tier = 0 if has_current_target_success else 1
         total = accepted_total + max(0, rejected_total)
         success_rate = accepted_total / total if total > 0 else 0.0
         ranked.append((cross_target_tier, -success_rate, -accepted_total, mutation))
@@ -1883,7 +2030,8 @@ def run_loop(args: argparse.Namespace) -> int:
                 blocked_mutations_until[mutation_key] = iteration + blocked_mutation_ttl
 
             if mutation_memory is not None:
-                update_mutation_memory(
+                mutation_memory = update_and_save_mutation_memory(
+                    mutation_memory_path,
                     mutation_memory,
                     mutation=mutation_key,
                     accepted=improved,
@@ -1893,7 +2041,6 @@ def run_loop(args: argparse.Namespace) -> int:
                     metric_before=best_before if improved else None,
                     metric_after=best_metric if improved else None,
                 )
-                save_mutation_memory(mutation_memory_path, mutation_memory)
 
             should_write_artifact = args.artifacts == "all" or (args.artifacts == "accepted" and improved)
             if should_write_artifact:
