@@ -19,6 +19,7 @@ import shutil
 import statistics
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -1312,6 +1313,8 @@ def run_loop(args: argparse.Namespace) -> int:
 
     run_label = make_run_label()
     run_env = runtime_fingerprint(target_name=args.target, target=target, source_path=source_path)
+    loop_wall_start = time.perf_counter()
+    stop_reason = "iterations_exhausted"
 
     prepare.append_result_row(
         target=args.target,
@@ -1352,6 +1355,11 @@ def run_loop(args: argparse.Namespace) -> int:
             "target_overrides": target_overrides,
             "iterations": args.iterations,
             "mode": "openai" if os.getenv("OPENAI_API_KEY") else "heuristic",
+            "compute_budget": {
+                "max_iterations": args.iterations,
+                "max_accepted": args.max_accepted if args.max_accepted > 0 else None,
+                "max_runtime_seconds": args.max_runtime_seconds if args.max_runtime_seconds > 0 else None,
+            },
             "stats_gate": {
                 "min_effect_sigma": min_effect_sigma,
                 "ci_z": ci_z,
@@ -1365,8 +1373,27 @@ def run_loop(args: argparse.Namespace) -> int:
     blocked_mutations_until: dict[str, int] = {}
     blocked_mutation_ttl = max(0, int(target.get("blocked_mutation_ttl", 10)))
     mutation_attempts = load_mutation_attempt_counts(args.target)
+    iterations_completed = 0
 
     for iteration in range(1, args.iterations + 1):
+        if args.max_runtime_seconds > 0:
+            elapsed = time.perf_counter() - loop_wall_start
+            if elapsed >= args.max_runtime_seconds:
+                stop_reason = "runtime_budget_exhausted"
+                prepare.append_log(
+                    {
+                        "event": "budget_stop",
+                        "timestamp": prepare.now_iso(),
+                        "target": args.target,
+                        "iteration": iteration,
+                        "reason": stop_reason,
+                        "elapsed_seconds": elapsed,
+                        "max_runtime_seconds": args.max_runtime_seconds,
+                    }
+                )
+                break
+
+        iterations_completed = iteration
         current_source = source_path.read_text()
 
         mutation = ""
@@ -1619,10 +1646,31 @@ def run_loop(args: argparse.Namespace) -> int:
             )
 
             if args.max_accepted and accepted >= args.max_accepted:
+                stop_reason = "max_accepted_reached"
                 break
         except BaseException:
             source_path.write_text(current_source)
             raise
+
+    elapsed_seconds = time.perf_counter() - loop_wall_start
+    prepare.append_log(
+        {
+            "event": "loop_end",
+            "timestamp": prepare.now_iso(),
+            "target": args.target,
+            "run_label": run_label,
+            "stop_reason": stop_reason,
+            "iterations_completed": iterations_completed,
+            "accepted": accepted,
+            "best_metric": best_metric,
+            "elapsed_seconds": elapsed_seconds,
+            "compute_budget": {
+                "max_iterations": args.iterations,
+                "max_accepted": args.max_accepted if args.max_accepted > 0 else None,
+                "max_runtime_seconds": args.max_runtime_seconds if args.max_runtime_seconds > 0 else None,
+            },
+        }
+    )
 
     print(
         json.dumps(
@@ -1631,7 +1679,11 @@ def run_loop(args: argparse.Namespace) -> int:
                 "best_metric": best_metric,
                 "accepted": accepted,
                 "iterations_requested": args.iterations,
+                "iterations_completed": iterations_completed,
                 "max_accepted": args.max_accepted,
+                "max_runtime_seconds": args.max_runtime_seconds if args.max_runtime_seconds > 0 else None,
+                "elapsed_seconds": elapsed_seconds,
+                "stop_reason": stop_reason,
             },
             indent=2,
             sort_keys=True,
@@ -1646,6 +1698,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--target", default="cairo_poseidon_style_t8", help="Target from config/targets.json")
     parser.add_argument("--iterations", type=int, default=25, help="Max optimization iterations")
     parser.add_argument("--max-accepted", type=int, default=0, help="Stop after N accepted mutations (0 = no cap)")
+    parser.add_argument(
+        "--max-runtime-seconds",
+        type=float,
+        default=0.0,
+        help="Stop loop when wall-clock runtime budget is reached (0 disables)",
+    )
     parser.add_argument("--model", default=os.getenv("OPENAI_MODEL", "gpt-5-mini"), help="Model for OpenAI mode")
     parser.add_argument("--temperature", type=float, default=0.2, help="Sampling temperature for OpenAI mode")
     parser.add_argument(

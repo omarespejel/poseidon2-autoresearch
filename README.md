@@ -17,6 +17,7 @@ This scaffold focuses on what is quickly verifiable:
 - `run_loop.py`: backward-compatible alias to `train.py`
 - `portfolio_loop.py`: adaptive multi-target runner (avoids single-target plateaus)
 - `evidence_pack.py`: generate submission-grade evidence bundle from logs/artifacts
+- `submission_pack.py`: generate canonical `agent.json`, `agent_log.json`, and receipts bundle
 - `readiness_check.py`: submission-readiness checker (artifacts + activity + timeline gate)
 - `config/targets.json`: benchmark targets and commands
 - `examples/cairo_poseidon_style`: primary Cairo optimization sandbox
@@ -90,6 +91,12 @@ To generate a readiness checkpoint report:
 
 ```bash
 python3 readiness_check.py
+```
+
+To generate canonical submission artifacts:
+
+```bash
+python3 submission_pack.py --agent-name AutoPoseidon
 ```
 
 To run full checkpoint cycles with calibration-driven threshold overrides:

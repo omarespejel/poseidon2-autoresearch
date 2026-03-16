@@ -24,6 +24,7 @@ PREPARE = ROOT / "prepare.py"
 PORTFOLIO = ROOT / "portfolio_loop.py"
 EVIDENCE = ROOT / "evidence_pack.py"
 READINESS = ROOT / "readiness_check.py"
+SUBMISSION_PACK = ROOT / "submission_pack.py"
 REPORT_JSON = ROOT / "checkpoint_report.json"
 REPORT_MD = ROOT / "checkpoint_report.md"
 DEFAULT_OVERRIDES_PATH = ROOT / "work" / "checkpoint_target_overrides.json"
@@ -198,6 +199,7 @@ def write_reports(payload: dict[str, Any]) -> None:
     lines.append("- `checkpoint_report.json`")
     lines.append("- `portfolio_report.md` / `portfolio_report.json` (last cycle)")
     lines.append("- `evidence/manifest.json` / `evidence/summary.md`")
+    lines.append("- `submission/agent.json` / `submission/agent_log.json` / `submission/submission_receipts.json`")
     lines.append("- `readiness_report.md`")
     lines.append("")
     lines.append("## Reproduce")
@@ -284,6 +286,38 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path for persisted portfolio scheduling state when using UCB scheduling",
     )
     parser.add_argument("--skip-evidence", action="store_true", help="Skip evidence/readiness refresh")
+    parser.add_argument("--skip-submission-pack", action="store_true", help="Skip generation of submission artifacts")
+    parser.add_argument("--agent-name", default="AutoPoseidon", help="Submission artifact agent name")
+    parser.add_argument(
+        "--operator-wallet",
+        default=os.getenv("AUTORESEARCH_OPERATOR_WALLET", ""),
+        help="Operator wallet for submission artifacts",
+    )
+    parser.add_argument(
+        "--erc8004-identity",
+        default=os.getenv("AUTORESEARCH_ERC8004_IDENTITY", ""),
+        help="ERC-8004 identity for submission artifacts",
+    )
+    parser.add_argument(
+        "--erc8004-registration-tx",
+        default=os.getenv("AUTORESEARCH_ERC8004_TX", ""),
+        help="ERC-8004 registration tx hash/url for submission artifacts",
+    )
+    parser.add_argument(
+        "--submission-task-categories",
+        default="cryptographic_optimization,zk_proving_performance,autonomous_research",
+        help="Comma-separated task categories for submission artifacts",
+    )
+    parser.add_argument(
+        "--submission-project-url",
+        default="",
+        help="Optional project URL included in submission receipts",
+    )
+    parser.add_argument(
+        "--strict-submission-pack",
+        action="store_true",
+        help="Require operator + ERC-8004 fields when generating submission artifacts",
+    )
     parser.add_argument("--nice", default="", help="AUTORESEARCH_NICE value for subprocesses")
     return parser
 
@@ -441,8 +475,34 @@ def main(argv: list[str] | None = None) -> int:
 
     evidence_payload: dict[str, Any] | None = None
     readiness_payload: dict[str, Any] | None = None
+    submission_payload: dict[str, Any] | None = None
     if not args.skip_evidence:
         evidence_payload, _ = must_json([sys.executable, str(EVIDENCE)], extra_env=extra_env)
+    if not args.skip_submission_pack:
+        submission_argv = [
+            sys.executable,
+            str(SUBMISSION_PACK),
+            "--agent-name",
+            args.agent_name,
+            "--compute-max-iterations",
+            str(args.batch_iterations),
+            "--compute-max-accepted",
+            str(args.batch_max_accepted),
+        ]
+        if args.operator_wallet.strip():
+            submission_argv.extend(["--operator-wallet", args.operator_wallet.strip()])
+        if args.erc8004_identity.strip():
+            submission_argv.extend(["--erc8004-identity", args.erc8004_identity.strip()])
+        if args.erc8004_registration_tx.strip():
+            submission_argv.extend(["--erc8004-registration-tx", args.erc8004_registration_tx.strip()])
+        if args.submission_project_url.strip():
+            submission_argv.extend(["--project-url", args.submission_project_url.strip()])
+        for category in [t.strip() for t in args.submission_task_categories.split(",") if t.strip()]:
+            submission_argv.extend(["--task-category", category])
+        if args.strict_submission_pack:
+            submission_argv.append("--strict")
+        submission_payload, _ = must_json(submission_argv, extra_env=extra_env)
+    if not args.skip_evidence:
         readiness_payload, _ = must_json([sys.executable, str(READINESS)], extra_env=extra_env)
 
     payload = {
@@ -470,11 +530,20 @@ def main(argv: list[str] | None = None) -> int:
             "override_force_fixed_mode": args.override_force_fixed_mode,
             "overrides_path": str(resolve_overrides_path(args.overrides_path)),
             "portfolio_state_json": str(portfolio_state_path) if args.schedule == "ucb" else "",
+            "skip_submission_pack": args.skip_submission_pack,
+            "agent_name": args.agent_name,
+            "operator_wallet_set": bool(args.operator_wallet.strip()),
+            "erc8004_identity_set": bool(args.erc8004_identity.strip()),
+            "erc8004_registration_tx_set": bool(args.erc8004_registration_tx.strip()),
+            "submission_task_categories": [t.strip() for t in args.submission_task_categories.split(",") if t.strip()],
+            "submission_project_url": args.submission_project_url,
+            "strict_submission_pack": args.strict_submission_pack,
             "nice": args.nice,
         },
         "total_accepted": total_accepted,
         "cycles": cycles,
         "evidence": evidence_payload,
+        "submission_pack": submission_payload,
         "readiness": readiness_payload,
         "report_json": str(REPORT_JSON),
         "report_md": str(REPORT_MD),

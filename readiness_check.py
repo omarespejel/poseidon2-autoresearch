@@ -17,6 +17,10 @@ RESULTS_FILE = ROOT / "results.tsv"
 EVIDENCE_MANIFEST = ROOT / "evidence" / "manifest.json"
 EVIDENCE_SUMMARY = ROOT / "evidence" / "summary.md"
 PORTFOLIO_JSON = ROOT / "portfolio_report.json"
+SUBMISSION_DIR = ROOT / "submission"
+AGENT_MANIFEST = SUBMISSION_DIR / "agent.json"
+AGENT_LOG_JSON = SUBMISSION_DIR / "agent_log.json"
+SUBMISSION_RECEIPTS = SUBMISSION_DIR / "submission_receipts.json"
 DEFAULT_REPORT = ROOT / "readiness_report.md"
 
 # Public Synthesis timeline marker observed on-site.
@@ -97,6 +101,9 @@ def build_checks(
     build_close_utc: dt.datetime,
 ) -> list[CheckResult]:
     checks: list[CheckResult] = []
+    submission_manifest = load_json(AGENT_MANIFEST)
+    submission_log = load_json(AGENT_LOG_JSON)
+    submission_receipts = load_json(SUBMISSION_RECEIPTS)
 
     checks.append(
         CheckResult(
@@ -119,6 +126,132 @@ def build_checks(
             details="evidence/summary.md exists" if EVIDENCE_SUMMARY.exists() else "missing evidence summary",
         )
     )
+    checks.append(
+        CheckResult(
+            name="submission_agent_manifest_present",
+            ok=submission_manifest is not None,
+            details="submission/agent.json exists and parses"
+            if submission_manifest is not None
+            else "missing or invalid submission/agent.json",
+        )
+    )
+    checks.append(
+        CheckResult(
+            name="submission_agent_log_present",
+            ok=submission_log is not None,
+            details="submission/agent_log.json exists and parses"
+            if submission_log is not None
+            else "missing or invalid submission/agent_log.json",
+        )
+    )
+    checks.append(
+        CheckResult(
+            name="submission_receipts_present",
+            ok=submission_receipts is not None,
+            details="submission/submission_receipts.json exists and parses"
+            if submission_receipts is not None
+            else "missing or invalid submission/submission_receipts.json",
+        )
+    )
+
+    if submission_manifest is not None:
+        required_manifest_keys = [
+            "name",
+            "operator_wallet",
+            "erc8004_identity",
+            "erc8004_registration_tx",
+            "supported_tools",
+            "tech_stacks",
+            "compute_constraints",
+            "task_categories",
+        ]
+        missing_keys = [key for key in required_manifest_keys if key not in submission_manifest]
+        checks.append(
+            CheckResult(
+                name="submission_manifest_required_keys",
+                ok=not missing_keys,
+                details="ok" if not missing_keys else f"missing keys: {', '.join(missing_keys)}",
+            )
+        )
+
+        missing_identity_values = []
+        for key in ("operator_wallet", "erc8004_identity", "erc8004_registration_tx"):
+            value = submission_manifest.get(key)
+            if not isinstance(value, str) or not value.strip():
+                missing_identity_values.append(key)
+        checks.append(
+            CheckResult(
+                name="submission_manifest_identity_values",
+                ok=not missing_identity_values,
+                details="ok"
+                if not missing_identity_values
+                else f"missing identity values: {', '.join(missing_identity_values)}",
+            )
+        )
+
+        compute_constraints = submission_manifest.get("compute_constraints")
+        has_compute = isinstance(compute_constraints, dict) and any(
+            compute_constraints.get(key) is not None
+            for key in ("max_iterations", "max_accepted", "max_runtime_seconds", "max_model_calls")
+        )
+        checks.append(
+            CheckResult(
+                name="submission_compute_budget_defined",
+                ok=has_compute,
+                details="compute constraints populated" if has_compute else "compute constraints missing or empty",
+            )
+        )
+
+    if submission_log is not None:
+        required_sections = [
+            "stages",
+            "decisions",
+            "tool_calls",
+            "failures",
+            "final_outputs",
+            "compute_budget",
+            "safety_guardrails",
+        ]
+        missing_sections = [section for section in required_sections if section not in submission_log]
+        checks.append(
+            CheckResult(
+                name="submission_log_required_sections",
+                ok=not missing_sections,
+                details="ok" if not missing_sections else f"missing sections: {', '.join(missing_sections)}",
+            )
+        )
+
+        stage_counts = submission_log.get("stages")
+        missing_stages: list[str] = []
+        if isinstance(stage_counts, dict):
+            for stage in ("discover", "plan", "execute", "verify", "submit"):
+                count = stage_counts.get(stage)
+                if not isinstance(count, int) or count < 1:
+                    missing_stages.append(stage)
+        else:
+            missing_stages = ["discover", "plan", "execute", "verify", "submit"]
+        checks.append(
+            CheckResult(
+                name="submission_log_stage_coverage",
+                ok=not missing_stages,
+                details="ok" if not missing_stages else f"missing stage coverage: {', '.join(missing_stages)}",
+            )
+        )
+
+    if submission_receipts is not None:
+        erc8004 = submission_receipts.get("erc8004")
+        reg_tx = ""
+        if isinstance(erc8004, dict):
+            raw = erc8004.get("registration_tx", "")
+            if isinstance(raw, str):
+                reg_tx = raw.strip()
+        checks.append(
+            CheckResult(
+                name="submission_receipts_registration_tx",
+                ok=bool(reg_tx),
+                details="ok" if reg_tx else "missing erc8004.registration_tx in submission receipts",
+            )
+        )
 
     accepted_total = int(manifest.get("accepted_total", 0)) if manifest else 0
     retained_count = 0
