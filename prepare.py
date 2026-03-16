@@ -671,6 +671,7 @@ def evaluate_command_profile(
             metric_values_raw.append(value)
 
     metric_values = metric_values_raw
+    metric_values_series = list(metric_values_raw)
     if trim_extremes > 0:
         if len(metric_values_raw) <= trim_extremes * 2:
             return {
@@ -690,6 +691,13 @@ def evaluate_command_profile(
                     "metric_values_raw": metric_values_raw,
                 },
             }
+        indexed_values = list(enumerate(metric_values_raw))
+        sorted_indexed = sorted(indexed_values, key=lambda pair: (pair[1], pair[0]))
+        drop_indices = {idx for idx, _ in sorted_indexed[:trim_extremes]}
+        drop_indices.update(idx for idx, _ in sorted_indexed[-trim_extremes:])
+        metric_values_series = [
+            value for idx, value in enumerate(metric_values_raw) if idx not in drop_indices
+        ]
         sorted_values = sorted(metric_values_raw)
         metric_values = sorted_values[trim_extremes : len(sorted_values) - trim_extremes]
 
@@ -709,6 +717,7 @@ def evaluate_command_profile(
                 "bench_runs": bench_runs,
                 "metric_values": metric_values,
                 "metric_values_raw": metric_values_raw,
+                "metric_values_series": metric_values_series,
                 "trim_extremes": trim_extremes,
                 "aggregate": aggregate,
             },
@@ -733,6 +742,7 @@ def evaluate_command_profile(
             "bench_runs": bench_runs,
             "metric_values": metric_values,
             "metric_values_raw": metric_values_raw,
+            "metric_values_series": metric_values_series,
             "aggregate": aggregate,
             "trim_extremes": trim_extremes,
             "runs": runs,
@@ -983,21 +993,25 @@ def evaluate_command(target_name: str, target: dict[str, Any]) -> dict[str, Any]
         }
 
     profile_sample_counts: dict[str, int] = {}
-    profile_raw_series: list[list[float]] = []
+    profile_series_for_gates: list[list[float]] = []
     series_parse_error: str | None = None
     for report in profile_reports:
         name = str(report["name"])
         report_debug = report.get("debug", {})
-        raw_values = report_debug.get("metric_values_raw") if isinstance(report_debug, dict) else None
+        raw_values = (
+            report_debug.get("metric_values_series", report_debug.get("metric_values"))
+            if isinstance(report_debug, dict)
+            else None
+        )
         if not isinstance(raw_values, list) or not raw_values:
-            series_parse_error = f"profile={name} metric_values_raw missing_or_empty"
-            profile_raw_series = []
+            series_parse_error = f"profile={name} metric_values_series missing_or_empty"
+            profile_series_for_gates = []
             break
         parsed: list[float] = []
         for item_idx, item in enumerate(raw_values):
             if not isinstance(item, (int, float)):
                 series_parse_error = (
-                    f"profile={name} metric_values_raw[{item_idx}] "
+                    f"profile={name} metric_values_series[{item_idx}] "
                     f"must be numeric, got {type(item).__name__}"
                 )
                 parsed = []
@@ -1005,18 +1019,18 @@ def evaluate_command(target_name: str, target: dict[str, Any]) -> dict[str, Any]
             parsed.append(float(item))
         if not parsed:
             if series_parse_error is None:
-                series_parse_error = f"profile={name} metric_values_raw did not yield numeric entries"
-            profile_raw_series = []
+                series_parse_error = f"profile={name} metric_values_series did not yield numeric entries"
+            profile_series_for_gates = []
             break
-        profile_raw_series.append(parsed)
+        profile_series_for_gates.append(parsed)
         profile_sample_counts[name] = len(parsed)
 
     composite_series: list[float] = []
     composite_error: str | None = None
-    min_series_len = min((len(series) for series in profile_raw_series), default=0)
-    if profile_raw_series and min_series_len > 0:
+    min_series_len = min((len(series) for series in profile_series_for_gates), default=0)
+    if profile_series_for_gates and min_series_len > 0:
         for idx in range(min_series_len):
-            step_values = [series[idx] for series in profile_raw_series]
+            step_values = [series[idx] for series in profile_series_for_gates]
             try:
                 composite_series.append(
                     aggregate_weighted_metric(step_values, profile_weights, profiles_aggregate)
@@ -1031,7 +1045,7 @@ def evaluate_command(target_name: str, target: dict[str, Any]) -> dict[str, Any]
         "profiles_aggregate": profiles_aggregate,
         "profile_aggregate_values": profile_values,
         "profile_sample_counts": profile_sample_counts,
-        "metric_values_series_strategy": "profile_raw_runs_index_aligned_min_len",
+        "metric_values_series_strategy": "profile_trimmed_runs_index_aligned_min_len",
     }
     if composite_series:
         debug_payload["metric_values"] = composite_series
@@ -1046,16 +1060,16 @@ def evaluate_command(target_name: str, target: dict[str, Any]) -> dict[str, Any]
         else:
             debug_payload["metric_values_series_status"] = "omitted_multi_profile"
             debug_payload["metric_values_series_reason"] = (
-                "unable to derive cross-profile series from profile raw runs"
+                "unable to derive cross-profile series from profile trimmed runs"
             )
-    if profile_raw_series:
-        debug_payload["series_lengths"] = [len(series) for series in profile_raw_series]
+    if profile_series_for_gates:
+        debug_payload["series_lengths"] = [len(series) for series in profile_series_for_gates]
         debug_payload["series_min_len"] = min_series_len
-        if min_series_len > 0 and len({len(series) for series in profile_raw_series}) != 1:
+        if min_series_len > 0 and len({len(series) for series in profile_series_for_gates}) != 1:
             debug_payload["series_truncation"] = "min_len_used"
     if composite_series:
         debug_payload["metric_values_series_note"] = (
-            "variance proxy from raw per-profile runs; objective metric remains profile-aggregate weighted score"
+            "variance proxy from trimmed per-profile runs; objective metric remains profile-aggregate weighted score"
         )
 
     profile_values_note = ",".join(

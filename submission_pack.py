@@ -103,12 +103,14 @@ def infer_target_commands(target: dict[str, Any]) -> list[list[str]]:
         if isinstance(profiles, list) and profiles:
             for profile in profiles:
                 if not isinstance(profile, dict):
-                    continue
+                    return []
                 cmd = profile.get("benchmark_command")
                 if cmd is None:
                     cmd = default_cmd
                 if not isinstance(cmd, list) or not cmd:
-                    continue
+                    # Keep evidence generation strict: if any profile command cannot be
+                    # resolved exactly like prepare.py would, do not emit partial command lists.
+                    return []
                 normalized = tuple(str(part) for part in cmd)
                 if normalized in seen:
                     continue
