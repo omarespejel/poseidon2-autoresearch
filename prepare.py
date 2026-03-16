@@ -40,6 +40,7 @@ class ToolError(RuntimeError):
 
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+GIT_OID_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
 
 
 def command_result_to_json(result: CommandResult) -> dict[str, Any]:
@@ -245,6 +246,10 @@ def extract_metric(haystack: str, metric_regex: str) -> float | None:
         return None
 
 
+def is_git_oid(ref: str) -> bool:
+    return bool(GIT_OID_RE.fullmatch(ref.strip()))
+
+
 def aggregate_metric(values: list[float], mode: str) -> float:
     if not values:
         raise ToolError("No metric values to aggregate")
@@ -317,24 +322,35 @@ def bootstrap_target(target_name: str, target: dict[str, Any]) -> None:
     repo_dir.parent.mkdir(parents=True, exist_ok=True)
     ensure_tool_exists("git")
 
-    if repo_dir.exists() and (repo_dir / ".git").exists():
-        fetch = run_cmd(["git", "fetch", "--all", "--tags", "--prune"], repo_dir)
-        if fetch.code != 0:
-            raise ToolError(f"Failed to fetch {repo_dir}: {fetch.stderr or fetch.stdout}")
-        checkout = run_cmd(["git", "checkout", ref], repo_dir)
-        if checkout.code != 0:
-            raise ToolError(f"Failed to checkout {ref}: {checkout.stderr or checkout.stdout}")
-        pull = run_cmd(["git", "pull", "--ff-only"], repo_dir)
-        if pull.code != 0:
-            raise ToolError(f"Failed to pull {ref}: {pull.stderr or pull.stdout}")
-        return
-
     if repo_dir.exists() and not (repo_dir / ".git").exists():
         raise ToolError(f"Bootstrap path exists but is not a git repo: {repo_dir}")
 
-    clone = run_cmd(["git", "clone", "--depth", "1", "--branch", ref, git_url, str(repo_dir)], ROOT)
-    if clone.code != 0:
-        raise ToolError(f"Failed to clone {git_url}: {clone.stderr or clone.stdout}")
+    if not repo_dir.exists():
+        clone_argv = ["git", "clone", "--depth", "1", git_url, str(repo_dir)]
+        if not is_git_oid(ref):
+            clone_argv = ["git", "clone", "--depth", "1", "--branch", ref, git_url, str(repo_dir)]
+        clone = run_cmd(clone_argv, ROOT)
+        if clone.code != 0:
+            raise ToolError(f"Failed to clone {git_url}: {clone.stderr or clone.stdout}")
+
+    if is_git_oid(ref):
+        fetch = run_cmd(["git", "fetch", "--depth", "1", "origin", ref], repo_dir)
+        if fetch.code != 0:
+            raise ToolError(f"Failed to fetch pinned ref {ref}: {fetch.stderr or fetch.stdout}")
+        checkout = run_cmd(["git", "checkout", "--detach", "FETCH_HEAD"], repo_dir)
+        if checkout.code != 0:
+            raise ToolError(f"Failed to checkout pinned ref {ref}: {checkout.stderr or checkout.stdout}")
+        return
+
+    fetch = run_cmd(["git", "fetch", "--all", "--tags", "--prune"], repo_dir)
+    if fetch.code != 0:
+        raise ToolError(f"Failed to fetch {repo_dir}: {fetch.stderr or fetch.stdout}")
+    checkout = run_cmd(["git", "checkout", ref], repo_dir)
+    if checkout.code != 0:
+        raise ToolError(f"Failed to checkout {ref}: {checkout.stderr or checkout.stdout}")
+    pull = run_cmd(["git", "pull", "--ff-only"], repo_dir)
+    if pull.code != 0:
+        raise ToolError(f"Failed to pull {ref}: {pull.stderr or pull.stdout}")
 
 
 def evaluate_noir(target_name: str, target: dict[str, Any]) -> dict[str, Any]:

@@ -284,6 +284,7 @@ def main(argv: list[str] | None = None) -> int:
         if not made_progress:
             for state in totals.values():
                 state["plateau_streak"] = 0
+                state["zero_streak"] = 0
 
     write_reports(
         rows=rows,

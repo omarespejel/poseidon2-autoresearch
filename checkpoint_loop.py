@@ -27,6 +27,7 @@ READINESS = ROOT / "readiness_check.py"
 REPORT_JSON = ROOT / "checkpoint_report.json"
 REPORT_MD = ROOT / "checkpoint_report.md"
 DEFAULT_OVERRIDES_PATH = ROOT / "work" / "checkpoint_target_overrides.json"
+WORK_DIR = DEFAULT_OVERRIDES_PATH.parent
 
 
 @dataclass
@@ -235,6 +236,7 @@ def main(argv: list[str] | None = None) -> int:
     extra_env: dict[str, str] = {}
     if args.nice:
         extra_env["AUTORESEARCH_NICE"] = args.nice
+    WORK_DIR.mkdir(parents=True, exist_ok=True)
 
     cycles: list[dict[str, Any]] = []
     total_accepted = 0

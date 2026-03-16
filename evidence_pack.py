@@ -149,7 +149,11 @@ def find_artifact_metadata(
     row_timestamp: str,
 ) -> tuple[Path | None, Path | None, float | None]:
     iter_name = f"iter_{iteration:05d}"
-    target_dir = ARTIFACTS_DIR / target
+    target_dir = (ARTIFACTS_DIR / target).resolve()
+    try:
+        target_dir.relative_to(ARTIFACTS_DIR.resolve())
+    except ValueError:
+        return None, None, None
     if not target_dir.exists():
         return None, None, None
 
