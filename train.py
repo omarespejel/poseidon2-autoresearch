@@ -387,6 +387,17 @@ def rust_mutator_x86_internal_for_loop(source: str) -> tuple[str, str, bool]:
 
 
 def rust_mutator_x86_internal_for_loop_w24(source: str) -> tuple[str, str, bool]:
+    marker = "self.packed_internal_constants.iter().for_each(|&rc| {"
+    first = source.find(marker)
+    if first == -1:
+        return source, "rust_x86_internal_for_loop_w24:pattern_missing", False
+    second = source.find(marker, first + 1)
+    if second == -1:
+        # Fallback for files that only contain one internal loop.
+        candidate, _, changed = rust_mutator_x86_internal_for_loop(source)
+        if not changed:
+            return source, "rust_x86_internal_for_loop_w24:pattern_missing", False
+        return candidate, "rust_x86_internal_for_loop_w24:fallback_single", True
     candidate, _, changed = rust_mutator_neon_internal_for_loop_w24(source)
     if not changed:
         return source, "rust_x86_internal_for_loop_w24:pattern_missing", False
@@ -394,6 +405,15 @@ def rust_mutator_x86_internal_for_loop_w24(source: str) -> tuple[str, str, bool]
 
 
 def rust_mutator_x86_internal_for_loop_both(source: str) -> tuple[str, str, bool]:
+    marker = "self.packed_internal_constants.iter().for_each(|&rc| {"
+    occurrences = source.count(marker)
+    if occurrences <= 0:
+        return source, "rust_x86_internal_for_loop_both:pattern_missing", False
+    if occurrences == 1:
+        candidate, _, changed = rust_mutator_x86_internal_for_loop(source)
+        if not changed:
+            return source, "rust_x86_internal_for_loop_both:pattern_missing", False
+        return candidate, "rust_x86_internal_for_loop_both:fallback_single", True
     candidate, _, changed = rust_mutator_neon_internal_for_loop_both(source)
     if not changed:
         return source, "rust_x86_internal_for_loop_both:pattern_missing", False
@@ -630,30 +650,40 @@ def rust_mutator_avx_sum_vec_hoist(source: str) -> tuple[str, str, bool]:
 
 
 def rust_mutator_avx_sum_vec_hoist_w24(source: str) -> tuple[str, str, bool]:
-    variants = [
-        (
-            "                ILP::add_sum(\n"
-            "                    &mut internal_state.s_hi,\n"
-            "                    transmute::<PackedMontyField31AVX2<FP>, __m256i>(sum),\n"
-            "                );",
-            "                let sum_vec = transmute::<PackedMontyField31AVX2<FP>, __m256i>(sum);\n"
-            "                ILP::add_sum(&mut internal_state.s_hi, sum_vec);",
-            "rust_avx_sum_vec_hoist_w24",
-        ),
-        (
-            "                ILP::add_sum(\n"
-            "                    &mut internal_state.s_hi,\n"
-            "                    transmute::<PackedMontyField31AVX512<FP>, __m512i>(sum),\n"
-            "                );",
-            "                let sum_vec = transmute::<PackedMontyField31AVX512<FP>, __m512i>(sum);\n"
-            "                ILP::add_sum(&mut internal_state.s_hi, sum_vec);",
-            "rust_avx512_sum_vec_hoist_w24",
-        ),
-    ]
-    for old, new, name in variants:
-        candidate, changed = replace_nth_occurrence(source, old, new, 2)
-        if changed:
-            return candidate, name, True
+    avx2_old = (
+        "                ILP::add_sum(\n"
+        "                    &mut internal_state.s_hi,\n"
+        "                    transmute::<PackedMontyField31AVX2<FP>, __m256i>(sum),\n"
+        "                );"
+    )
+    avx2_new = (
+        "                let sum_vec = transmute::<PackedMontyField31AVX2<FP>, __m256i>(sum);\n"
+        "                ILP::add_sum(&mut internal_state.s_hi, sum_vec);"
+    )
+    avx512_old = (
+        "                ILP::add_sum(\n"
+        "                    &mut internal_state.s_hi,\n"
+        "                    transmute::<PackedMontyField31AVX512<FP>, __m512i>(sum),\n"
+        "                );"
+    )
+    avx512_new = (
+        "                let sum_vec = transmute::<PackedMontyField31AVX512<FP>, __m512i>(sum);\n"
+        "                ILP::add_sum(&mut internal_state.s_hi, sum_vec);"
+    )
+
+    # Prefer second-occurrence replacement (W24-style) when available.
+    candidate, changed = replace_nth_occurrence(source, avx512_old, avx512_new, 2)
+    if changed:
+        return candidate, "rust_avx512_sum_vec_hoist_w24", True
+    candidate, changed = replace_nth_occurrence(source, avx2_old, avx2_new, 2)
+    if changed:
+        return candidate, "rust_avx_sum_vec_hoist_w24", True
+
+    # Fallback for files with a single occurrence.
+    if avx512_old in source:
+        return source.replace(avx512_old, avx512_new, 1), "rust_avx512_sum_vec_hoist_w24:fallback_first", True
+    if avx2_old in source:
+        return source.replace(avx2_old, avx2_new, 1), "rust_avx_sum_vec_hoist_w24:fallback_first", True
     return source, "rust_avx_sum_vec_hoist_w24:pattern_missing", False
 
 

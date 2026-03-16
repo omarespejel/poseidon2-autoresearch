@@ -42,6 +42,8 @@ DEFAULT_INFORMATIONAL_READINESS_CHECKS: frozenset[str] = frozenset(
         "recent_activity_24h",
         "submission_multi_tool_orchestration",
         "submission_receipts_additional_evidence",
+        "submission_safety_guardrails_populated",
+        "submission_compute_budget_usage",
     }
 )
 
@@ -78,7 +80,9 @@ def default_real_optimize_targets() -> str:
     elif arch == "x86_64":
         targets.append("leanmultisig_poseidon2_avx2_src_fast")
     else:
+        # Unknown host: hedge by including both scalar and x86 backend source targets.
         targets.append("leanmultisig_poseidon2_no_packing_src_fast")
+        targets.append("leanmultisig_poseidon2_avx2_src_fast")
     return ",".join(targets)
 
 

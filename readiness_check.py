@@ -31,6 +31,9 @@ INFORMATIONAL_CHECKS: frozenset[str] = frozenset(
         "recent_activity_24h",
         "submission_multi_tool_orchestration",
         "submission_receipts_additional_evidence",
+        # Kept informational for backward compatibility with older agent_log schemas.
+        "submission_safety_guardrails_populated",
+        "submission_compute_budget_usage",
     }
 )
 
