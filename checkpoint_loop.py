@@ -302,6 +302,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.nice:
         extra_env["AUTORESEARCH_NICE"] = args.nice
     WORK_DIR.mkdir(parents=True, exist_ok=True)
+    effective_noise_floor_ratio = min(1.0, max(0.0, args.override_noise_floor_ratio))
 
     bootstrap_targets = list(
         dict.fromkeys([*targets, args.cross_target.strip()] if args.cross_target.strip() else targets)
@@ -367,7 +368,7 @@ def main(argv: list[str] | None = None) -> int:
                 rel_cap=rel_cap,
                 noise_multiplier=args.override_noise_multiplier,
                 noise_floor=args.override_noise_floor,
-                noise_floor_ratio=min(1.0, max(0.0, args.override_noise_floor_ratio)),
+                noise_floor_ratio=effective_noise_floor_ratio,
                 noise_cap=noise_cap,
                 force_fixed_mode=args.override_force_fixed_mode,
             )
@@ -464,7 +465,7 @@ def main(argv: list[str] | None = None) -> int:
             "override_min_samples": args.override_min_samples,
             "override_noise_multiplier": args.override_noise_multiplier,
             "override_noise_floor": args.override_noise_floor,
-            "override_noise_floor_ratio": args.override_noise_floor_ratio,
+            "override_noise_floor_ratio": effective_noise_floor_ratio,
             "override_noise_cap": args.override_noise_cap,
             "override_force_fixed_mode": args.override_force_fixed_mode,
             "overrides_path": str(resolve_overrides_path(args.overrides_path)),

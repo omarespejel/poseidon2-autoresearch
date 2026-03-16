@@ -49,7 +49,10 @@ def load_totals_state(state_path: Path | None, targets: list[str]) -> dict[str, 
     if state_path is None or not state_path.exists():
         return totals
 
-    data = json.loads(state_path.read_text())
+    try:
+        data = json.loads(state_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return totals
     raw_totals = data.get("totals")
     if not isinstance(raw_totals, dict):
         return totals
@@ -59,13 +62,20 @@ def load_totals_state(state_path: Path | None, targets: list[str]) -> dict[str, 
         if not isinstance(raw_state, dict):
             continue
         loaded = default_target_state()
-        loaded["batches"] = max(0, int(raw_state.get("batches", 0)))
-        loaded["accepted"] = max(0, int(raw_state.get("accepted", 0)))
-        loaded["plateau_streak"] = max(0, int(raw_state.get("plateau_streak", 0)))
-        loaded["zero_streak"] = max(0, int(raw_state.get("zero_streak", 0)))
+        try:
+            loaded["batches"] = max(0, int(raw_state.get("batches", 0)))
+        except (TypeError, ValueError):
+            loaded["batches"] = 0
+        try:
+            loaded["accepted"] = max(0, int(raw_state.get("accepted", 0)))
+        except (TypeError, ValueError):
+            loaded["accepted"] = 0
         best_metric = raw_state.get("best_metric")
         if best_metric is not None:
-            loaded["best_metric"] = float(best_metric)
+            try:
+                loaded["best_metric"] = float(best_metric)
+            except (TypeError, ValueError):
+                loaded["best_metric"] = None
         totals[target] = loaded
     return totals
 
@@ -74,7 +84,17 @@ def save_totals_state(state_path: Path | None, totals: dict[str, dict[str, Any]]
     if state_path is None:
         return
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    state_path.write_text(json.dumps({"totals": totals}, indent=2, sort_keys=True) + "\n")
+    persisted_totals = {
+        target: {
+            "batches": int(state.get("batches", 0)),
+            "accepted": int(state.get("accepted", 0)),
+            "best_metric": state.get("best_metric"),
+        }
+        for target, state in totals.items()
+    }
+    tmp_path = state_path.with_name(f"{state_path.name}.tmp")
+    tmp_path.write_text(json.dumps({"totals": persisted_totals}, indent=2, sort_keys=True) + "\n")
+    tmp_path.replace(state_path)
 
 
 def run_batch(
