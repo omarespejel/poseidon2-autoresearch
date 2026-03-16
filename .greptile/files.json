@@ -1,0 +1,8 @@
+{
+  "files": [
+    {
+      "path": ".greptile/rules.md",
+      "description": "Project-specific review rules and coding standards for Poseidon2 autoresearch"
+    }
+  ]
+}
