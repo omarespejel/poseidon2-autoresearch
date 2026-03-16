@@ -192,6 +192,17 @@ def add_mutation_memory_flags(argv: list[str], args: argparse.Namespace) -> list
     return out
 
 
+def add_git_checkpoint_flags(argv: list[str], args: argparse.Namespace) -> list[str]:
+    out = list(argv)
+    mode = str(getattr(args, "git_checkpoint_mode", "off")).strip().lower()
+    if mode in {"accepted", "all"}:
+        out.extend(["--git-checkpoint-mode", mode])
+        prefix = str(getattr(args, "git_checkpoint_prefix", "")).strip()
+        if prefix:
+            out.extend(["--git-checkpoint-prefix", prefix])
+    return out
+
+
 def prepare_cmd(args: argparse.Namespace, *tail: str) -> list[str]:
     base = [sys.executable, str(PREPARE)]
     return add_debug_flags(base, args) + list(tail)
@@ -199,7 +210,7 @@ def prepare_cmd(args: argparse.Namespace, *tail: str) -> list[str]:
 
 def train_cmd(args: argparse.Namespace, *tail: str) -> list[str]:
     base = [sys.executable, str(LOOP)]
-    return add_mutation_memory_flags(add_debug_flags(base, args), args) + list(tail)
+    return add_git_checkpoint_flags(add_mutation_memory_flags(add_debug_flags(base, args), args), args) + list(tail)
 
 
 def portfolio_cmd(args: argparse.Namespace, *tail: str) -> list[str]:
@@ -424,6 +435,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--disable-mutation-memory",
         action="store_true",
         help="Disable cross-target mutation replay in train.py and portfolio_loop.py",
+    )
+    parser.add_argument(
+        "--git-checkpoint-mode",
+        choices=["off", "accepted", "all"],
+        default="off",
+        help="Forward Karpathy-style checkpoint commits to train.py loop runs",
+    )
+    parser.add_argument(
+        "--git-checkpoint-prefix",
+        default="autoresearch",
+        help="Commit message prefix for train.py checkpoint commits",
     )
     parser.add_argument(
         "--build-evidence",

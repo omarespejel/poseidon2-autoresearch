@@ -132,7 +132,8 @@
         "git_url": "https://github.com/leanEthereum/leanMultisig.git",
         "path": "work/leanMultisig",
         "ref": "6f06c021823c742697bf867bd53d0501b66289fe"
-      }
+      },
+      "require_metric_series_for_stats": true
     },
     "leanmultisig_poseidon16_table_src_fast": {
       "type": "command",
@@ -201,7 +202,8 @@
         "git_url": "https://github.com/leanEthereum/leanMultisig.git",
         "path": "work/leanMultisig",
         "ref": "6f06c021823c742697bf867bd53d0501b66289fe"
-      }
+      },
+      "require_metric_series_for_stats": true
     },
     "leanmultisig_poseidon2_neon_src_fast": {
       "type": "command",
@@ -281,7 +283,8 @@
         "git_url": "https://github.com/leanEthereum/leanMultisig.git",
         "path": "work/leanMultisig",
         "ref": "6f06c021823c742697bf867bd53d0501b66289fe"
-      }
+      },
+      "require_metric_series_for_stats": true
     },
     "leanmultisig_poseidon2_avx2_src_fast": {
       "type": "command",
@@ -361,7 +364,8 @@
         "git_url": "https://github.com/leanEthereum/leanMultisig.git",
         "path": "work/leanMultisig",
         "ref": "6f06c021823c742697bf867bd53d0501b66289fe"
-      }
+      },
+      "require_metric_series_for_stats": true
     },
     "leanmultisig_poseidon2_monty_core_src_fast": {
       "type": "command",
@@ -442,7 +446,8 @@
         "git_url": "https://github.com/leanEthereum/leanMultisig.git",
         "path": "work/leanMultisig",
         "ref": "6f06c021823c742697bf867bd53d0501b66289fe"
-      }
+      },
+      "require_metric_series_for_stats": true
     },
     "leanmultisig_poseidon2_no_packing_src_fast": {
       "type": "command",
@@ -517,7 +522,8 @@
         "git_url": "https://github.com/leanEthereum/leanMultisig.git",
         "path": "work/leanMultisig",
         "ref": "6f06c021823c742697bf867bd53d0501b66289fe"
-      }
+      },
+      "require_metric_series_for_stats": true
     },
     "leanmultisig_poseidon16_full": {
       "type": "command",
