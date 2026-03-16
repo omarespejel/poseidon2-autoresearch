@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import platform
 import shutil
 import subprocess
 import sys
@@ -35,11 +36,20 @@ EVIDENCE_DIR = ROOT / "evidence"
 SUBMISSION_DIR = ROOT / "submission"
 MUTATION_MEMORY = ROOT / "work" / "mutation_memory.json"
 
-DEFAULT_REAL_OPTIMIZE_TARGETS = (
-    "leanmultisig_poseidon16_src_fast,"
-    "leanmultisig_poseidon16_table_src_fast,"
-    "leanmultisig_poseidon2_neon_src_fast"
-)
+def default_real_optimize_targets() -> str:
+    """Select SOTA Poseidon source targets that match the current host backend."""
+    targets = [
+        "leanmultisig_poseidon16_src_fast",
+        "leanmultisig_poseidon16_table_src_fast",
+    ]
+    machine = platform.machine().lower()
+    if machine in {"arm64", "aarch64"}:
+        targets.append("leanmultisig_poseidon2_neon_src_fast")
+    elif machine in {"x86_64", "amd64"}:
+        targets.append("leanmultisig_poseidon2_avx2_src_fast")
+    else:
+        targets.append("leanmultisig_poseidon2_no_packing_src_fast")
+    return ",".join(targets)
 
 
 @dataclass
@@ -325,8 +335,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--real-optimize-targets",
-        default=DEFAULT_REAL_OPTIMIZE_TARGETS,
-        help="Comma-separated source targets for real optimization",
+        default=default_real_optimize_targets(),
+        help="Comma-separated source targets for real optimization (host-aware default)",
     )
     parser.add_argument(
         "--real-optimize-batch-iterations",

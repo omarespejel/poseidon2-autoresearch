@@ -542,6 +542,127 @@ def rust_mutator_neon_sum_array_inline_both(source: str) -> tuple[str, str, bool
     return candidate, "rust_neon_sum_array_inline_both", True
 
 
+def rust_mutator_avx_add_sum_loops(source: str) -> tuple[str, str, bool]:
+    rules = [
+        (
+            "input.as_mut()[..5]\n            .iter_mut()\n            .for_each(|x| *x = mm256_mod_add(sum, *x, PMP::PACKED_P));",
+            "for x in input.as_mut()[..5].iter_mut() {\n            *x = mm256_mod_add(sum, *x, PMP::PACKED_P);\n        }",
+            "rust_avx_add_sum_head_add",
+        ),
+        (
+            "input.as_mut()[5..8]\n            .iter_mut()\n            .for_each(|x| *x = mm256_mod_sub(sum, *x, PMP::PACKED_P));",
+            "for x in input.as_mut()[5..8].iter_mut() {\n            *x = mm256_mod_sub(sum, *x, PMP::PACKED_P);\n        }",
+            "rust_avx_add_sum_head_sub",
+        ),
+        (
+            "input.as_mut()[8..]\n            .iter_mut()\n            .for_each(|x| *x = signed_add_avx2::<PMP>(sum, *x));",
+            "for x in input.as_mut()[8..].iter_mut() {\n            *x = signed_add_avx2::<PMP>(sum, *x);\n        }",
+            "rust_avx_add_sum_tail_signed",
+        ),
+        (
+            "input.as_mut()[..5]\n            .iter_mut()\n            .for_each(|x| *x = mm512_mod_add(sum, *x, PMP::PACKED_P));",
+            "for x in input.as_mut()[..5].iter_mut() {\n            *x = mm512_mod_add(sum, *x, PMP::PACKED_P);\n        }",
+            "rust_avx512_add_sum_head_add",
+        ),
+        (
+            "input.as_mut()[5..(8 + Self::NUM_POS)]\n            .iter_mut()\n            .for_each(|x| *x = mm512_mod_sub(sum, *x, PMP::PACKED_P));",
+            "for x in input.as_mut()[5..(8 + Self::NUM_POS)].iter_mut() {\n            *x = mm512_mod_sub(sum, *x, PMP::PACKED_P);\n        }",
+            "rust_avx512_add_sum_mid_sub",
+        ),
+        (
+            "input.as_mut()[8 + Self::NUM_POS..]\n            .iter_mut()\n            .for_each(|x| *x = mm512_mod_add(sum, *x, PMP::PACKED_P));",
+            "for x in input.as_mut()[8 + Self::NUM_POS..].iter_mut() {\n            *x = mm512_mod_add(sum, *x, PMP::PACKED_P);\n        }",
+            "rust_avx512_add_sum_tail_add",
+        ),
+    ]
+    for old, new, name in rules:
+        if old in source:
+            return source.replace(old, new, 1), name, True
+    return source, "rust_avx_add_sum:pattern_missing", False
+
+
+def rust_mutator_avx_sum_vec_hoist(source: str) -> tuple[str, str, bool]:
+    variants = [
+        (
+            "                ILP::add_sum(\n"
+            "                    &mut internal_state.s_hi,\n"
+            "                    transmute::<PackedMontyField31AVX2<FP>, __m256i>(sum),\n"
+            "                );",
+            "                let sum_vec = transmute::<PackedMontyField31AVX2<FP>, __m256i>(sum);\n"
+            "                ILP::add_sum(&mut internal_state.s_hi, sum_vec);",
+            "rust_avx_sum_vec_hoist",
+        ),
+        (
+            "                ILP::add_sum(\n"
+            "                    &mut internal_state.s_hi,\n"
+            "                    transmute::<PackedMontyField31AVX512<FP>, __m512i>(sum),\n"
+            "                );",
+            "                let sum_vec = transmute::<PackedMontyField31AVX512<FP>, __m512i>(sum);\n"
+            "                ILP::add_sum(&mut internal_state.s_hi, sum_vec);",
+            "rust_avx512_sum_vec_hoist",
+        ),
+    ]
+    for old, new, name in variants:
+        if old in source:
+            return source.replace(old, new, 1), name, True
+    return source, "rust_avx_sum_vec_hoist:pattern_missing", False
+
+
+def rust_mutator_avx_sum_vec_hoist_w24(source: str) -> tuple[str, str, bool]:
+    variants = [
+        (
+            "                ILP::add_sum(\n"
+            "                    &mut internal_state.s_hi,\n"
+            "                    transmute::<PackedMontyField31AVX2<FP>, __m256i>(sum),\n"
+            "                );",
+            "                let sum_vec = transmute::<PackedMontyField31AVX2<FP>, __m256i>(sum);\n"
+            "                ILP::add_sum(&mut internal_state.s_hi, sum_vec);",
+            "rust_avx_sum_vec_hoist_w24",
+        ),
+        (
+            "                ILP::add_sum(\n"
+            "                    &mut internal_state.s_hi,\n"
+            "                    transmute::<PackedMontyField31AVX512<FP>, __m512i>(sum),\n"
+            "                );",
+            "                let sum_vec = transmute::<PackedMontyField31AVX512<FP>, __m512i>(sum);\n"
+            "                ILP::add_sum(&mut internal_state.s_hi, sum_vec);",
+            "rust_avx512_sum_vec_hoist_w24",
+        ),
+    ]
+    for old, new, name in variants:
+        candidate, changed = replace_nth_occurrence(source, old, new, 2)
+        if changed:
+            return candidate, name, True
+    return source, "rust_avx_sum_vec_hoist_w24:pattern_missing", False
+
+
+def rust_mutator_avx_sum_vec_hoist_both(source: str) -> tuple[str, str, bool]:
+    variants = [
+        (
+            "                ILP::add_sum(\n"
+            "                    &mut internal_state.s_hi,\n"
+            "                    transmute::<PackedMontyField31AVX2<FP>, __m256i>(sum),\n"
+            "                );",
+            "                let sum_vec = transmute::<PackedMontyField31AVX2<FP>, __m256i>(sum);\n"
+            "                ILP::add_sum(&mut internal_state.s_hi, sum_vec);",
+            "rust_avx_sum_vec_hoist_both",
+        ),
+        (
+            "                ILP::add_sum(\n"
+            "                    &mut internal_state.s_hi,\n"
+            "                    transmute::<PackedMontyField31AVX512<FP>, __m512i>(sum),\n"
+            "                );",
+            "                let sum_vec = transmute::<PackedMontyField31AVX512<FP>, __m512i>(sum);\n"
+            "                ILP::add_sum(&mut internal_state.s_hi, sum_vec);",
+            "rust_avx512_sum_vec_hoist_both",
+        ),
+    ]
+    for old, new, name in variants:
+        if source.count(old) >= 2:
+            return source.replace(old, new, 2), name, True
+    return source, "rust_avx_sum_vec_hoist_both:pattern_missing", False
+
+
 def rust_mutator_hoist_log_num_cols(source: str) -> tuple[str, str, bool]:
     marker = "let log_num_cols = log2_ceil_usize(num_cols);"
     if marker in source:
@@ -620,6 +741,20 @@ def rust_heuristic_candidate(
                 rust_mutator_neon_sum_array_inline_w16,
                 rust_mutator_neon_sum_array_inline_w24,
                 rust_mutator_neon_sum_array_inline_both,
+            ]
+        )
+    if path.endswith("crates/backend/koala-bear/src/monty_31/x86_64_avx2/poseidon2.rs") or path.endswith(
+        "crates/backend/koala-bear/src/monty_31/x86_64_avx512/poseidon2.rs"
+    ):
+        operators.extend(
+            [
+                rust_mutator_neon_internal_for_loop,
+                rust_mutator_neon_internal_for_loop_w24,
+                rust_mutator_neon_internal_for_loop_both,
+                rust_mutator_avx_add_sum_loops,
+                rust_mutator_avx_sum_vec_hoist,
+                rust_mutator_avx_sum_vec_hoist_w24,
+                rust_mutator_avx_sum_vec_hoist_both,
             ]
         )
 
