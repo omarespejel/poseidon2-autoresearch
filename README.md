@@ -64,6 +64,7 @@ The repo now supports the same top-level workflow shape:
 
 This keeps compatibility with prompts and workflows written for Karpathy-style autoresearch projects.
 Use `--iterations 0` to run indefinitely until `--max-accepted` or `--max-runtime-seconds` stops the loop.
+Use `--git-checkpoint-mode accepted` to create per-accept non-interactive git commits for source changes.
 
 ## End-To-End Campaign
 
@@ -84,6 +85,9 @@ python3 campaign.py --help | rg real-optimize-targets -n
 
 # run loop indefinitely (stopped by max accepted)
 python3 campaign.py --synthesis-cook --loop-iterations 0 --max-accepted 3
+
+# Karpathy-style accepted commits for loop target
+python3 campaign.py --synthesis-cook --git-checkpoint-mode accepted --git-checkpoint-prefix autoresearch
 
 # enforce identity fields for canonical submission artifacts
 python3 campaign.py --synthesis-cook --strict-submission
@@ -168,6 +172,7 @@ Command targets can also require confirmation evaluations (`confirm_repeats`) be
 Optional variance guards (`max_rel_stdev`) can reject noisy benchmark batches automatically.
 Source-level command targets can additionally require distribution separation
 (`min_effect_sigma`, `ci_z`, `require_ci_separation`) before accepting a run.
+They can also enforce `require_metric_series_for_stats=true` so statistical gates cannot run with missing `debug.metric_values`.
 They can also run post-accept A/B replay (`ab_repeats`) to confirm patched vs original.
 Rejected mutations can be temporarily cooled down (`blocked_mutation_ttl`) to encourage broader exploration.
 If the search stalls with `no_change`, the loop can release the oldest blocked mutation and retry selection in-place (`recover_from_no_change`, default `true`).
@@ -197,7 +202,8 @@ For direct Rust autoresearch against Lean source code:
 
 ```bash
 python3 prepare.py baseline --target leanmultisig_poseidon16_src_fast --notes lean_src_baseline
-python3 train.py --target leanmultisig_poseidon16_src_fast --iterations 5 --max-accepted 1 --artifacts accepted
+python3 train.py --target leanmultisig_poseidon16_src_fast --iterations 5 --max-accepted 1 --artifacts accepted \
+  --git-checkpoint-mode accepted --git-checkpoint-prefix autoresearch
 ```
 
 Additional source-level targets are also available for deeper Poseidon2 hotspots:

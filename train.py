@@ -49,6 +49,7 @@ ALLOWED_TARGET_OVERRIDE_KEYS = {
     "ci_z",
     "require_ci_separation",
     "min_series_samples",
+    "require_metric_series_for_stats",
     "ab_repeats",
     "blocked_mutation_ttl",
     "mutation_schedule",
@@ -648,6 +649,32 @@ def rust_mutator_avx2_add_sum_loops(source: str) -> tuple[str, str, bool]:
     )
 
 
+def rust_mutator_avx2_add_sum_as_mut_hoist(source: str) -> tuple[str, str, bool]:
+    marker = "unsafe fn add_sum(input: &mut Self::ArrayLike, sum: __m256i) {"
+    idx = source.find(marker)
+    if idx == -1:
+        return source, "rust_avx2_add_sum_as_mut_hoist:pattern_missing", False
+
+    end = source.find("\n}", idx)
+    segment = source[idx : (end if end != -1 else len(source))]
+    if "let input = input.as_mut();" in segment:
+        return source, "rust_avx2_add_sum_as_mut_hoist:already_present", False
+
+    old_header = "unsafe fn add_sum(input: &mut Self::ArrayLike, sum: __m256i) {\n        unsafe {\n"
+    if old_header not in source:
+        return source, "rust_avx2_add_sum_as_mut_hoist:header_missing", False
+
+    candidate = source.replace(
+        old_header,
+        "unsafe fn add_sum(input: &mut Self::ArrayLike, sum: __m256i) {\n        unsafe {\n            let input = input.as_mut();\n",
+        1,
+    )
+    candidate = candidate.replace("input.as_mut()[..5]", "input[..5]", 1)
+    candidate = candidate.replace("input.as_mut()[5..8]", "input[5..8]", 1)
+    candidate = candidate.replace("input.as_mut()[8..]", "input[8..]", 1)
+    return candidate, "rust_avx2_add_sum_as_mut_hoist", True
+
+
 def rust_mutator_avx512_add_sum_loops(source: str) -> tuple[str, str, bool]:
     return _mutate_first_match(
         source,
@@ -670,6 +697,32 @@ def rust_mutator_avx512_add_sum_loops(source: str) -> tuple[str, str, bool]:
         ],
         pattern_missing_note="rust_avx512_add_sum:pattern_missing",
     )
+
+
+def rust_mutator_avx512_add_sum_as_mut_hoist(source: str) -> tuple[str, str, bool]:
+    marker = "unsafe fn add_sum(input: &mut Self::ArrayLike, sum: __m512i) {"
+    idx = source.find(marker)
+    if idx == -1:
+        return source, "rust_avx512_add_sum_as_mut_hoist:pattern_missing", False
+
+    end = source.find("\n}", idx)
+    segment = source[idx : (end if end != -1 else len(source))]
+    if "let input = input.as_mut();" in segment:
+        return source, "rust_avx512_add_sum_as_mut_hoist:already_present", False
+
+    old_header = "unsafe fn add_sum(input: &mut Self::ArrayLike, sum: __m512i) {\n"
+    if old_header not in source:
+        return source, "rust_avx512_add_sum_as_mut_hoist:header_missing", False
+
+    candidate = source.replace(
+        old_header,
+        "unsafe fn add_sum(input: &mut Self::ArrayLike, sum: __m512i) {\n        let input = input.as_mut();\n",
+        1,
+    )
+    candidate = candidate.replace("input.as_mut()[..5]", "input[..5]", 1)
+    candidate = candidate.replace("input.as_mut()[5..(8 + Self::NUM_POS)]", "input[5..(8 + Self::NUM_POS)]", 1)
+    candidate = candidate.replace("input.as_mut()[8 + Self::NUM_POS..]", "input[8 + Self::NUM_POS..]", 1)
+    return candidate, "rust_avx512_add_sum_as_mut_hoist", True
 
 
 def rust_mutator_avx2_sum_vec_hoist(source: str) -> tuple[str, str, bool]:
@@ -891,6 +944,7 @@ def rust_heuristic_candidate(
                 rust_mutator_x86_internal_for_loop_w24,
                 rust_mutator_x86_internal_for_loop_both,
                 rust_mutator_avx2_add_sum_loops,
+                rust_mutator_avx2_add_sum_as_mut_hoist,
                 rust_mutator_avx2_sum_vec_hoist,
                 rust_mutator_avx2_sum_vec_hoist_w24,
                 rust_mutator_avx2_sum_vec_hoist_both,
@@ -903,6 +957,7 @@ def rust_heuristic_candidate(
                 rust_mutator_x86_internal_for_loop_w24,
                 rust_mutator_x86_internal_for_loop_both,
                 rust_mutator_avx512_add_sum_loops,
+                rust_mutator_avx512_add_sum_as_mut_hoist,
                 rust_mutator_avx512_sum_vec_hoist,
                 rust_mutator_avx512_sum_vec_hoist_w24,
                 rust_mutator_avx512_sum_vec_hoist_both,
@@ -1157,6 +1212,65 @@ def git_fingerprint(path: Path) -> dict[str, Any] | None:
         "branch": branch.strip() if branch else None,
         "remote": remote.strip() if remote else None,
         "dirty": bool(dirty_raw),
+    }
+
+
+def git_checkpoint_commit(
+    *,
+    source_path: Path,
+    target_name: str,
+    iteration: int,
+    mutation: str,
+    best_metric: float,
+    metric_value: float | None,
+    prefix: str,
+) -> dict[str, Any]:
+    source_path = source_path.resolve()
+    top = run_capture(["git", "-C", str(source_path.parent), "rev-parse", "--show-toplevel"])
+    if not top:
+        return {"status": "skipped", "reason": "source_not_in_git_repo"}
+    root = Path(top.strip()).resolve()
+
+    try:
+        rel_path = source_path.relative_to(root)
+    except ValueError:
+        return {"status": "skipped", "reason": "source_outside_git_root", "git_root": str(root)}
+
+    rel = str(rel_path)
+    status = run_capture(["git", "-C", str(root), "status", "--porcelain", "--", rel]) or ""
+    if not status.strip():
+        return {"status": "skipped", "reason": "no_changes", "git_root": str(root), "path": rel}
+
+    metric_text = "n/a" if metric_value is None else f"{float(metric_value):.6f}"
+    commit_msg = (
+        f"{prefix}: target={target_name} iter={iteration} mutation={mutation} "
+        f"metric={metric_text} best={best_metric:.6f}"
+    )
+    proc = subprocess.run(
+        ["git", "-C", str(root), "commit", "--only", "-m", commit_msg, "--", rel],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "").strip()
+        return {
+            "status": "failed",
+            "reason": "commit_failed",
+            "git_root": str(root),
+            "path": rel,
+            "message": summarize_notes(err, max_len=600),
+        }
+
+    head = run_capture(["git", "-C", str(root), "rev-parse", "HEAD"])
+    branch = run_capture(["git", "-C", str(root), "rev-parse", "--abbrev-ref", "HEAD"])
+    return {
+        "status": "committed",
+        "git_root": str(root),
+        "path": rel,
+        "commit": head.strip() if head else None,
+        "branch": branch.strip() if branch else None,
+        "message": commit_msg,
     }
 
 
@@ -2433,6 +2547,12 @@ def run_loop(args: argparse.Namespace) -> int:
     else:
         language = "Source"
     language_norm = language.strip().lower()
+    require_metric_series_for_stats = bool(target.get("require_metric_series_for_stats", False))
+
+    git_checkpoint_mode = str(args.git_checkpoint_mode).strip().lower()
+    if git_checkpoint_mode not in {"off", "accepted", "all"}:
+        git_checkpoint_mode = "off"
+    git_checkpoint_prefix = args.git_checkpoint_prefix.strip() or "autoresearch"
 
     mutation_memory_path = Path(args.mutation_memory_file)
     if not mutation_memory_path.is_absolute():
@@ -2464,7 +2584,8 @@ def run_loop(args: argparse.Namespace) -> int:
             f"starting target={args.target} iterations={iterations_label} "
             f"max_accepted={args.max_accepted or 'none'} "
             f"max_runtime={args.max_runtime_seconds or 'none'}s "
-            f"artifacts={args.artifacts}"
+            f"artifacts={args.artifacts} "
+            f"git_checkpoint={git_checkpoint_mode}"
         ),
         level=1,
     )
@@ -2504,6 +2625,12 @@ def run_loop(args: argparse.Namespace) -> int:
         level=1,
     )
     baseline_metric_series = parse_metric_series(baseline.get("debug", {}).get("metric_values"))
+    if require_metric_series_for_stats and not baseline_metric_series:
+        print(
+            "Target requires metric series for statistical gates, but baseline evaluation did not provide debug.metric_values",
+            file=sys.stderr,
+        )
+        return 1
     best_metric_series = baseline_metric_series if baseline_metric_series else [best_metric]
     accepted = 0
     min_improvement_abs = float(target.get("min_improvement_abs", 0.0))
@@ -2566,12 +2693,17 @@ def run_loop(args: argparse.Namespace) -> int:
                 "max_accepted": args.max_accepted if args.max_accepted > 0 else None,
                 "max_runtime_seconds": args.max_runtime_seconds if args.max_runtime_seconds > 0 else None,
             },
+            "git_checkpoint": {
+                "mode": git_checkpoint_mode,
+                "prefix": git_checkpoint_prefix,
+            },
             "stats_gate": {
                 "min_effect_sigma": min_effect_sigma,
                 "ci_z": ci_z,
                 "require_ci_separation": require_ci_separation,
                 "min_series_samples": min_series_samples,
                 "ab_repeats": ab_repeats,
+                "require_metric_series_for_stats": require_metric_series_for_stats,
             },
             "mutation_strategy": {
                 "schedule": str(target.get("mutation_schedule", "priority")),
@@ -2807,6 +2939,16 @@ def run_loop(args: argparse.Namespace) -> int:
             success = result.get("status") == "success" and metric_value is not None
 
             metric_series = parse_metric_series(result.get("debug", {}).get("metric_values"))
+            missing_metric_series = False
+            if success and require_metric_series_for_stats and metric_series is None:
+                success = False
+                missing_metric_series = True
+                source_path.write_text(current_source)
+                diagnostics["metric_series_guard"] = {
+                    "required": True,
+                    "status": "missing",
+                    "reason": "debug.metric_values absent",
+                }
             rel_stdev = None
             if metric_series is not None and len(metric_series) >= 2:
                 try:
@@ -2829,6 +2971,8 @@ def run_loop(args: argparse.Namespace) -> int:
             notes = mutation
             if diagnostics:
                 notes = f"{notes};diag={diagnostics.get('reason', 'n/a')}"
+            if missing_metric_series:
+                notes = f"rejected_missing_metric_series:{notes}"
 
             if success and rel_stdev is not None and max_rel_stdev_f is not None and rel_stdev > max_rel_stdev_f:
                 improved = False
@@ -2963,6 +3107,27 @@ def run_loop(args: argparse.Namespace) -> int:
                     runtime_env=run_env,
                 )
 
+            should_git_checkpoint = git_checkpoint_mode == "all" or (
+                git_checkpoint_mode == "accepted" and improved
+            )
+            if should_git_checkpoint:
+                git_result = git_checkpoint_commit(
+                    source_path=source_path,
+                    target_name=args.target,
+                    iteration=iteration,
+                    mutation=mutation_key,
+                    best_metric=best_metric,
+                    metric_value=metric_for_row,
+                    prefix=git_checkpoint_prefix,
+                )
+                diagnostics["git_checkpoint"] = git_result
+                if git_result.get("status") == "failed":
+                    train_log(
+                        args,
+                        f"iter {iteration}: git checkpoint failed ({git_result.get('message', git_result.get('reason', 'unknown'))})",
+                        level=1,
+                    )
+
             prepare.append_result_row(
                 target=args.target,
                 iteration=iteration,
@@ -3056,6 +3221,8 @@ def run_loop(args: argparse.Namespace) -> int:
                 "iterations_completed": iterations_completed,
                 "max_accepted": args.max_accepted,
                 "max_runtime_seconds": args.max_runtime_seconds if args.max_runtime_seconds > 0 else None,
+                "git_checkpoint_mode": git_checkpoint_mode,
+                "git_checkpoint_prefix": git_checkpoint_prefix if git_checkpoint_mode != "off" else None,
                 "elapsed_seconds": elapsed_seconds,
                 "stop_reason": stop_reason,
             },
@@ -3123,6 +3290,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--disable-mutation-memory",
         action="store_true",
         help="Disable mutation replay memory and use only per-run heuristics",
+    )
+    parser.add_argument(
+        "--git-checkpoint-mode",
+        choices=["off", "accepted", "all"],
+        default="off",
+        help="Create non-interactive git commits for loop checkpoints (Karpathy-style traceability)",
+    )
+    parser.add_argument(
+        "--git-checkpoint-prefix",
+        default="autoresearch",
+        help="Commit message prefix used when --git-checkpoint-mode is enabled",
     )
     return parser
 
