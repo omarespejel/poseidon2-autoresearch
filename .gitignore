@@ -1,0 +1,17 @@
+__pycache__/
+work/
+*.pyc
+results.tsv
+agent_log.jsonl
+campaign_report.md
+examples/cairo_poseidon_style/target/
+examples/cairo_poseidon_style/.snfoundry_cache/
+examples/noir_poseidon2_style_t8/target/
+examples/noir_poseidon2_style_t16/target/
+artifacts/
+evidence/
+checkpoint_report.json
+checkpoint_report.md
+portfolio_report.json
+portfolio_report.md
+readiness_report.md

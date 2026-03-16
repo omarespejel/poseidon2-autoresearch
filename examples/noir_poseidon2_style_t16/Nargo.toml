@@ -1,0 +1,6 @@
+[package]
+name = "noir_poseidon2_style_t16"
+type = "bin"
+compiler_version = "0.36.0"
+
+[dependencies]

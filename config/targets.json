@@ -1,0 +1,245 @@
+{
+  "targets": {
+    "cairo_poseidon_style_t8": {
+      "type": "cairo",
+      "description": "Poseidon-style Cairo microbenchmark (width 8, optimization sandbox)",
+      "project_dir": "examples/cairo_poseidon_style",
+      "source_file": "examples/cairo_poseidon_style/src/lib.cairo",
+      "language": "Cairo",
+      "metric_name": "sierra_program_len",
+      "higher_is_better": false,
+      "metric_mode": "sierra_program_len",
+      "artifact_file": "target/dev/cairo_poseidon_style.sierra.json",
+      "build_command": [
+        "scarb",
+        "build"
+      ],
+      "test_command": [
+        "scarb",
+        "test"
+      ]
+    },
+    "noir_poseidon2_style_t8": {
+      "type": "noir",
+      "description": "Poseidon2-style Noir permutation (width 8, optimization sandbox)",
+      "project_dir": "examples/noir_poseidon2_style_t8",
+      "source_file": "examples/noir_poseidon2_style_t8/src/main.nr",
+      "language": "Noir",
+      "metric_name": "acir_opcodes",
+      "higher_is_better": false
+    },
+    "noir_poseidon2_style_t16": {
+      "type": "noir",
+      "description": "Poseidon2-style Noir permutation (width 16, optimization sandbox)",
+      "project_dir": "examples/noir_poseidon2_style_t16",
+      "source_file": "examples/noir_poseidon2_style_t16/src/main.nr",
+      "language": "Noir",
+      "metric_name": "acir_opcodes",
+      "higher_is_better": false
+    },
+    "leanmultisig_poseidon16_fast": {
+      "type": "command",
+      "description": "Lean multisig Poseidon16 prover throughput (fast smoke profile)",
+      "project_dir": "work/leanMultisig",
+      "metric_name": "poseidons_per_s",
+      "higher_is_better": true,
+      "min_improvement_rel": 0.01,
+      "max_rel_stdev": 0.15,
+      "confirm_repeats": 1,
+      "benchmark_command": [
+        "cargo",
+        "run",
+        "--release",
+        "--",
+        "poseidon",
+        "--log-n-perms",
+        "11"
+      ],
+      "warmup_runs": 1,
+      "runs": 3,
+      "aggregate": "median",
+      "metric_regex": "([0-9]+) Poseidons / s",
+      "bootstrap": {
+        "git_url": "https://github.com/leanEthereum/leanMultisig.git",
+        "path": "work/leanMultisig",
+        "ref": "6f06c021823c742697bf867bd53d0501b66289fe"
+      }
+    },
+    "leanmultisig_poseidon16_src_fast": {
+      "type": "command",
+      "description": "Lean multisig Poseidon16 throughput with editable Rust source target",
+      "project_dir": "work/leanMultisig",
+      "source_file": "work/leanMultisig/src/prove_poseidons.rs",
+      "language": "Rust",
+      "metric_name": "poseidons_per_s",
+      "higher_is_better": true,
+      "min_improvement_rel": 0.02,
+      "max_rel_stdev": 0.10,
+      "min_effect_sigma": 0.75,
+      "ci_z": 1.0,
+      "require_ci_separation": true,
+      "min_series_samples": 5,
+      "confirm_repeats": 1,
+      "ab_repeats": 1,
+      "compound_every": 3,
+      "compound_limit": 10,
+      "compound_second_window": 6,
+      "benchmark_command": [
+        "cargo",
+        "run",
+        "--release",
+        "--",
+        "poseidon",
+        "--log-n-perms",
+        "11"
+      ],
+      "warmup_runs": 1,
+      "runs": 5,
+      "aggregate": "median",
+      "metric_regex": "([0-9]+) Poseidons / s",
+      "bootstrap": {
+        "git_url": "https://github.com/leanEthereum/leanMultisig.git",
+        "path": "work/leanMultisig",
+        "ref": "6f06c021823c742697bf867bd53d0501b66289fe"
+      }
+    },
+    "leanmultisig_poseidon16_table_src_fast": {
+      "type": "command",
+      "description": "Lean Poseidon16 table logic throughput target (Rust source)",
+      "project_dir": "work/leanMultisig",
+      "source_file": "work/leanMultisig/crates/lean_vm/src/tables/poseidon_16/mod.rs",
+      "language": "Rust",
+      "metric_name": "poseidons_per_s",
+      "higher_is_better": true,
+      "min_improvement_rel": 0.02,
+      "max_rel_stdev": 0.10,
+      "min_effect_sigma": 0.75,
+      "ci_z": 1.0,
+      "require_ci_separation": true,
+      "min_series_samples": 5,
+      "confirm_repeats": 1,
+      "ab_repeats": 1,
+      "compound_every": 2,
+      "compound_limit": 8,
+      "compound_second_window": 5,
+      "benchmark_command": [
+        "cargo",
+        "run",
+        "--release",
+        "--",
+        "poseidon",
+        "--log-n-perms",
+        "11"
+      ],
+      "warmup_runs": 1,
+      "runs": 5,
+      "aggregate": "median",
+      "metric_regex": "([0-9]+) Poseidons / s",
+      "bootstrap": {
+        "git_url": "https://github.com/leanEthereum/leanMultisig.git",
+        "path": "work/leanMultisig",
+        "ref": "6f06c021823c742697bf867bd53d0501b66289fe"
+      }
+    },
+    "leanmultisig_poseidon2_neon_src_fast": {
+      "type": "command",
+      "description": "Lean Poseidon2 NEON backend throughput target (Rust source)",
+      "project_dir": "work/leanMultisig",
+      "source_file": "work/leanMultisig/crates/backend/koala-bear/src/monty_31/aarch64_neon/poseidon2.rs",
+      "language": "Rust",
+      "metric_name": "poseidons_per_s",
+      "higher_is_better": true,
+      "min_improvement_rel": 0.03,
+      "min_improvement_rel_mode": "adaptive",
+      "min_improvement_rel_sigma": 2.0,
+      "min_improvement_rel_min": 0.003,
+      "min_improvement_rel_max": 0.02,
+      "max_rel_stdev": 0.03,
+      "min_effect_sigma": 1.00,
+      "ci_z": 1.0,
+      "require_ci_separation": true,
+      "min_series_samples": 5,
+      "confirm_repeats": 1,
+      "ab_repeats": 1,
+      "blocked_mutation_ttl": 6,
+      "compound_every": 2,
+      "compound_limit": 14,
+      "compound_second_window": 10,
+      "benchmark_command": [
+        "cargo",
+        "run",
+        "--release",
+        "--",
+        "poseidon",
+        "--log-n-perms",
+        "11"
+      ],
+      "warmup_runs": 1,
+      "runs": 5,
+      "trim_extremes": 1,
+      "aggregate": "median",
+      "metric_regex": "([0-9]+) Poseidons / s",
+      "bootstrap": {
+        "git_url": "https://github.com/leanEthereum/leanMultisig.git",
+        "path": "work/leanMultisig",
+        "ref": "6f06c021823c742697bf867bd53d0501b66289fe"
+      }
+    },
+    "leanmultisig_poseidon16_full": {
+      "type": "command",
+      "description": "Lean multisig Poseidon16 prover throughput (full benchmark profile)",
+      "project_dir": "work/leanMultisig",
+      "metric_name": "poseidons_per_s",
+      "higher_is_better": true,
+      "min_improvement_rel": 0.02,
+      "confirm_repeats": 1,
+      "benchmark_command": [
+        "cargo",
+        "run",
+        "--release",
+        "--",
+        "poseidon",
+        "--log-n-perms",
+        "17"
+      ],
+      "warmup_runs": 1,
+      "runs": 3,
+      "aggregate": "median",
+      "metric_regex": "([0-9]+) Poseidons / s",
+      "bootstrap": {
+        "git_url": "https://github.com/leanEthereum/leanMultisig.git",
+        "path": "work/leanMultisig",
+        "ref": "6f06c021823c742697bf867bd53d0501b66289fe"
+      }
+    },
+    "leanmultisig_xmss_fast": {
+      "type": "command",
+      "description": "Lean multisig XMSS aggregation throughput (fast smoke profile)",
+      "project_dir": "work/leanMultisig",
+      "metric_name": "xmss_per_s",
+      "higher_is_better": true,
+      "min_improvement_rel": 0.03,
+      "confirm_repeats": 1,
+      "benchmark_command": [
+        "cargo",
+        "run",
+        "--release",
+        "--",
+        "xmss",
+        "--n-signatures",
+        "400",
+        "--log-inv-rate",
+        "1"
+      ],
+      "warmup_runs": 1,
+      "runs": 3,
+      "aggregate": "median",
+      "metric_regex": "([0-9]+) sig/s",
+      "bootstrap": {
+        "git_url": "https://github.com/leanEthereum/leanMultisig.git",
+        "path": "work/leanMultisig",
+        "ref": "6f06c021823c742697bf867bd53d0501b66289fe"
+      }
+    }
+  }
+}
