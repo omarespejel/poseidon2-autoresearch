@@ -87,6 +87,7 @@ python3 campaign.py --synthesis-cook --strict-submission
 ```
 
 Track requirement mapping is documented in `SYNTHESIS_ALIGNMENT.md`.
+Current source-backed strategy brief is in `RESEARCH_BRIEF_2026-03-16.md`.
 
 ## Adaptive Portfolio Mode
 
@@ -219,6 +220,8 @@ Rust targets now share accepted mutation history through persisted replay memory
 - default file: `work/mutation_memory.json`
 - memory is seeded from historical `results.tsv` accepted/rejected rows
 - successful mutations on one Rust target are prioritized on other Rust targets
+- mutation operators can be ranked with UCB (`mutation_selection_strategy: ucb`) using
+  accepted/rejected history plus bounded objective-gain signals
 
 Controls:
 
@@ -232,6 +235,11 @@ python3 train.py --target leanmultisig_poseidon2_neon_src_fast --mutation-memory
 # disable replay memory
 python3 train.py --target leanmultisig_poseidon2_neon_src_fast --disable-mutation-memory
 ```
+
+UCB behavior is controlled per target in `config/targets.json`:
+
+- `mutation_selection_strategy` (`ucb` or `shift`)
+- `mutation_ucb_explore` (higher = more exploration)
 
 ## Acceptance Policy
 
