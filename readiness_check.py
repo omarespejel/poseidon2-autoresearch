@@ -26,6 +26,12 @@ DEFAULT_REPORT = ROOT / "readiness_report.md"
 # Public Synthesis timeline marker observed on-site.
 DEFAULT_BUILD_CLOSE_UTC = dt.datetime(2026, 3, 22, 17, 0, 0, tzinfo=dt.timezone.utc)
 INFORMATIONAL_CHECKS = {"recent_activity_24h"}
+INFORMATIONAL_CHECKS.update(
+    {
+        "submission_multi_tool_orchestration",
+        "submission_receipts_additional_evidence",
+    }
+)
 
 
 @dataclass
@@ -74,6 +80,15 @@ def load_json(path: Path) -> dict[str, Any] | None:
     if isinstance(data, dict):
         return data
     return None
+
+
+def looks_like_onchain_receipt(value: str) -> bool:
+    token = value.strip()
+    if not token:
+        return False
+    if token.startswith("0x") and len(token) >= 18:
+        return True
+    return token.startswith("https://") or token.startswith("http://")
 
 
 def retained_entry_path(item: dict[str, Any]) -> Path | None:
@@ -238,18 +253,109 @@ def build_checks(
             )
         )
 
+        decisions = submission_log.get("decisions")
+        decision_count = len(decisions) if isinstance(decisions, list) else 0
+        checks.append(
+            CheckResult(
+                name="submission_autonomous_decision_trace",
+                ok=decision_count > 0,
+                details=f"decision_count={decision_count}",
+            )
+        )
+
+        tool_calls = submission_log.get("tool_calls")
+        distinct_tools: set[str] = set()
+        if isinstance(tool_calls, list):
+            for call in tool_calls:
+                if not isinstance(call, dict):
+                    continue
+                tool = call.get("tool")
+                if isinstance(tool, str) and tool.strip():
+                    distinct_tools.add(tool.strip())
+        checks.append(
+            CheckResult(
+                name="submission_tool_calls_present",
+                ok=bool(distinct_tools),
+                details=f"distinct_tools={len(distinct_tools)} [{', '.join(sorted(distinct_tools)[:8])}]",
+            )
+        )
+        checks.append(
+            CheckResult(
+                name="submission_multi_tool_orchestration",
+                ok=len(distinct_tools) >= 2,
+                details=f"distinct_tools={len(distinct_tools)}",
+            )
+        )
+
+        safety_guardrails = submission_log.get("safety_guardrails")
+        has_safety_payload = False
+        if isinstance(safety_guardrails, dict):
+            policy = safety_guardrails.get("policy")
+            counters = safety_guardrails.get("counters")
+            has_safety_payload = (
+                isinstance(policy, list)
+                and len(policy) > 0
+                and isinstance(counters, dict)
+                and len(counters) > 0
+            )
+        checks.append(
+            CheckResult(
+                name="submission_safety_guardrails_populated",
+                ok=has_safety_payload,
+                details="safety_guardrails has policy and counters" if has_safety_payload else "missing safety policy/counters",
+            )
+        )
+
+        compute_budget = submission_log.get("compute_budget")
+        has_budget_usage = False
+        if isinstance(compute_budget, dict):
+            consumed = compute_budget.get("consumed")
+            has_budget_usage = isinstance(consumed, dict) and any(
+                consumed.get(key) is not None
+                for key in ("iterations", "accepted", "estimated_model_calls", "evaluation_seconds_total")
+            )
+        checks.append(
+            CheckResult(
+                name="submission_compute_budget_usage",
+                ok=has_budget_usage,
+                details="compute_budget.consumed populated" if has_budget_usage else "missing compute budget usage details",
+            )
+        )
+
     if submission_receipts is not None:
         erc8004 = submission_receipts.get("erc8004")
         reg_tx = ""
+        additional_count = 0
         if isinstance(erc8004, dict):
             raw = erc8004.get("registration_tx", "")
             if isinstance(raw, str):
                 reg_tx = raw.strip()
+            raw_additional = erc8004.get("additional_receipts")
+            if isinstance(raw_additional, list):
+                additional_count = sum(
+                    1
+                    for item in raw_additional
+                    if isinstance(item, str) and bool(item.strip()) and looks_like_onchain_receipt(item)
+                )
         checks.append(
             CheckResult(
                 name="submission_receipts_registration_tx",
                 ok=bool(reg_tx),
                 details="ok" if reg_tx else "missing erc8004.registration_tx in submission receipts",
+            )
+        )
+        checks.append(
+            CheckResult(
+                name="submission_receipts_registration_tx_format",
+                ok=looks_like_onchain_receipt(reg_tx),
+                details="onchain receipt format detected" if looks_like_onchain_receipt(reg_tx) else "registration tx is not hash/url-like",
+            )
+        )
+        checks.append(
+            CheckResult(
+                name="submission_receipts_additional_evidence",
+                ok=additional_count > 0,
+                details=f"additional_onchain_receipts={additional_count}",
             )
         )
 
