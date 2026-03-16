@@ -955,6 +955,28 @@ def json_heuristic_candidate(
         section["seed"] = current + 101
         return True
 
+    def apply_float_delta(
+        obj: dict[str, Any],
+        *,
+        section_name: str,
+        key: str,
+        delta: float,
+        lo: float,
+        hi: float,
+    ) -> bool:
+        section = obj.get(section_name)
+        if not isinstance(section, dict):
+            return False
+        try:
+            current = float(section.get(key))
+        except (TypeError, ValueError):
+            return False
+        updated = max(lo, min(hi, current + delta))
+        if abs(updated - current) < 1e-12:
+            return False
+        section[key] = round(updated, 6)
+        return True
+
     def op_search(key: str, delta: int, lo: int, hi: int) -> Any:
         return lambda obj: apply_delta(
             obj,
@@ -969,6 +991,16 @@ def json_heuristic_candidate(
         return lambda obj: apply_delta(
             obj,
             section_name="analysis",
+            key=key,
+            delta=delta,
+            lo=lo,
+            hi=hi,
+        )
+
+    def op_objective_float(key: str, delta: float, lo: float, hi: float) -> Any:
+        return lambda obj: apply_float_delta(
+            obj,
+            section_name="objective",
             key=key,
             delta=delta,
             lo=lo,
@@ -994,10 +1026,14 @@ def json_heuristic_candidate(
         ("json_trackb_collision_samples_down", op_search("collision_samples", -512, 64, 1_000_000)),
         ("json_trackb_split_round_up", lambda obj: apply_split_round(obj, +1)),
         ("json_trackb_split_round_down", lambda obj: apply_split_round(obj, -1)),
-        ("json_trackb_middle_key_bits_up", op_analysis("middle_key_bits", +1, 6, 30)),
-        ("json_trackb_middle_key_bits_down", op_analysis("middle_key_bits", -1, 6, 30)),
-        ("json_trackb_truncated_bits_up", op_analysis("truncated_bits", +1, 8, 30)),
-        ("json_trackb_truncated_bits_down", op_analysis("truncated_bits", -1, 8, 30)),
+        ("json_trackb_middle_key_bits_up", op_analysis("middle_key_bits", +1, 6, 40)),
+        ("json_trackb_middle_key_bits_down", op_analysis("middle_key_bits", -1, 6, 40)),
+        ("json_trackb_truncated_bits_up", op_analysis("truncated_bits", +1, 8, 40)),
+        ("json_trackb_truncated_bits_down", op_analysis("truncated_bits", -1, 8, 40)),
+        ("json_trackb_verified_bonus_up", op_objective_float("verified_found_bonus", +0.25, 0.0, 20.0)),
+        ("json_trackb_verified_bonus_down", op_objective_float("verified_found_bonus", -0.25, 0.0, 20.0)),
+        ("json_trackb_threshold_up", op_objective_float("attack_found_threshold_bits", +0.25, 1.0, 64.0)),
+        ("json_trackb_threshold_down", op_objective_float("attack_found_threshold_bits", -0.25, 1.0, 64.0)),
         # Backward-compatible operators for earlier config schema.
         ("json_trackb_delta_candidates_up", op_search("delta_candidates", +8, 4, 4096)),
         ("json_trackb_delta_candidates_down", op_search("delta_candidates", -8, 4, 4096)),

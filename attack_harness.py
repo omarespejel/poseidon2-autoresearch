@@ -43,6 +43,44 @@ def clamp_float(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
 
 
+def deep_merge_dict(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key, value in base.items():
+        if isinstance(value, dict) or isinstance(value, list):
+            out[key] = json.loads(json.dumps(value))
+        else:
+            out[key] = value
+    for key, value in override.items():
+        current = out.get(key)
+        if isinstance(current, dict) and isinstance(value, dict):
+            out[key] = deep_merge_dict(current, value)
+            continue
+        if isinstance(value, dict) or isinstance(value, list):
+            out[key] = json.loads(json.dumps(value))
+            continue
+        out[key] = value
+    return out
+
+
+def resolve_profile_config(config: dict[str, Any], requested_profile: str) -> tuple[dict[str, Any], str]:
+    selected = requested_profile.strip()
+    if not selected:
+        selected = str(config.get("active_profile", "")).strip()
+
+    merged = json.loads(json.dumps(config))
+    profiles = merged.get("challenge_profiles")
+    if not isinstance(profiles, dict) or not selected:
+        return merged, selected
+
+    profile_payload = profiles.get(selected)
+    if not isinstance(profile_payload, dict):
+        valid = ", ".join(sorted(str(k) for k in profiles.keys()))
+        raise ValueError(f"unknown challenge profile '{selected}' (available: {valid})")
+
+    merged = deep_merge_dict(merged, profile_payload)
+    return merged, selected
+
+
 def egcd(a: int, b: int) -> tuple[int, int, int]:
     if b == 0:
         return (a, 1, 0)
@@ -179,12 +217,12 @@ def build_spec(config: dict[str, Any], *, mode: str) -> Poseidon2Spec:
     if mode == "full":
         mode_scale = 2.0
 
-    modulus = clamp_int(parse_int(poseidon2.get("field_modulus"), 2130706433), 1_000_003, 2**63 - 25)
-    width = clamp_int(parse_int(poseidon2.get("width"), 3), 2, 8)
-    full_rounds = clamp_int(parse_int(poseidon2.get("full_rounds"), 8), 2, 16)
+    modulus = clamp_int(parse_int(poseidon2.get("field_modulus"), 2130706433), 1_000_003, (1 << 521) - 1)
+    width = clamp_int(parse_int(poseidon2.get("width"), 3), 2, 16)
+    full_rounds = clamp_int(parse_int(poseidon2.get("full_rounds"), 8), 2, 32)
     if full_rounds % 2 != 0:
         full_rounds += 1
-    partial_rounds = clamp_int(parse_int(poseidon2.get("partial_rounds"), 13), 1, 128)
+    partial_rounds = clamp_int(parse_int(poseidon2.get("partial_rounds"), 13), 1, 256)
     sbox_power = clamp_int(parse_int(poseidon2.get("sbox_power"), 5), 3, 11)
     if math.gcd(sbox_power, modulus - 1) != 1:
         raise ValueError(
@@ -369,9 +407,9 @@ def parse_analysis(config: dict[str, Any], spec: Poseidon2Spec) -> dict[str, Any
         raw = {}
 
     target_lane = clamp_int(parse_int(raw.get("target_lane"), 0), 0, spec.width - 1)
-    truncated_bits = clamp_int(parse_int(raw.get("truncated_bits"), 24), 4, 32)
+    truncated_bits = clamp_int(parse_int(raw.get("truncated_bits"), 24), 4, 64)
     split_round = clamp_int(parse_int(raw.get("split_round"), spec.total_rounds // 2), 1, spec.total_rounds - 1)
-    middle_key_bits = clamp_int(parse_int(raw.get("middle_key_bits"), 18), 6, 30)
+    middle_key_bits = clamp_int(parse_int(raw.get("middle_key_bits"), 18), 6, 64)
 
     key_lanes_raw = raw.get("middle_key_lanes")
     key_lanes: list[int] = []
@@ -630,6 +668,7 @@ def score(
     cap_bits = clamp_float(parse_float(objective.get("complexity_cap_bits"), 32.0), 8.0, 128.0)
     found_threshold_bits = clamp_float(parse_float(objective.get("attack_found_threshold_bits"), 16.0), 4.0, 64.0)
     found_bonus = clamp_float(parse_float(objective.get("attack_found_bonus"), 1.0), 0.0, 20.0)
+    verified_bonus = clamp_float(parse_float(objective.get("verified_found_bonus"), found_bonus), 0.0, 40.0)
     cost_penalty_scale = clamp_float(parse_float(objective.get("cost_penalty_scale"), 0.08), 0.0, 3.0)
 
     diff_bits = float(differential["complexity_bits"])
@@ -640,12 +679,14 @@ def score(
     pre_signal = max(0.0, cap_bits - pre_bits)
     coll_signal = max(0.0, float(collision["advantage_bits"]))
 
-    found = (
+    heuristic_found = (
         bool(mitm_preimage.get("attack_found", False))
         or diff_bits <= found_threshold_bits
         or pre_bits <= found_threshold_bits
     )
-    found_component = found_bonus if found else 0.0
+    verified_found = bool(int(mitm_preimage.get("verified_hits", 0)) > 0)
+    heuristic_component = found_bonus if heuristic_found else 0.0
+    verified_component = verified_bonus if verified_found else 0.0
 
     search_cost = (
         int(search["differential_candidates"]) * int(search["differential_samples_per_candidate"])
@@ -655,11 +696,18 @@ def score(
     )
     cost_penalty = cost_penalty_scale * math.log2(max(2, search_cost))
 
-    attack_score = (wd * diff_signal) + (wp * pre_signal) + (wc * coll_signal) + found_component - cost_penalty
+    base_signal_score = (wd * diff_signal) + (wp * pre_signal) + (wc * coll_signal) - cost_penalty
+    attack_score_signal = base_signal_score + heuristic_component
+    attack_score_verified = base_signal_score + verified_component
 
     return {
-        "attack_score": attack_score,
-        "attack_found": 1.0 if found else 0.0,
+        # Backward-compatible default score: heuristic signal lane.
+        "attack_score": attack_score_signal,
+        "attack_score_signal": attack_score_signal,
+        "attack_score_verified": attack_score_verified,
+        "attack_found": 1.0 if heuristic_found else 0.0,
+        "heuristic_found": 1.0 if heuristic_found else 0.0,
+        "verified_found": 1.0 if verified_found else 0.0,
         "best_attack_complexity_bits": min(diff_bits, pre_bits, coll_bits),
         "differential_complexity_bits": diff_bits,
         "preimage_complexity_bits": pre_bits,
@@ -681,6 +729,11 @@ def load_config(path: Path) -> dict[str, Any]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run deterministic reduced-round Poseidon2 cryptanalysis harness")
     parser.add_argument("--config", default="config/track_b_attack_config.json", help="Path to Track B config JSON")
+    parser.add_argument(
+        "--profile",
+        default="",
+        help="Optional challenge profile key from config.challenge_profiles",
+    )
     parser.add_argument("--mode", choices=["fast", "full"], default="fast", help="Search budget mode")
     parser.add_argument("--output-format", choices=["json", "pretty"], default="json", help="Output encoding")
     return parser
@@ -692,7 +745,8 @@ def main(argv: list[str] | None = None) -> int:
     config_path = Path(args.config)
     if not config_path.is_absolute():
         config_path = ROOT / config_path
-    config = load_config(config_path)
+    config_raw = load_config(config_path)
+    config, selected_profile = resolve_profile_config(config_raw, args.profile)
 
     spec = build_spec(config, mode=args.mode)
     search = parse_search(config, mode=args.mode)
@@ -714,6 +768,7 @@ def main(argv: list[str] | None = None) -> int:
         "ok": True,
         "mode": args.mode,
         "config_path": str(config_path),
+        "challenge_profile": selected_profile,
         "spec": {
             "field_modulus": spec.modulus,
             "width": spec.width,
@@ -726,11 +781,15 @@ def main(argv: list[str] | None = None) -> int:
         "search": search,
         "metrics": {
             "attack_score": metrics["attack_score"],
+            "attack_score_signal": metrics["attack_score_signal"],
+            "attack_score_verified": metrics["attack_score_verified"],
             "best_attack_complexity_bits": metrics["best_attack_complexity_bits"],
             "differential_complexity_bits": metrics["differential_complexity_bits"],
             "preimage_complexity_bits": metrics["preimage_complexity_bits"],
             "collision_complexity_bits": metrics["collision_complexity_bits"],
             "attack_found": int(metrics["attack_found"]),
+            "heuristic_found": int(metrics["heuristic_found"]),
+            "verified_found": int(metrics["verified_found"]),
         },
         "details": {
             "differential": differential,
@@ -744,7 +803,11 @@ def main(argv: list[str] | None = None) -> int:
             },
         },
         "repro": {
-            "command": f"python3 attack_harness.py --config {config_path} --mode {args.mode} --output-format json"
+            "command": (
+                f"python3 attack_harness.py --config {config_path} "
+                f"{f'--profile {selected_profile} ' if selected_profile else ''}"
+                f"--mode {args.mode} --output-format json"
+            )
         },
     }
 

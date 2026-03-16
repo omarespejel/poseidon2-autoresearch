@@ -17,6 +17,7 @@ This scaffold focuses on what is quickly verifiable:
 - `program.md`: human-authored instructions for the agent
 - `run_loop.py`: backward-compatible alias to `train.py`
 - `portfolio_loop.py`: adaptive multi-target runner (avoids single-target plateaus)
+- `RESEARCH_POSEIDON_VULNERABILITIES.md`: current public cryptanalysis snapshot + source links
 - `evidence_pack.py`: generate submission-grade evidence bundle from logs/artifacts
 - `submission_pack.py`: generate canonical `agent.json`, `agent_log.json`, and receipts bundle
 - `readiness_check.py`: submission-readiness checker (artifacts + activity + timeline gate)
@@ -246,13 +247,19 @@ The harness runs reduced-round Poseidon2-style kernels over a prime field:
 
 - `poseidon2_cryptanalysis_trackb_fast`
 - `poseidon2_cryptanalysis_trackb_full`
+- `poseidon2_cryptanalysis_trackb_verified_fast` (strict verified-hit lane)
+- `poseidon2_cryptanalysis_poseidon64_signal_fast` (profile lane)
+- `poseidon2_cryptanalysis_poseidon256_signal_fast` (profile lane)
+- `poseidon2_cryptanalysis_koalabear16_signal_fast` (profile lane)
 
 Quick start:
 
 ```bash
 python3 attack_harness.py --config config/track_b_attack_config.json --mode fast --output-format pretty
+python3 attack_harness.py --config config/track_b_attack_config.json --profile poseidon64_bounty_shape --mode fast --output-format pretty
 python3 prepare.py baseline --target poseidon2_cryptanalysis_trackb_fast --notes trackb_baseline
 python3 train.py --target poseidon2_cryptanalysis_trackb_fast --iterations 12 --max-accepted 2 -v
+python3 train.py --target poseidon2_cryptanalysis_trackb_verified_fast --iterations 12 --max-accepted 1 -v
 ```
 
 ## LLM Mode (Optional)

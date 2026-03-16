@@ -82,7 +82,13 @@ def default_real_optimize_targets() -> str:
 
 
 def default_crypto_optimize_targets() -> str:
-    return "poseidon2_cryptanalysis_trackb_fast"
+    return ",".join(
+        [
+            "poseidon2_cryptanalysis_trackb_fast",
+            "poseidon2_cryptanalysis_trackb_verified_fast",
+            "poseidon2_cryptanalysis_poseidon64_signal_fast",
+        ]
+    )
 
 
 def parse_targets_csv(raw: str) -> list[str]:

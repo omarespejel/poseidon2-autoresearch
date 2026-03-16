@@ -92,10 +92,21 @@ class AttackHarnessTests(unittest.TestCase):
         m = attack_harness.score(config=cfg, search=search, differential=d, mitm_preimage=p, collision=c)
 
         self.assertIn("attack_score", m)
+        self.assertIn("attack_score_signal", m)
+        self.assertIn("attack_score_verified", m)
         self.assertIn("differential_complexity_bits", m)
         self.assertIn("preimage_complexity_bits", m)
         self.assertIn("collision_complexity_bits", m)
         self.assertTrue(math_is_finite(float(m["attack_score"])))
+
+    def test_profile_overlay(self) -> None:
+        cfg = tiny_config()
+        cfg["active_profile"] = "poseidon64_bounty_shape"
+        merged, selected = attack_harness.resolve_profile_config(cfg, "")
+        self.assertEqual(selected, "poseidon64_bounty_shape")
+        self.assertEqual(int(merged["poseidon2"]["field_modulus"]), 18446744069414584321)
+        self.assertEqual(int(merged["poseidon2"]["sbox_power"]), 7)
+        self.assertEqual(int(merged["analysis"]["truncated_bits"]), 28)
 
 
 def math_is_finite(value: float) -> bool:
