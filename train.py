@@ -17,6 +17,7 @@ import json
 import math
 import os
 import platform
+import random
 import re
 import shutil
 import statistics
@@ -64,6 +65,8 @@ ALLOWED_TARGET_OVERRIDE_KEYS = {
     "operator_validation_block_penalty_step",
     "operator_validation_block_penalty_max",
     "operator_validation_block_disable_streak",
+    "population_parent_sample_prob",
+    "population_max_entries",
     "validation_targets",
     "validation_allow_drop_abs",
     "validation_allow_drop_rel",
@@ -75,6 +78,9 @@ DEFAULT_MUTATION_MEMORY_ACCEPTED_STALE_MULTIPLIER = 4.0
 DEFAULT_MUTATION_MEMORY_MIN_ACCEPTED_TOTAL = 2
 DEFAULT_MUTATION_MEMORY_MIN_SUCCESS_RATE = 0.30
 DEFAULT_MUTATION_MEMORY_SEED_VERSION = 2
+DEFAULT_POPULATION_MEMORY_FILE = ROOT / "work" / "population_memory.json"
+DEFAULT_POPULATION_MEMORY_MAX_ENTRIES = 48
+DEFAULT_POPULATION_PARENT_SAMPLE_PROB = 0.35
 DEFAULT_MUTATOR_STATS_FILE = ROOT / "work" / "mutator_stats.json"
 DEFAULT_OPERATOR_REWARD_EPSILON = 1e-12
 DEFAULT_OPERATOR_DEMOTE_STREAK = 6
@@ -2379,6 +2385,283 @@ def save_mutation_memory(path: Path, memory: dict[str, Any]) -> None:
     atomic_write_text(path, json.dumps(memory, indent=2, sort_keys=True) + "\n")
 
 
+def load_population_memory(path: Path) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "version": 1,
+        "updated_at": None,
+        "entries": [],
+    }
+    if not path.exists():
+        return base
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return base
+    if not isinstance(payload, dict):
+        return base
+    payload.setdefault("version", 1)
+    payload.setdefault("updated_at", None)
+    payload.setdefault("entries", [])
+    if not isinstance(payload.get("entries"), list):
+        payload["entries"] = []
+    return payload
+
+
+def save_population_memory(path: Path, memory: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    memory["updated_at"] = prepare.now_iso()
+    atomic_write_text(path, json.dumps(memory, indent=2, sort_keys=True) + "\n")
+
+
+def source_sha256(source_code: str) -> str:
+    return hashlib.sha256(source_code.encode("utf-8")).hexdigest()
+
+
+def compact_population_entries(
+    entries: list[dict[str, Any]],
+    *,
+    max_entries: int,
+) -> None:
+    if max_entries <= 0 or len(entries) <= max_entries:
+        return
+
+    def quality(entry: dict[str, Any]) -> float:
+        metric = entry.get("metric_value")
+        try:
+            metric_f = float(metric)
+        except Exception:  # noqa: BLE001
+            metric_f = 0.0
+        higher_is_better = bool(entry.get("higher_is_better", True))
+        return metric_f if higher_is_better else -metric_f
+
+    def sort_key(entry: dict[str, Any]) -> tuple[int, int, float, float]:
+        accepted_total = max(0, int(entry.get("accepted_total", 0)))
+        rejected_total = max(0, int(entry.get("rejected_total", 0)))
+        seen = parse_iso_to_epoch(entry.get("last_seen_at"))
+        return (
+            1 if accepted_total > 0 else 0,
+            accepted_total - rejected_total,
+            quality(entry),
+            seen,
+        )
+
+    entries.sort(key=sort_key, reverse=True)
+    del entries[max_entries:]
+
+
+def upsert_population_entry(
+    memory: dict[str, Any],
+    *,
+    target_name: str,
+    language: str,
+    source_code: str,
+    metric_value: float | None,
+    higher_is_better: bool,
+    accepted: bool,
+    timestamp: str,
+    notes: str,
+    max_entries: int,
+) -> dict[str, Any]:
+    entries = memory.setdefault("entries", [])
+    if not isinstance(entries, list):
+        memory["entries"] = []
+        entries = memory["entries"]
+
+    source_hash = source_sha256(source_code)
+    existing: dict[str, Any] | None = None
+    for raw in entries:
+        if not isinstance(raw, dict):
+            continue
+        if (
+            str(raw.get("source_sha256", "")) == source_hash
+            and str(raw.get("target", "")) == target_name
+            and str(raw.get("language", "")) == language
+        ):
+            existing = raw
+            break
+
+    if existing is None:
+        existing = {
+            "target": target_name,
+            "language": language,
+            "source_sha256": source_hash,
+            "source_code": source_code,
+            "higher_is_better": higher_is_better,
+            "metric_value": metric_value,
+            "accepted_total": 0,
+            "rejected_total": 0,
+            "sampled_total": 0,
+            "created_at": timestamp,
+            "last_seen_at": timestamp,
+            "last_sampled_at": None,
+            "last_notes": notes,
+        }
+        entries.append(existing)
+    else:
+        # Keep freshest source and best observed metric for this source hash/target.
+        existing["source_code"] = source_code
+        old_metric = existing.get("metric_value")
+        replace_metric = metric_value is not None and old_metric is None
+        if metric_value is not None and old_metric is not None:
+            try:
+                old_metric_f = float(old_metric)
+                new_metric_f = float(metric_value)
+                replace_metric = new_metric_f >= old_metric_f if higher_is_better else new_metric_f <= old_metric_f
+            except Exception:  # noqa: BLE001
+                replace_metric = True
+        if replace_metric:
+            existing["metric_value"] = metric_value
+        existing["higher_is_better"] = higher_is_better
+
+    if accepted:
+        existing["accepted_total"] = int(existing.get("accepted_total", 0)) + 1
+        existing["last_accepted_at"] = timestamp
+    else:
+        existing["rejected_total"] = int(existing.get("rejected_total", 0)) + 1
+        existing["last_rejected_at"] = timestamp
+    existing["last_seen_at"] = timestamp
+    existing["last_notes"] = notes
+    compact_population_entries(entries, max_entries=max_entries)
+    return existing
+
+
+def update_and_save_population_memory(
+    path: Path,
+    current_memory: dict[str, Any],
+    *,
+    target_name: str,
+    language: str,
+    source_code: str,
+    metric_value: float | None,
+    higher_is_better: bool,
+    accepted: bool,
+    timestamp: str,
+    notes: str,
+    max_entries: int,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    entry: dict[str, Any] | None = None
+    with file_lock(lock_path):
+        latest = load_population_memory(path)
+        entry = upsert_population_entry(
+            latest,
+            target_name=target_name,
+            language=language,
+            source_code=source_code,
+            metric_value=metric_value,
+            higher_is_better=higher_is_better,
+            accepted=accepted,
+            timestamp=timestamp,
+            notes=notes,
+            max_entries=max_entries,
+        )
+        save_population_memory(path, latest)
+
+    current_memory.clear()
+    current_memory.update(latest)
+    return current_memory, entry
+
+
+def select_population_parent(
+    memory: dict[str, Any] | None,
+    *,
+    target_name: str,
+    language: str,
+    higher_is_better: bool,
+    best_metric: float,
+    best_source: str,
+    max_candidates: int = 8,
+) -> dict[str, Any] | None:
+    if not isinstance(memory, dict):
+        return None
+    entries = memory.get("entries")
+    if not isinstance(entries, list):
+        return None
+
+    best_source_hash = source_sha256(best_source)
+    candidates: list[tuple[float, dict[str, Any]]] = []
+    for raw in entries:
+        if not isinstance(raw, dict):
+            continue
+        if str(raw.get("target", "")) != target_name:
+            continue
+        if str(raw.get("language", "")).strip().lower() != language.strip().lower():
+            continue
+        source_code = raw.get("source_code")
+        if not isinstance(source_code, str) or not source_code:
+            continue
+        source_hash = str(raw.get("source_sha256", ""))
+        if source_hash == best_source_hash:
+            continue
+        metric_value = raw.get("metric_value")
+        if metric_value is None:
+            continue
+        try:
+            metric_f = float(metric_value)
+        except Exception:  # noqa: BLE001
+            continue
+        accepted_total = max(0, int(raw.get("accepted_total", 0)))
+        rejected_total = max(0, int(raw.get("rejected_total", 0)))
+        sampled_total = max(0, int(raw.get("sampled_total", 0)))
+        total = accepted_total + rejected_total
+        success_rate = accepted_total / total if total > 0 else 0.0
+        novelty = 1.0 / math.sqrt(float(sampled_total) + 1.0)
+        metric_rel = metric_f / max(1e-6, abs(best_metric))
+        if not higher_is_better:
+            metric_rel = -metric_rel
+        selection_score = metric_rel + (0.20 * success_rate) + (0.10 * novelty)
+        candidates.append((selection_score, raw))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    top = candidates[: max(1, min(max_candidates, len(candidates)))]
+    weights = [float(len(top) - idx) for idx in range(len(top))]
+    choice_idx = random.choices(range(len(top)), weights=weights, k=1)[0]
+    return top[choice_idx][1]
+
+
+def mark_population_entry_sampled(
+    path: Path,
+    current_memory: dict[str, Any],
+    *,
+    target_name: str,
+    language: str,
+    source_hash: str,
+    timestamp: str,
+) -> dict[str, Any]:
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    with file_lock(lock_path):
+        latest = load_population_memory(path)
+        entries = latest.get("entries")
+        if not isinstance(entries, list):
+            entries = []
+            latest["entries"] = entries
+        for raw in entries:
+            if not isinstance(raw, dict):
+                continue
+            if (
+                str(raw.get("target", "")) == target_name
+                and str(raw.get("language", "")).strip().lower() == language.strip().lower()
+                and str(raw.get("source_sha256", "")) == source_hash
+            ):
+                raw["sampled_total"] = int(raw.get("sampled_total", 0)) + 1
+                raw["last_sampled_at"] = timestamp
+                break
+        save_population_memory(path, latest)
+    current_memory.clear()
+    current_memory.update(latest)
+    return current_memory
+
+
+def should_record_population_candidate(*, accepted: bool, notes: str) -> bool:
+    if accepted:
+        return True
+    token = str(notes or "").split(";", 1)[0].strip().lower()
+    return token.startswith("rejected_below_threshold") or token.startswith("rejected_validation_")
+
+
 def _increment_stat(container: dict[str, Any], key: str, accepted: bool) -> None:
     entry = container.setdefault(key, {"accepted": 0, "rejected": 0})
     if not isinstance(entry, dict):
@@ -3917,6 +4200,29 @@ def run_loop(args: argparse.Namespace) -> int:
             )
             mutation_memory = None
 
+    population_memory_path = Path(args.population_memory_file)
+    if not population_memory_path.is_absolute():
+        population_memory_path = ROOT / population_memory_path
+    population_memory: dict[str, Any] | None = None
+    population_memory_enabled = (not args.disable_population_memory) and language_norm in {"rust", "json", "python"}
+    population_parent_sample_prob = min(
+        1.0,
+        max(0.0, float(target.get("population_parent_sample_prob", args.population_parent_sample_prob))),
+    )
+    population_max_entries = max(0, int(target.get("population_max_entries", args.population_max_entries)))
+    if population_memory_enabled:
+        lock_path = population_memory_path.with_suffix(population_memory_path.suffix + ".lock")
+        try:
+            with file_lock(lock_path):
+                population_memory = load_population_memory(population_memory_path)
+                save_population_memory(population_memory_path, population_memory)
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"[train] Warning: population memory bootstrap failed ({exc}); continuing without population memory",
+                file=sys.stderr,
+            )
+            population_memory = None
+
     operator_stats_path = Path(args.operator_stats_file)
     if not operator_stats_path.is_absolute():
         operator_stats_path = ROOT / operator_stats_path
@@ -3985,6 +4291,7 @@ def run_loop(args: argparse.Namespace) -> int:
             f"max_runtime={args.max_runtime_seconds or 'none'}s "
             f"artifacts={args.artifacts} "
             f"git_checkpoint={git_checkpoint_mode} "
+            f"population_memory={'on' if population_memory is not None else 'off'} "
             f"operator_stats={'on' if operator_stats is not None else 'off'}"
         ),
         level=1,
@@ -4015,6 +4322,7 @@ def run_loop(args: argparse.Namespace) -> int:
     )
 
     best_metric = float(baseline["metric_value"])
+    best_source = source_path.read_text()
     train_log(
         args,
         (
@@ -4096,6 +4404,28 @@ def run_loop(args: argparse.Namespace) -> int:
         )
         return 1
 
+    if population_memory is not None:
+        try:
+            population_memory, _ = update_and_save_population_memory(
+                population_memory_path,
+                population_memory,
+                target_name=args.target,
+                language=language_norm,
+                source_code=best_source,
+                metric_value=best_metric,
+                higher_is_better=bool(target["higher_is_better"]),
+                accepted=True,
+                timestamp=prepare.now_iso(),
+                notes="baseline_seed",
+                max_entries=population_max_entries,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"[train] Warning: population baseline seed failed ({exc}); continuing without population memory",
+                file=sys.stderr,
+            )
+            population_memory = None
+
     prepare.append_log(
         {
             "event": "loop_start",
@@ -4112,6 +4442,15 @@ def run_loop(args: argparse.Namespace) -> int:
                 "path": str(mutation_memory_path),
                 "known_mutations": len((mutation_memory or {}).get("mutations", {}))
                 if isinstance((mutation_memory or {}).get("mutations"), dict)
+                else 0,
+            },
+            "population_memory": {
+                "enabled": population_memory is not None,
+                "path": str(population_memory_path),
+                "parent_sample_prob": population_parent_sample_prob,
+                "max_entries": population_max_entries,
+                "known_entries": len((population_memory or {}).get("entries", []))
+                if isinstance((population_memory or {}).get("entries"), list)
                 else 0,
             },
             "operator_stats": {
@@ -4197,10 +4536,47 @@ def run_loop(args: argparse.Namespace) -> int:
             ),
             level=1,
         )
-        current_source = source_path.read_text()
+        current_source = best_source
 
         mutation = ""
         diagnostics: dict[str, Any] = {}
+        if (
+            population_memory is not None
+            and population_parent_sample_prob > 0.0
+            and random.random() < population_parent_sample_prob
+        ):
+            selected_parent = select_population_parent(
+                population_memory,
+                target_name=args.target,
+                language=language_norm,
+                higher_is_better=bool(target["higher_is_better"]),
+                best_metric=best_metric,
+                best_source=best_source,
+            )
+            if isinstance(selected_parent, dict):
+                parent_source = selected_parent.get("source_code")
+                if isinstance(parent_source, str) and parent_source:
+                    current_source = parent_source
+                    source_hash = str(selected_parent.get("source_sha256", ""))
+                    diagnostics["population_parent"] = {
+                        "source_sha256": source_hash[:12],
+                        "metric_value": selected_parent.get("metric_value"),
+                        "accepted_total": int(selected_parent.get("accepted_total", 0)),
+                        "rejected_total": int(selected_parent.get("rejected_total", 0)),
+                        "sampled_total": int(selected_parent.get("sampled_total", 0)),
+                    }
+                    if source_hash:
+                        try:
+                            population_memory = mark_population_entry_sampled(
+                                population_memory_path,
+                                population_memory,
+                                target_name=args.target,
+                                language=language_norm,
+                                source_hash=source_hash,
+                                timestamp=prepare.now_iso(),
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            diagnostics["population_parent_mark_failed"] = str(exc)
         timed_blocked = {name for name, until in blocked_mutations_until.items() if until >= iteration}
         operator_disabled: set[str] = set()
         operator_penalties: dict[str, float] = {}
@@ -4510,7 +4886,7 @@ def run_loop(args: argparse.Namespace) -> int:
             if success and require_metric_series_for_stats and metric_series is None:
                 success = False
                 missing_metric_series = True
-                source_path.write_text(current_source)
+                source_path.write_text(best_source)
                 diagnostics["metric_series_guard"] = {
                     "required": True,
                     "status": "missing",
@@ -4544,7 +4920,7 @@ def run_loop(args: argparse.Namespace) -> int:
 
             if success and rel_stdev is not None and max_rel_stdev_f is not None and rel_stdev > max_rel_stdev_f:
                 improved = False
-                source_path.write_text(current_source)
+                source_path.write_text(best_source)
                 notes = f"rejected_high_variance:{notes};rel_stdev={rel_stdev:.6f}"
 
             if (
@@ -4565,7 +4941,7 @@ def run_loop(args: argparse.Namespace) -> int:
                 diagnostics["distribution"] = dist_stats
                 if not dist_ok:
                     improved = False
-                    source_path.write_text(current_source)
+                    source_path.write_text(best_source)
                     notes = f"rejected_distribution_{dist_reason}:{notes}"
 
             best_before = best_metric
@@ -4615,6 +4991,7 @@ def run_loop(args: argparse.Namespace) -> int:
                             accepted += 1
                             blocked_mutations_until.clear()
                             best_metric = float(metric_value) if confirmed_metric is None else confirmed_metric
+                            best_source = candidate
                             if confirmed_metric is not None:
                                 metric_for_row = confirmed_metric
                             accepted_series = ab_details.get("candidate_values") if ab_details else None
@@ -4636,18 +5013,18 @@ def run_loop(args: argparse.Namespace) -> int:
                         else:
                             improved = False
                             validation_blocked = True
-                            source_path.write_text(current_source)
+                            source_path.write_text(best_source)
                             notes = f"rejected_validation_{validation_reason}:{notes};{confirm_reason};{ab_reason}"
                     else:
                         improved = False
-                        source_path.write_text(current_source)
+                        source_path.write_text(best_source)
                         notes = f"rejected_{ab_reason}:{notes};{confirm_reason}"
                 else:
                     improved = False
-                    source_path.write_text(current_source)
+                    source_path.write_text(best_source)
                     notes = f"rejected_{confirm_reason}:{notes}"
             else:
-                source_path.write_text(current_source)
+                source_path.write_text(best_source)
                 if notes.startswith("rejected_"):
                     pass
                 elif success:
@@ -4678,6 +5055,34 @@ def run_loop(args: argparse.Namespace) -> int:
                     metric_before=best_before if improved else None,
                     metric_after=best_metric if improved else None,
                 )
+
+            if (
+                population_memory is not None
+                and metric_for_row is not None
+                and should_record_population_candidate(accepted=improved, notes=notes)
+            ):
+                try:
+                    population_memory, population_entry = update_and_save_population_memory(
+                        population_memory_path,
+                        population_memory,
+                        target_name=args.target,
+                        language=language_norm,
+                        source_code=candidate,
+                        metric_value=float(metric_for_row),
+                        higher_is_better=bool(target["higher_is_better"]),
+                        accepted=improved,
+                        timestamp=prepare.now_iso(),
+                        notes=notes,
+                        max_entries=population_max_entries,
+                    )
+                    if population_entry is not None:
+                        diagnostics["population_recorded"] = {
+                            "source_sha256": str(population_entry.get("source_sha256", ""))[:12],
+                            "accepted_total": int(population_entry.get("accepted_total", 0)),
+                            "rejected_total": int(population_entry.get("rejected_total", 0)),
+                        }
+                except Exception as exc:  # noqa: BLE001
+                    diagnostics["population_record_failed"] = str(exc)
 
             if operator_stats is not None:
                 runtime_s = (
@@ -4805,7 +5210,7 @@ def run_loop(args: argparse.Namespace) -> int:
                 stop_reason = "max_accepted_reached"
                 break
         except BaseException:
-            source_path.write_text(current_source)
+            source_path.write_text(best_source)
             raise
 
     elapsed_seconds = time.perf_counter() - loop_wall_start
@@ -4851,6 +5256,15 @@ def run_loop(args: argparse.Namespace) -> int:
                 "max_iterations": max_iterations,
                 "max_accepted": args.max_accepted if args.max_accepted > 0 else None,
                 "max_runtime_seconds": args.max_runtime_seconds if args.max_runtime_seconds > 0 else None,
+            },
+            "population_memory": {
+                "enabled": population_memory is not None,
+                "path": str(population_memory_path),
+                "parent_sample_prob": population_parent_sample_prob,
+                "max_entries": population_max_entries,
+                "known_entries": len((population_memory or {}).get("entries", []))
+                if isinstance((population_memory or {}).get("entries"), list)
+                else 0,
             },
         }
     )
@@ -4909,6 +5323,10 @@ def run_loop(args: argparse.Namespace) -> int:
                 "git_checkpoint_prefix": git_checkpoint_prefix if git_checkpoint_mode != "off" else None,
                 "operator_stats_file": str(operator_stats_path) if operator_stats is not None else None,
                 "operator_stats_artifact": str(operator_artifact_path) if operator_artifact_path is not None else None,
+                "population_memory_file": str(population_memory_path) if population_memory is not None else None,
+                "population_entries": len((population_memory or {}).get("entries", []))
+                if isinstance((population_memory or {}).get("entries"), list)
+                else 0,
                 "validation_targets": validation_targets,
                 "validation_baselines": validation_baselines,
                 "elapsed_seconds": elapsed_seconds,
@@ -4980,6 +5398,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable mutation replay memory and use only per-run heuristics",
     )
     parser.add_argument(
+        "--population-memory-file",
+        default=str(DEFAULT_POPULATION_MEMORY_FILE),
+        help="Path to persisted source population memory for parent sampling",
+    )
+    parser.add_argument(
+        "--disable-population-memory",
+        action="store_true",
+        help="Disable population parent sampling and source archive updates",
+    )
+    parser.add_argument(
+        "--population-parent-sample-prob",
+        type=float,
+        default=DEFAULT_POPULATION_PARENT_SAMPLE_PROB,
+        help="Probability of mutating from a sampled population parent instead of current best source",
+    )
+    parser.add_argument(
+        "--population-max-entries",
+        type=int,
+        default=DEFAULT_POPULATION_MEMORY_MAX_ENTRIES,
+        help="Max source entries retained in population memory (0 keeps all)",
+    )
+    parser.add_argument(
         "--operator-stats-file",
         default=str(DEFAULT_MUTATOR_STATS_FILE),
         help="Path to persisted mutator leaderboard stats (reward/demotion/disable)",
@@ -5032,6 +5472,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--operator-demote-streak must be >= 0")
     if args.operator_disable_streak < 0:
         parser.error("--operator-disable-streak must be >= 0")
+    if args.population_parent_sample_prob < 0.0 or args.population_parent_sample_prob > 1.0:
+        parser.error("--population-parent-sample-prob must be between 0 and 1")
+    if args.population_max_entries < 0:
+        parser.error("--population-max-entries must be >= 0")
     return run_loop(args)
 
 

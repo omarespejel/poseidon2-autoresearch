@@ -92,6 +92,8 @@
       "operator_validation_block_penalty_step": 0.03,
       "operator_validation_block_penalty_max": 0.25,
       "operator_validation_block_disable_streak": 6,
+      "population_parent_sample_prob": 0.35,
+      "population_max_entries": 48,
       "validation_targets": [
         "poseidon2_cryptanalysis_trackb_kernel_signal_fast"
       ],
@@ -145,6 +147,8 @@
       "operator_validation_block_penalty_step": 0.03,
       "operator_validation_block_penalty_max": 0.25,
       "operator_validation_block_disable_streak": 6,
+      "population_parent_sample_prob": 0.35,
+      "population_max_entries": 48,
       "validation_targets": [
         "poseidon2_cryptanalysis_trackb_kernel_fast"
       ],
