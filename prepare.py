@@ -89,12 +89,21 @@ def parse_sandbox_prefix(value: Any) -> list[str]:
         raise ValueError(f"Invalid sandbox_prefix value {token!r}: {exc}") from exc
 
 
+def target_requires_sandbox_by_default(target: dict[str, Any]) -> bool:
+    return str(target.get("type", "")).strip().lower() == "command"
+
+
 def sandbox_settings_for_target(target: dict[str, Any]) -> tuple[list[str], bool]:
     if "sandbox_prefix" in target:
         prefix = parse_sandbox_prefix(target.get("sandbox_prefix"))
     else:
         prefix = parse_sandbox_prefix(os.getenv("AUTORESEARCH_SANDBOX_PREFIX", ""))
-    require = bool(target.get("require_sandbox", env_bool("AUTORESEARCH_REQUIRE_SANDBOX", False)))
+    require = bool(
+        target.get(
+            "require_sandbox",
+            env_bool("AUTORESEARCH_REQUIRE_SANDBOX", target_requires_sandbox_by_default(target)),
+        )
+    )
     return prefix, require
 
 
@@ -208,6 +217,211 @@ def append_provenance_event(event_type: str, payload: dict[str, Any]) -> None:
             )
             + "\n",
         )
+
+
+def verify_provenance_chain(
+    *,
+    provenance_file: Path | None = None,
+    state_file: Path | None = None,
+) -> dict[str, Any]:
+    provenance_file = provenance_file or PROVENANCE_FILE
+    state_file = state_file or PROVENANCE_STATE_FILE
+    records: list[dict[str, Any]] = []
+    if provenance_file.exists():
+        for line_no, line in enumerate(provenance_file.read_text(encoding="utf-8").splitlines(), start=1):
+            raw = line.strip()
+            if not raw:
+                continue
+            try:
+                record = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise ToolError(f"Malformed provenance record at {provenance_file}:{line_no}") from exc
+            if not isinstance(record, dict):
+                raise ToolError(f"Invalid provenance record at {provenance_file}:{line_no}")
+            records.append(record)
+
+    prev_hash: str | None = None
+    last_timestamp: str | None = None
+    for expected_seq, record in enumerate(records, start=1):
+        seq = int(record.get("seq", 0))
+        if seq != expected_seq:
+            raise ToolError(
+                f"Invalid provenance sequence at {provenance_file}: expected {expected_seq}, got {seq}"
+            )
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            raise ToolError(f"Invalid provenance payload at {provenance_file}: seq={seq}")
+        payload_hash = str(record.get("payload_hash", ""))
+        expected_payload_hash = sha256_text(stable_json(payload))
+        if payload_hash != expected_payload_hash:
+            raise ToolError(f"Invalid provenance payload hash at {provenance_file}: seq={seq}")
+        event_type = str(record.get("event_type", ""))
+        timestamp = str(record.get("timestamp", ""))
+        expected_node_hash = sha256_text(
+            stable_json(
+                {
+                    "seq": seq,
+                    "timestamp": timestamp,
+                    "event_type": event_type,
+                    "prev_hash": prev_hash,
+                    "payload_hash": expected_payload_hash,
+                }
+            )
+        )
+        node_hash = str(record.get("node_hash", ""))
+        if node_hash != expected_node_hash:
+            raise ToolError(f"Invalid provenance node hash at {provenance_file}: seq={seq}")
+        record_prev_hash = record.get("prev_hash")
+        if record_prev_hash != prev_hash:
+            raise ToolError(f"Invalid provenance prev_hash at {provenance_file}: seq={seq}")
+        prev_hash = node_hash
+        last_timestamp = timestamp
+
+    state: dict[str, Any] = {}
+    if state_file.exists():
+        try:
+            loaded = json.loads(state_file.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ToolError(f"Corrupt provenance state file: {state_file}") from exc
+        if not isinstance(loaded, dict):
+            raise ToolError(f"Invalid provenance state payload: {state_file}")
+        state = loaded
+
+    expected_seq = len(records)
+    expected_head = prev_hash
+    state_seq = int(state.get("seq", 0) or 0)
+    state_head = state.get("head")
+    if expected_seq == 0:
+        if state_seq or state_head:
+            raise ToolError("Provenance state is non-empty but provenance chain has no records")
+    else:
+        if state_seq != expected_seq:
+            raise ToolError(f"Provenance state seq mismatch: expected {expected_seq}, got {state_seq}")
+        if state_head != expected_head:
+            raise ToolError(f"Provenance state head mismatch: expected {expected_head}, got {state_head}")
+
+    return {
+        "ok": True,
+        "entries": expected_seq,
+        "head": expected_head,
+        "last_timestamp": last_timestamp,
+        "provenance_file": str(provenance_file),
+        "state_file": str(state_file),
+    }
+
+
+def sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def file_manifest_entry(path: Path) -> dict[str, Any]:
+    rel = path.relative_to(ROOT) if path.is_absolute() and ROOT in path.parents else path
+    entry: dict[str, Any] = {"path": str(rel)}
+    if not path.exists():
+        entry["exists"] = False
+        entry["kind"] = "missing"
+        return entry
+    if path.is_dir():
+        entry["exists"] = True
+        entry["kind"] = "directory"
+        return entry
+    entry["exists"] = True
+    entry["kind"] = "file"
+    entry["size"] = path.stat().st_size
+    entry["sha256"] = sha256_file(path)
+    return entry
+
+
+def expand_manifest_subjects(paths: list[Path]) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for path in paths:
+        candidate = path if path.is_absolute() else ROOT / path
+        if candidate.exists() and candidate.is_dir():
+            nested_files = sorted(item for item in candidate.rglob("*") if item.is_file())
+            if not nested_files:
+                key = f"dir:{candidate.resolve()}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                entries.append(file_manifest_entry(candidate))
+                continue
+            for nested in nested_files:
+                key = f"file:{nested.resolve()}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                entries.append(file_manifest_entry(nested))
+            continue
+        key = f"path:{candidate.resolve()}"
+        if key in seen:
+            continue
+        seen.add(key)
+        entries.append(file_manifest_entry(candidate))
+    return entries
+
+
+def git_metadata() -> dict[str, Any]:
+    if not (ROOT / ".git").exists():
+        return {"available": False}
+
+    def run_git(*args: str) -> str | None:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=str(ROOT),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            return None
+        return result.stdout.strip()
+
+    status_raw = run_git("status", "--porcelain")
+    return {
+        "available": True,
+        "head": run_git("rev-parse", "HEAD"),
+        "branch": run_git("branch", "--show-current"),
+        "dirty": bool(status_raw),
+        "status": status_raw.splitlines() if status_raw else [],
+    }
+
+
+def export_provenance_manifest(
+    *,
+    output_path: Path,
+    extra_paths: list[Path] | None = None,
+) -> dict[str, Any]:
+    verification = verify_provenance_chain()
+    subjects = expand_manifest_subjects(
+        [
+            RESULTS_FILE,
+            LOG_FILE,
+            PROVENANCE_FILE,
+            PROVENANCE_STATE_FILE,
+            ROOT / "report.md",
+            ROOT / "portfolio.md",
+            ROOT / "portfolio.json",
+            ROOT / "readiness_check.md",
+            ROOT / "evidence",
+            ROOT / "submission",
+            *(extra_paths or []),
+        ]
+    )
+    payload = {
+        "generated_at": now_iso(),
+        "repo": git_metadata(),
+        "provenance": verification,
+        "subjects": subjects,
+    }
+    atomic_write_text(output_path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    return {
+        "ok": True,
+        "output": str(output_path),
+        "subjects": len(subjects),
+        "head": verification.get("head"),
+        "entries": verification.get("entries"),
+    }
 
 
 def is_verbose(level: int = 1) -> bool:
@@ -1820,6 +2034,30 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_provenance_verify(_: argparse.Namespace) -> int:
+    try:
+        payload = verify_provenance_chain()
+    except ToolError as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}, indent=2, sort_keys=True))
+        return 1
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_provenance_export(args: argparse.Namespace) -> int:
+    output_path = Path(args.output)
+    if not output_path.is_absolute():
+        output_path = ROOT / output_path
+    extra_paths = [Path(item) for item in args.include]
+    try:
+        payload = export_provenance_manifest(output_path=output_path, extra_paths=extra_paths)
+    except ToolError as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}, indent=2, sort_keys=True))
+        return 1
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="AutoPoseidon prep and evaluation harness")
     parser.add_argument("-v", "--verbose", action="count", default=0, help="Increase stderr verbosity")
@@ -1867,6 +2105,26 @@ def build_parser() -> argparse.ArgumentParser:
     calibrate.add_argument("--record", action="store_true", help="Append each sample to results.tsv")
     calibrate.add_argument("--notes", default="calibration", help="Note prefix used when --record is enabled")
     calibrate.set_defaults(func=cmd_calibrate)
+
+    provenance_verify = sub.add_parser("provenance-verify", help="Verify the local provenance hash chain")
+    provenance_verify.set_defaults(func=cmd_provenance_verify)
+
+    provenance_export = sub.add_parser(
+        "provenance-export",
+        help="Export a verifiable manifest covering provenance state and key result artifacts",
+    )
+    provenance_export.add_argument(
+        "--output",
+        default="work/provenance_export.json",
+        help="Output path for the exported provenance manifest",
+    )
+    provenance_export.add_argument(
+        "--include",
+        action="append",
+        default=[],
+        help="Additional file or directory path to include in the manifest (repeatable)",
+    )
+    provenance_export.set_defaults(func=cmd_provenance_export)
 
     return parser
 

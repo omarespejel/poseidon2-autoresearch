@@ -1,0 +1,35 @@
+name: Provenance Attestation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+
+jobs:
+  export-and-attest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Export provenance manifest
+        run: python3 prepare.py provenance-export --output work/provenance_export.json
+
+      - name: Upload provenance manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: provenance-export
+          path: work/provenance_export.json
+
+      - name: Attest provenance manifest
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: work/provenance_export.json

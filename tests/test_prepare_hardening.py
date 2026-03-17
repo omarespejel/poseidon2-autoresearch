@@ -55,6 +55,16 @@ class PrepareHardeningTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             prepare.parse_sandbox_prefix("bwrap --ro-bind '/ /")
 
+    def test_command_targets_require_sandbox_by_default(self) -> None:
+        prefix, require = prepare.sandbox_settings_for_target({"type": "command"})
+        self.assertEqual(prefix, [])
+        self.assertTrue(require)
+
+    def test_non_command_targets_do_not_require_sandbox_by_default(self) -> None:
+        prefix, require = prepare.sandbox_settings_for_target({"type": "cairo"})
+        self.assertEqual(prefix, [])
+        self.assertFalse(require)
+
     def test_run_cmd_enforces_required_sandbox(self) -> None:
         with patch.dict(os.environ, {"AUTORESEARCH_REQUIRE_SANDBOX": "1", "AUTORESEARCH_SANDBOX_PREFIX": ""}, clear=False):
             result = prepare.run_cmd([sys.executable, "-c", "print('ok')"], prepare.ROOT)
@@ -156,6 +166,53 @@ class PrepareHardeningTests(unittest.TestCase):
             self.assertEqual(record["payload"]["row_tsv"], row_tsv)
             self.assertEqual(record["payload_hash"], prepare.sha256_text(prepare.stable_json(record["payload"])))
             self.assertEqual(record["node_hash"], node_hash_for(record))
+
+    def test_verify_provenance_chain_validates_state_and_head(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            provenance_file = root / "provenance_chain.jsonl"
+            state_file = root / "state.json"
+            with patch.object(prepare, "PROVENANCE_FILE", provenance_file), patch.object(
+                prepare,
+                "PROVENANCE_STATE_FILE",
+                state_file,
+            ):
+                prepare.append_provenance_event("event_a", {"value": 1})
+                prepare.append_provenance_event("event_b", {"value": 2})
+                payload = prepare.verify_provenance_chain()
+        self.assertEqual(payload["entries"], 2)
+        self.assertTrue(payload["head"])
+        self.assertEqual(payload["provenance_file"], str(provenance_file))
+
+    def test_export_provenance_manifest_captures_subject_hashes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            results_file = root / "results.tsv"
+            log_file = root / "agent_log.jsonl"
+            provenance_file = root / "provenance_chain.jsonl"
+            state_file = root / "state.json"
+            report_file = root / "report.md"
+            export_file = root / "work" / "manifest.json"
+            results_file.write_text("header\nrow\n", encoding="utf-8")
+            log_file.write_text('{"event":"x"}\n', encoding="utf-8")
+            report_file.write_text("# report\n", encoding="utf-8")
+            with patch.object(prepare, "ROOT", root), patch.object(
+                prepare, "RESULTS_FILE", results_file
+            ), patch.object(prepare, "LOG_FILE", log_file), patch.object(
+                prepare, "PROVENANCE_FILE", provenance_file
+            ), patch.object(
+                prepare, "PROVENANCE_STATE_FILE", state_file
+            ):
+                prepare.append_provenance_event("event_a", {"value": 1})
+                payload = prepare.export_provenance_manifest(output_path=export_file)
+
+            self.assertTrue(export_file.exists())
+            manifest = json.loads(export_file.read_text(encoding="utf-8"))
+            self.assertEqual(payload["output"], str(export_file))
+            self.assertEqual(manifest["provenance"]["entries"], 1)
+            subjects = {item["path"]: item for item in manifest["subjects"]}
+            self.assertEqual(subjects["results.tsv"]["sha256"], prepare.sha256_file(results_file))
+            self.assertEqual(subjects["agent_log.jsonl"]["sha256"], prepare.sha256_file(log_file))
 
 
 if __name__ == "__main__":
