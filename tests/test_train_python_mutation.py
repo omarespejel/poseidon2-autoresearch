@@ -130,6 +130,122 @@ class PythonMutationSelectionTests(unittest.TestCase):
         score = train.mutator_penalty_for_label("python_trackb_a+python_trackb_b", penalties)
         self.assertAlmostEqual(score, 0.11, places=6)
 
+    def test_validation_block_streak_adds_operator_penalty(self) -> None:
+        stats = {"version": 1, "targets": {}}
+        for _ in range(2):
+            train.update_operator_stats(
+                stats,
+                target_name="poseidon2_cryptanalysis_trackb_kernel_fast",
+                mutation="python_trackb_diff_multi_delta_prob_up",
+                language="python",
+                accepted=False,
+                reward=0.0,
+                runtime_s=1.0,
+                timestamp="2026-03-17T00:00:00+00:00",
+                reward_epsilon=1e-12,
+                demote_streak=10,
+                disable_streak=20,
+                validation_blocked=True,
+            )
+        _, penalties, rows = train.compute_operator_state(
+            stats,
+            target_name="poseidon2_cryptanalysis_trackb_kernel_fast",
+            language="python",
+            demote_streak=10,
+            disable_streak=20,
+            validation_block_penalty_base=0.04,
+            validation_block_penalty_step=0.02,
+            validation_block_penalty_max=0.25,
+            validation_block_disable_streak=0,
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["validation_blocked"], 2)
+        self.assertEqual(rows[0]["validation_block_streak"], 2)
+        self.assertAlmostEqual(
+            penalties["python_trackb_diff_multi_delta_prob_up"],
+            0.06,
+            places=6,
+        )
+
+    def test_validation_block_streak_resets_after_non_validation_reject(self) -> None:
+        stats = {"version": 1, "targets": {}}
+        train.update_operator_stats(
+            stats,
+            target_name="poseidon2_cryptanalysis_trackb_kernel_fast",
+            mutation="python_trackb_diff_multi_delta_prob_up",
+            language="python",
+            accepted=False,
+            reward=0.0,
+            runtime_s=1.0,
+            timestamp="2026-03-17T00:00:00+00:00",
+            reward_epsilon=1e-12,
+            demote_streak=50,
+            disable_streak=60,
+            validation_blocked=True,
+        )
+        train.update_operator_stats(
+            stats,
+            target_name="poseidon2_cryptanalysis_trackb_kernel_fast",
+            mutation="python_trackb_diff_multi_delta_prob_up",
+            language="python",
+            accepted=False,
+            reward=0.0,
+            runtime_s=1.0,
+            timestamp="2026-03-17T00:00:01+00:00",
+            reward_epsilon=1e-12,
+            demote_streak=50,
+            disable_streak=60,
+            validation_blocked=False,
+        )
+        _, penalties, rows = train.compute_operator_state(
+            stats,
+            target_name="poseidon2_cryptanalysis_trackb_kernel_fast",
+            language="python",
+            demote_streak=50,
+            disable_streak=60,
+            validation_block_penalty_base=0.04,
+            validation_block_penalty_step=0.02,
+            validation_block_penalty_max=0.25,
+            validation_block_disable_streak=0,
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["validation_blocked"], 1)
+        self.assertEqual(rows[0]["validation_block_streak"], 0)
+        self.assertNotIn("python_trackb_diff_multi_delta_prob_up", penalties)
+
+    def test_validation_block_disable_streak_auto_disables_operator(self) -> None:
+        stats = {"version": 1, "targets": {}}
+        for _ in range(3):
+            train.update_operator_stats(
+                stats,
+                target_name="poseidon2_cryptanalysis_trackb_kernel_fast",
+                mutation="python_trackb_diff_multi_delta_prob_up",
+                language="python",
+                accepted=False,
+                reward=0.0,
+                runtime_s=1.0,
+                timestamp="2026-03-17T00:00:00+00:00",
+                reward_epsilon=1e-12,
+                demote_streak=50,
+                disable_streak=60,
+                validation_blocked=True,
+            )
+        disabled, penalties, rows = train.compute_operator_state(
+            stats,
+            target_name="poseidon2_cryptanalysis_trackb_kernel_fast",
+            language="python",
+            demote_streak=50,
+            disable_streak=60,
+            validation_block_penalty_base=0.04,
+            validation_block_penalty_step=0.02,
+            validation_block_penalty_max=0.25,
+            validation_block_disable_streak=2,
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0]["validation_disabled"])
+        self.assertIn("python_trackb_diff_multi_delta_prob_up", disabled)
+        self.assertNotIn("python_trackb_diff_multi_delta_prob_up", penalties)
+
     def test_validation_metric_passes_allows_equal_for_higher(self) -> None:
         ok, details = train.validation_metric_passes(
             candidate_value=10.0,

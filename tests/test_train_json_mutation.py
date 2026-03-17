@@ -41,6 +41,18 @@ class JsonMutationSelectionTests(unittest.TestCase):
         self.assertNotEqual(candidate, source)
         self.assertEqual(mutation, "json_trackb_diff_candidates_down")
 
+    def test_operator_penalty_deprioritizes_first_candidate(self) -> None:
+        source = stable_trackb_source()
+        candidate, mutation, changed = train.json_heuristic_candidate(
+            source,
+            1,
+            TRACKB_PATH,
+            operator_penalties={"json_trackb_diff_candidates_up": 0.3},
+        )
+        self.assertTrue(changed)
+        self.assertNotEqual(candidate, source)
+        self.assertEqual(mutation, "json_trackb_diff_candidates_down")
+
     def test_ucb_schedule_prefers_known_successful_operator(self) -> None:
         source = stable_trackb_source()
         memory = {

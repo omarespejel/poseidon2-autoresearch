@@ -60,6 +60,10 @@ ALLOWED_TARGET_OVERRIDE_KEYS = {
     "operator_demote_streak",
     "operator_disable_streak",
     "operator_reward_epsilon",
+    "operator_validation_block_penalty_base",
+    "operator_validation_block_penalty_step",
+    "operator_validation_block_penalty_max",
+    "operator_validation_block_disable_streak",
     "validation_targets",
     "validation_allow_drop_abs",
     "validation_allow_drop_rel",
@@ -75,6 +79,10 @@ DEFAULT_MUTATOR_STATS_FILE = ROOT / "work" / "mutator_stats.json"
 DEFAULT_OPERATOR_REWARD_EPSILON = 1e-12
 DEFAULT_OPERATOR_DEMOTE_STREAK = 6
 DEFAULT_OPERATOR_DISABLE_STREAK = 12
+DEFAULT_OPERATOR_VALIDATION_BLOCK_PENALTY_BASE = 0.04
+DEFAULT_OPERATOR_VALIDATION_BLOCK_PENALTY_STEP = 0.02
+DEFAULT_OPERATOR_VALIDATION_BLOCK_PENALTY_MAX = 0.25
+DEFAULT_OPERATOR_VALIDATION_BLOCK_DISABLE_STREAK = 0
 
 
 def configure_debug_environment(args: argparse.Namespace) -> None:
@@ -1331,6 +1339,7 @@ def json_heuristic_candidate(
     target_config: dict[str, Any] | None = None,
     preferred_mutations: list[str] | None = None,
     mutation_memory: dict[str, Any] | None = None,
+    operator_penalties: dict[str, float] | None = None,
     target_name: str = "",
 ) -> tuple[str, str, bool]:
     path = str(source_path).replace("\\", "/").lower()
@@ -1548,7 +1557,7 @@ def json_heuristic_candidate(
             total_memory_observations = float(
                 scope_totals.get(history_scope, scope_totals.get("global", 0.0))
             )
-            candidate_entry["ucb_score"] = mutation_ucb_score(
+            base_score = mutation_ucb_score(
                 accepted=accepted_hist,
                 rejected=rejected_hist,
                 total_observations=total_memory_observations,
@@ -1557,6 +1566,8 @@ def json_heuristic_candidate(
                 schedule_tier=0,
                 attempt_count=int(candidate_entry["attempts"]),
             )
+            penalty = mutator_penalty_for_label(str(label), operator_penalties or {})
+            candidate_entry["ucb_score"] = base_score - penalty
         candidates.append(candidate_entry)
 
     if candidates:
@@ -1573,6 +1584,7 @@ def json_heuristic_candidate(
         else:
             candidates.sort(
                 key=lambda item: (
+                    mutator_penalty_for_label(str(item["mutation"]), operator_penalties or {}),
                     int(item["pref_class"]),
                     int(item["pref_rank"]),
                     int(item["attempts"]),
@@ -1622,6 +1634,7 @@ def rust_heuristic_candidate(
     target_config: dict[str, Any] | None = None,
     preferred_mutations: list[str] | None = None,
     mutation_memory: dict[str, Any] | None = None,
+    operator_penalties: dict[str, float] | None = None,
     target_name: str = "",
 ) -> tuple[str, str, bool]:
     path = str(source_path).replace("\\", "/").lower()
@@ -1814,7 +1827,7 @@ def rust_heuristic_candidate(
                 total_memory_observations = float(
                     scope_totals.get(history_scope, scope_totals.get("global", 0.0))
                 )
-                item["ucb_score"] = mutation_ucb_score(
+                base_score = mutation_ucb_score(
                     accepted=accepted_hist,
                     rejected=rejected_hist,
                     total_observations=total_memory_observations,
@@ -1823,6 +1836,8 @@ def rust_heuristic_candidate(
                     schedule_tier=int(item["tier"]),
                     attempt_count=int(item["attempts"]),
                 )
+                penalty = mutator_penalty_for_label(str(item["mutation"]), operator_penalties or {})
+                item["ucb_score"] = base_score - penalty
             candidates.sort(
                 key=lambda item: (
                     -float(item.get("ucb_score", 0.0)),
@@ -1835,6 +1850,7 @@ def rust_heuristic_candidate(
         else:
             candidates.sort(
                 key=lambda item: (
+                    mutator_penalty_for_label(str(item["mutation"]), operator_penalties or {}),
                     int(item["tier"]),
                     int(item["pref_class"]),
                     int(item["pref_rank"]),
@@ -1870,6 +1886,7 @@ def heuristic_candidate(
             target_config=target_config,
             preferred_mutations=preferred_mutations,
             mutation_memory=mutation_memory,
+            operator_penalties=operator_penalties,
             target_name=target_name,
         )
         if changed:
@@ -1884,6 +1901,7 @@ def heuristic_candidate(
             target_config=target_config,
             preferred_mutations=preferred_mutations,
             mutation_memory=mutation_memory,
+            operator_penalties=operator_penalties,
             target_name=target_name,
         )
         if changed:
@@ -2520,6 +2538,7 @@ def update_and_save_operator_stats(
     reward_epsilon: float,
     demote_streak: int,
     disable_streak: int,
+    validation_blocked: bool = False,
 ) -> dict[str, Any]:
     lock_path = path.with_suffix(path.suffix + ".lock")
     with file_lock(lock_path):
@@ -2536,6 +2555,7 @@ def update_and_save_operator_stats(
             reward_epsilon=reward_epsilon,
             demote_streak=demote_streak,
             disable_streak=disable_streak,
+            validation_blocked=validation_blocked,
         )
         save_mutator_stats(path, latest)
 
@@ -2819,6 +2839,10 @@ def compute_operator_state(
     language: str,
     demote_streak: int,
     disable_streak: int,
+    validation_block_penalty_base: float = DEFAULT_OPERATOR_VALIDATION_BLOCK_PENALTY_BASE,
+    validation_block_penalty_step: float = DEFAULT_OPERATOR_VALIDATION_BLOCK_PENALTY_STEP,
+    validation_block_penalty_max: float = DEFAULT_OPERATOR_VALIDATION_BLOCK_PENALTY_MAX,
+    validation_block_disable_streak: int = DEFAULT_OPERATOR_VALIDATION_BLOCK_DISABLE_STREAK,
 ) -> tuple[set[str], dict[str, float], list[dict[str, Any]]]:
     entries = mutator_stats_target_entries(stats, target_name=target_name)
     candidate_rows: list[dict[str, Any]] = []
@@ -2832,18 +2856,27 @@ def compute_operator_state(
         accepted = int(raw.get("accepted", 0))
         rejected = int(raw.get("rejected", 0))
         no_signal_streak = int(raw.get("no_signal_streak", 0))
+        validation_blocked = int(raw.get("validation_blocked", 0))
+        validation_block_streak = int(raw.get("validation_block_streak", 0))
         reward_sum = float(raw.get("reward_sum", 0.0))
         avg_reward = reward_sum / max(1, attempts)
+        no_signal_disabled = disable_streak > 0 and no_signal_streak >= disable_streak
+        validation_disabled = (
+            validation_block_disable_streak > 0 and validation_block_streak >= validation_block_disable_streak
+        )
         row = {
             "label": label,
             "attempts": attempts,
             "accepted": accepted,
             "rejected": rejected,
             "no_signal_streak": no_signal_streak,
+            "validation_blocked": validation_blocked,
+            "validation_block_streak": validation_block_streak,
             "avg_reward": avg_reward,
             "last_reward": float(raw.get("last_reward", 0.0)),
-            "disabled": disable_streak > 0 and no_signal_streak >= disable_streak,
+            "disabled": no_signal_disabled or validation_disabled,
             "demoted": demote_streak > 0 and no_signal_streak >= demote_streak,
+            "validation_disabled": validation_disabled,
         }
         candidate_rows.append(row)
 
@@ -2860,9 +2893,20 @@ def compute_operator_state(
         label = str(row["label"])
         if label in disabled:
             continue
+        penalty_value = 0.0
         if bool(row["demoted"]):
             streak = max(0, int(row["no_signal_streak"]) - max(0, demote_streak))
-            penalties[label] = min(0.20, 0.05 + (0.01 * streak))
+            penalty_value += min(0.20, 0.05 + (0.01 * streak))
+        block_streak = max(0, int(row.get("validation_block_streak", 0)))
+        if block_streak > 0 and validation_block_penalty_max > 0.0:
+            validation_penalty = min(
+                max(0.0, validation_block_penalty_max),
+                max(0.0, validation_block_penalty_base)
+                + (max(0.0, validation_block_penalty_step) * max(0, block_streak - 1)),
+            )
+            penalty_value += validation_penalty
+        if penalty_value > 0.0:
+            penalties[label] = min(0.45, penalty_value)
 
     candidate_rows.sort(key=lambda row: (float(row["avg_reward"]), -int(row["attempts"]), str(row["label"])), reverse=True)
     return disabled, penalties, candidate_rows
@@ -2881,6 +2925,7 @@ def update_operator_stats(
     reward_epsilon: float,
     demote_streak: int,
     disable_streak: int,
+    validation_blocked: bool = False,
 ) -> dict[str, Any]:
     entries = mutator_stats_target_entries(stats, target_name=target_name)
     entry = entries.setdefault(
@@ -2890,6 +2935,8 @@ def update_operator_stats(
             "accepted": 0,
             "rejected": 0,
             "no_signal_streak": 0,
+            "validation_blocked": 0,
+            "validation_block_streak": 0,
             "reward_sum": 0.0,
             "best_reward": 0.0,
             "last_reward": 0.0,
@@ -2906,6 +2953,8 @@ def update_operator_stats(
             "accepted": 0,
             "rejected": 0,
             "no_signal_streak": 0,
+            "validation_blocked": 0,
+            "validation_block_streak": 0,
             "reward_sum": 0.0,
             "best_reward": 0.0,
             "last_reward": 0.0,
@@ -2934,6 +2983,11 @@ def update_operator_stats(
         entry["no_signal_streak"] = 0
     else:
         entry["no_signal_streak"] = int(entry.get("no_signal_streak", 0)) + 1
+    if validation_blocked:
+        entry["validation_blocked"] = int(entry.get("validation_blocked", 0)) + 1
+        entry["validation_block_streak"] = int(entry.get("validation_block_streak", 0)) + 1
+    else:
+        entry["validation_block_streak"] = 0
     streak = int(entry.get("no_signal_streak", 0))
     entry["demoted"] = bool(demote_streak > 0 and streak >= demote_streak)
     entry["disabled"] = bool(disable_streak > 0 and streak >= disable_streak)
@@ -2961,6 +3015,10 @@ def save_operator_stats_artifact(
     reward_epsilon: float,
     demote_streak: int,
     disable_streak: int,
+    validation_block_penalty_base: float,
+    validation_block_penalty_step: float,
+    validation_block_penalty_max: float,
+    validation_block_disable_streak: int,
     rows: list[dict[str, Any]],
 ) -> Path:
     run_root = ARTIFACTS_DIR / target_name / run_label
@@ -2975,6 +3033,10 @@ def save_operator_stats_artifact(
         "reward_epsilon": reward_epsilon,
         "demote_streak": demote_streak,
         "disable_streak": disable_streak,
+        "validation_block_penalty_base": validation_block_penalty_base,
+        "validation_block_penalty_step": validation_block_penalty_step,
+        "validation_block_penalty_max": validation_block_penalty_max,
+        "validation_block_disable_streak": validation_block_disable_streak,
         "mutations": rows,
     }
     out_path.write_text(json.dumps(payload, indent=2, sort_keys=True))
@@ -3863,6 +3925,42 @@ def run_loop(args: argparse.Namespace) -> int:
     operator_reward_epsilon = max(0.0, float(target.get("operator_reward_epsilon", args.operator_reward_epsilon)))
     operator_demote_streak = max(0, int(target.get("operator_demote_streak", args.operator_demote_streak)))
     operator_disable_streak = max(0, int(target.get("operator_disable_streak", args.operator_disable_streak)))
+    operator_validation_block_penalty_base = max(
+        0.0,
+        float(
+            target.get(
+                "operator_validation_block_penalty_base",
+                DEFAULT_OPERATOR_VALIDATION_BLOCK_PENALTY_BASE,
+            )
+        ),
+    )
+    operator_validation_block_penalty_step = max(
+        0.0,
+        float(
+            target.get(
+                "operator_validation_block_penalty_step",
+                DEFAULT_OPERATOR_VALIDATION_BLOCK_PENALTY_STEP,
+            )
+        ),
+    )
+    operator_validation_block_penalty_max = max(
+        0.0,
+        float(
+            target.get(
+                "operator_validation_block_penalty_max",
+                DEFAULT_OPERATOR_VALIDATION_BLOCK_PENALTY_MAX,
+            )
+        ),
+    )
+    operator_validation_block_disable_streak = max(
+        0,
+        int(
+            target.get(
+                "operator_validation_block_disable_streak",
+                DEFAULT_OPERATOR_VALIDATION_BLOCK_DISABLE_STREAK,
+            )
+        ),
+    )
     if operator_stats_enabled:
         lock_path = operator_stats_path.with_suffix(operator_stats_path.suffix + ".lock")
         try:
@@ -4022,6 +4120,10 @@ def run_loop(args: argparse.Namespace) -> int:
                 "reward_epsilon": operator_reward_epsilon,
                 "demote_streak": operator_demote_streak,
                 "disable_streak": operator_disable_streak,
+                "validation_block_penalty_base": operator_validation_block_penalty_base,
+                "validation_block_penalty_step": operator_validation_block_penalty_step,
+                "validation_block_penalty_max": operator_validation_block_penalty_max,
+                "validation_block_disable_streak": operator_validation_block_disable_streak,
             },
             "compute_budget": {
                 "max_iterations": max_iterations,
@@ -4110,6 +4212,10 @@ def run_loop(args: argparse.Namespace) -> int:
                 language=language_norm,
                 demote_streak=operator_demote_streak,
                 disable_streak=operator_disable_streak,
+                validation_block_penalty_base=operator_validation_block_penalty_base,
+                validation_block_penalty_step=operator_validation_block_penalty_step,
+                validation_block_penalty_max=operator_validation_block_penalty_max,
+                validation_block_disable_streak=operator_validation_block_disable_streak,
             )
             if operator_rows:
                 diagnostics["operator_leaderboard_top"] = [
@@ -4118,6 +4224,8 @@ def run_loop(args: argparse.Namespace) -> int:
                         "avg_reward": round(float(row["avg_reward"]), 8),
                         "attempts": int(row["attempts"]),
                         "streak": int(row["no_signal_streak"]),
+                        "validation_block_streak": int(row.get("validation_block_streak", 0)),
+                        "validation_blocks": int(row.get("validation_blocked", 0)),
                         "disabled": bool(row["disabled"]),
                     }
                     for row in operator_rows[:5]
@@ -4125,7 +4233,7 @@ def run_loop(args: argparse.Namespace) -> int:
             if operator_disabled:
                 diagnostics["auto_disabled_mutations"] = sorted(operator_disabled)
             if operator_penalties:
-                diagnostics["demoted_mutation_penalties"] = {
+                diagnostics["operator_penalties"] = {
                     key: round(float(value), 6) for key, value in list(operator_penalties.items())[:12]
                 }
         active_blocked = set(timed_blocked) | set(operator_disabled)
@@ -4432,6 +4540,7 @@ def run_loop(args: argparse.Namespace) -> int:
                 notes = f"{notes};diag={diagnostics.get('reason', 'n/a')}"
             if missing_metric_series:
                 notes = f"rejected_missing_metric_series:{notes}"
+            validation_blocked = False
 
             if success and rel_stdev is not None and max_rel_stdev_f is not None and rel_stdev > max_rel_stdev_f:
                 improved = False
@@ -4526,6 +4635,7 @@ def run_loop(args: argparse.Namespace) -> int:
                             notes = f"accepted:{notes};{confirm_reason};{ab_reason};validation={validation_reason}"
                         else:
                             improved = False
+                            validation_blocked = True
                             source_path.write_text(current_source)
                             notes = f"rejected_validation_{validation_reason}:{notes};{confirm_reason};{ab_reason}"
                     else:
@@ -4595,10 +4705,12 @@ def run_loop(args: argparse.Namespace) -> int:
                     reward_epsilon=operator_reward_epsilon,
                     demote_streak=operator_demote_streak,
                     disable_streak=operator_disable_streak,
+                    validation_blocked=validation_blocked,
                 )
                 diagnostics["operator_reward"] = {
                     "reward": reward,
                     "runtime_s": runtime_s,
+                    "validation_blocked": validation_blocked,
                 }
 
             should_write_artifact = args.artifacts == "all" or (args.artifacts == "accepted" and improved)
@@ -4751,6 +4863,10 @@ def run_loop(args: argparse.Namespace) -> int:
             language=language_norm,
             demote_streak=operator_demote_streak,
             disable_streak=operator_disable_streak,
+            validation_block_penalty_base=operator_validation_block_penalty_base,
+            validation_block_penalty_step=operator_validation_block_penalty_step,
+            validation_block_penalty_max=operator_validation_block_penalty_max,
+            validation_block_disable_streak=operator_validation_block_disable_streak,
         )
         operator_artifact_path = save_operator_stats_artifact(
             target_name=args.target,
@@ -4760,6 +4876,10 @@ def run_loop(args: argparse.Namespace) -> int:
             reward_epsilon=operator_reward_epsilon,
             demote_streak=operator_demote_streak,
             disable_streak=operator_disable_streak,
+            validation_block_penalty_base=operator_validation_block_penalty_base,
+            validation_block_penalty_step=operator_validation_block_penalty_step,
+            validation_block_penalty_max=operator_validation_block_penalty_max,
+            validation_block_disable_streak=operator_validation_block_disable_streak,
             rows=operator_rows,
         )
         prepare.append_log(
