@@ -20,7 +20,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import readiness_check
 
@@ -161,7 +161,7 @@ def must_run(argv: list[str], *, label: str, stream_stderr: bool = False) -> Run
     return result
 
 
-def fail_json_contract(*, label: str, reason: str, stdout: str) -> None:
+def fail_json_contract(*, label: str, reason: str, stdout: str) -> NoReturn:
     tail = stdout[-2000:] if stdout else ""
     sys.stderr.write(f"Invalid JSON payload [{label}]: {reason}\n")
     if tail:
