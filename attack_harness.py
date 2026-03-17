@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib
 import itertools
 import json
 import math
@@ -19,9 +20,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import attack_kernels
-
 ROOT = Path(__file__).resolve().parent
+DEFAULT_KERNEL_MODULE = "attack_kernels_immutable"
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -1017,6 +1017,11 @@ def load_config(path: Path) -> dict[str, Any]:
     return payload
 
 
+def load_kernel_module(module_name: str):
+    selected = module_name.strip() or DEFAULT_KERNEL_MODULE
+    return importlib.import_module(selected)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run deterministic reduced-round Poseidon2 cryptanalysis harness")
     parser.add_argument("--config", default="config/track_b_attack_config.json", help="Path to Track B config JSON")
@@ -1024,6 +1029,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--profile",
         default="",
         help="Optional challenge profile key from config.challenge_profiles",
+    )
+    parser.add_argument(
+        "--kernel-module",
+        default=DEFAULT_KERNEL_MODULE,
+        help="Python module providing attack kernels for evaluation",
     )
     parser.add_argument("--mode", choices=["fast", "full"], default="fast", help="Search budget mode")
     parser.add_argument("--output-format", choices=["json", "pretty"], default="json", help="Output encoding")
@@ -1038,6 +1048,7 @@ def main(argv: list[str] | None = None) -> int:
         config_path = ROOT / config_path
     config_raw = load_config(config_path)
     config, selected_profile = resolve_profile_config(config_raw, args.profile)
+    kernels = load_kernel_module(args.kernel_module)
 
     spec = build_spec(config, mode=args.mode)
     search = parse_search(config, mode=args.mode)
@@ -1049,7 +1060,7 @@ def main(argv: list[str] | None = None) -> int:
         seed = int.from_bytes(hashlib.sha256(material).digest()[:8], "big")
         return random.Random(seed)  # noqa: S311 - deterministic benchmarking harness, not crypto RNG.
 
-    differential = attack_kernels.differential_kernel(
+    differential = kernels.differential_kernel(
         spec=spec,
         analysis=analysis,
         search=search,
@@ -1057,7 +1068,7 @@ def main(argv: list[str] | None = None) -> int:
         random_state_fn=random_state,
         poseidon2_permute_fn=poseidon2_permute,
     )
-    mitm_preimage = attack_kernels.mitm_truncated_preimage_kernel(
+    mitm_preimage = kernels.mitm_truncated_preimage_kernel(
         spec=spec,
         analysis=analysis,
         search=search,
@@ -1067,7 +1078,7 @@ def main(argv: list[str] | None = None) -> int:
         poseidon2_prefix_fn=poseidon2_prefix,
         poseidon2_invert_to_prefix_fn=poseidon2_invert_to_prefix,
     )
-    collision = attack_kernels.birthday_collision_kernel(
+    collision = kernels.birthday_collision_kernel(
         spec=spec,
         analysis=analysis,
         search=search,
@@ -1075,7 +1086,7 @@ def main(argv: list[str] | None = None) -> int:
         random_state_fn=random_state,
         poseidon2_permute_fn=poseidon2_permute,
     )
-    algebraic = attack_kernels.algebraic_elimination_kernel(
+    algebraic = kernels.algebraic_elimination_kernel(
         spec=spec,
         analysis=analysis,
         search=search,
@@ -1084,7 +1095,7 @@ def main(argv: list[str] | None = None) -> int:
         poseidon2_prefix_fn=poseidon2_prefix,
         clamp_int_fn=clamp_int,
     )
-    metrics = attack_kernels.score(
+    metrics = kernels.score(
         config=config,
         search=search,
         differential=differential,
@@ -1100,6 +1111,7 @@ def main(argv: list[str] | None = None) -> int:
         "mode": args.mode,
         "config_path": str(config_path),
         "challenge_profile": selected_profile,
+        "kernel_module": getattr(kernels, "__name__", args.kernel_module),
         "spec": {
             "field_modulus": spec.modulus,
             "width": spec.width,
@@ -1140,6 +1152,7 @@ def main(argv: list[str] | None = None) -> int:
         "repro": {
             "command": (
                 f"python3 attack_harness.py --config {config_path} "
+                f"{f'--kernel-module {getattr(kernels, '__name__', args.kernel_module)} ' if getattr(kernels, '__name__', '') else ''}"
                 f"{f'--profile {selected_profile} ' if selected_profile else ''}"
                 f"--mode {args.mode} --output-format json"
             )

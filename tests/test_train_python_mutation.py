@@ -109,6 +109,13 @@ class PythonMutationSelectionTests(unittest.TestCase):
         )
         self.assertEqual(refs, ["attack_kernels.py"])
 
+    def test_benchmark_self_reference_detection_ignores_flag_value_path(self) -> None:
+        refs = train.benchmark_references_source_file(
+            target_config={"benchmark_command": ["python3", "runner.py", "--output", "attack_kernels.py"]},
+            source_file="attack_kernels.py",
+        )
+        self.assertEqual(refs, [])
+
     def test_executable_source_detection_distinguishes_json(self) -> None:
         self.assertTrue(train.source_file_is_executable_code("attack_kernels.py"))
         self.assertFalse(train.source_file_is_executable_code("config/track_b_attack_config.json"))

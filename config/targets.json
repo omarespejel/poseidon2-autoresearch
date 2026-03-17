@@ -113,6 +113,8 @@
       "benchmark_command": [
         "python3",
         "attack_harness.py",
+        "--kernel-module",
+        "attack_kernels",
         "--config",
         "config/track_b_attack_config.json",
         "--profile",
@@ -173,6 +175,8 @@
       "benchmark_command": [
         "python3",
         "attack_harness.py",
+        "--kernel-module",
+        "attack_kernels",
         "--config",
         "config/track_b_attack_config.json",
         "--profile",

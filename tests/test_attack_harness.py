@@ -101,6 +101,10 @@ class AttackHarnessTests(unittest.TestCase):
         self.assertGreater(full_search["differential_candidates"], fast_search["differential_candidates"])
         self.assertGreater(full_search["collision_samples"], fast_search["collision_samples"])
 
+    def test_load_kernel_module_defaults_to_immutable_copy(self) -> None:
+        module = attack_harness.load_kernel_module("")
+        self.assertEqual(module.__name__, "attack_kernels_immutable")
+
     def test_kernels_are_deterministic_with_fixed_seed(self) -> None:
         cfg = tiny_config()
         spec = attack_harness.build_spec(cfg, mode="fast")

@@ -3925,18 +3925,25 @@ def benchmark_references_source_file(*, target_config: dict[str, Any], source_fi
 
     refs: list[str] = []
     for command in iter_target_benchmark_commands(target_config):
-        for raw_token in command:
+        for idx, raw_token in enumerate(command):
             token = str(raw_token).strip()
             if not token:
+                continue
+            previous_token = str(command[idx - 1]).strip() if idx > 0 else ""
+            if previous_token.startswith("-"):
                 continue
             normalized = token.replace("\\", "/").lower().lstrip("./")
             if not normalized:
                 continue
             token_name = Path(normalized).name
+            bare_name_match = (
+                token_name == source_name
+                and "/" not in normalized
+            )
             if (
                 normalized == source_norm
                 or normalized.endswith("/" + source_norm)
-                or token_name == source_name
+                or bare_name_match
             ):
                 refs.append(token)
 
