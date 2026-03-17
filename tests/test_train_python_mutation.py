@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -1137,6 +1138,80 @@ def helper():
                 }
             )
         )
+
+    def test_extract_source_from_llm_response_unwraps_fenced_block(self) -> None:
+        content = "Here is the patch:\n```python\ndef score():\n    return 1\n```\n"
+        self.assertEqual(train.extract_source_from_llm_response(content), "def score():\n    return 1")
+
+    def test_request_codex_candidate_reports_missing_binary(self) -> None:
+        with patch.object(train.shutil, "which", return_value=None):
+            candidate, diagnostics = train.request_codex_candidate(
+                model="gpt-5-codex",
+                system_prompt="system",
+                user_prompt="user",
+                reasoning_effort="high",
+                working_root=ROOT,
+            )
+        self.assertIsNone(candidate)
+        self.assertEqual(diagnostics["reason"], "codex_cli_not_found")
+        self.assertEqual(diagnostics["backend"], "codex")
+
+    def test_request_codex_candidate_reads_last_message_file(self) -> None:
+        def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            output_flag_index = cmd.index("--output-last-message")
+            output_path = Path(cmd[output_flag_index + 1])
+            output_path.write_text("```python\ndef score():\n    return 1\n```\n", encoding="utf-8")
+            self.assertIn("--sandbox", cmd)
+            self.assertIn("read-only", cmd)
+            self.assertEqual(kwargs["cwd"], ROOT)
+            return subprocess.CompletedProcess(cmd, 0, stdout='{"event":"done"}\n', stderr="")
+
+        with patch.object(train.shutil, "which", return_value="/usr/bin/codex"):
+            with patch("train.subprocess.run", side_effect=fake_run):
+                candidate, diagnostics = train.request_codex_candidate(
+                    model="gpt-5-codex",
+                    system_prompt="system",
+                    user_prompt="user",
+                    reasoning_effort="high",
+                    working_root=ROOT,
+                )
+
+        self.assertEqual(candidate, "def score():\n    return 1")
+        self.assertEqual(diagnostics["reason"], "ok")
+        self.assertEqual(diagnostics["backend"], "codex")
+        self.assertEqual(diagnostics["model"], "gpt-5-codex")
+        self.assertEqual(diagnostics["reasoning_effort"], "high")
+
+    def test_request_codex_candidate_reports_subprocess_failure(self) -> None:
+        failed = subprocess.CompletedProcess(
+            ["/usr/bin/codex", "exec"],
+            2,
+            stdout="",
+            stderr="login required",
+        )
+        with patch.object(train.shutil, "which", return_value="/usr/bin/codex"):
+            with patch("train.subprocess.run", return_value=failed):
+                candidate, diagnostics = train.request_codex_candidate(
+                    model="gpt-5-codex",
+                    system_prompt="system",
+                    user_prompt="user",
+                    reasoning_effort="high",
+                    working_root=ROOT,
+                )
+
+        self.assertIsNone(candidate)
+        self.assertEqual(diagnostics["reason"], "codex_exec_failed:2")
+        self.assertEqual(diagnostics["stderr"], "login required")
+
+    def test_resolve_llm_backend_auto_preserves_heuristic_default(self) -> None:
+        with patch.dict(train.os.environ, {}, clear=True):
+            backend = train.resolve_llm_backend(type("Args", (), {"llm_backend": "auto"})())
+        self.assertEqual(backend, "heuristic")
+
+    def test_resolve_llm_backend_auto_prefers_openai_when_key_present(self) -> None:
+        with patch.dict(train.os.environ, {"OPENAI_API_KEY": "test-key"}, clear=True):
+            backend = train.resolve_llm_backend(type("Args", (), {"llm_backend": "auto"})())
+        self.assertEqual(backend, "openai")
 
 
 if __name__ == "__main__":
