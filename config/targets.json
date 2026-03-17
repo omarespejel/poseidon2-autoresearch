@@ -89,6 +89,10 @@
       "compound_second_window": 10,
       "operator_demote_streak": 5,
       "operator_disable_streak": 10,
+      "operator_validation_block_penalty_base": 0.05,
+      "operator_validation_block_penalty_step": 0.03,
+      "operator_validation_block_penalty_max": 0.25,
+      "operator_validation_block_disable_streak": 6,
       "validation_targets": [
         "poseidon2_cryptanalysis_trackb_kernel_signal_fast"
       ],
@@ -139,6 +143,10 @@
       "compound_second_window": 10,
       "operator_demote_streak": 5,
       "operator_disable_streak": 10,
+      "operator_validation_block_penalty_base": 0.05,
+      "operator_validation_block_penalty_step": 0.03,
+      "operator_validation_block_penalty_max": 0.25,
+      "operator_validation_block_disable_streak": 6,
       "validation_targets": [
         "poseidon2_cryptanalysis_trackb_kernel_fast"
       ],
