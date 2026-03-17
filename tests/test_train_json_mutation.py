@@ -9,10 +9,15 @@ import train
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT / "config" / "track_b_attack_config.json"
-TRACKB_PATH = ROOT / "config" / "track_b_attack_config.json"
+TRACKB_MUTABLE_PATH = ROOT / "config" / "track_b_mutable_fast.json"
 
 
 def stable_trackb_source() -> str:
+    payload = json.loads(TRACKB_MUTABLE_PATH.read_text(encoding="utf-8"))
+    return json.dumps(payload, indent=2, sort_keys=True) + "\n"
+
+
+def stable_trackb_base_source() -> str:
     payload = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     return json.dumps(payload, indent=2, sort_keys=True) + "\n"
 
@@ -23,7 +28,7 @@ class JsonMutationSelectionTests(unittest.TestCase):
         candidate, mutation, changed = train.json_heuristic_candidate(
             source,
             1,
-            TRACKB_PATH,
+            TRACKB_MUTABLE_PATH,
         )
         self.assertTrue(changed)
         self.assertNotEqual(candidate, source)
@@ -34,7 +39,7 @@ class JsonMutationSelectionTests(unittest.TestCase):
         candidate, mutation, changed = train.json_heuristic_candidate(
             source,
             1,
-            TRACKB_PATH,
+            TRACKB_MUTABLE_PATH,
             blocked_mutations={"json_trackb_diff_candidates_up"},
         )
         self.assertTrue(changed)
@@ -46,7 +51,7 @@ class JsonMutationSelectionTests(unittest.TestCase):
         candidate, mutation, changed = train.json_heuristic_candidate(
             source,
             1,
-            TRACKB_PATH,
+            TRACKB_MUTABLE_PATH,
             operator_penalties={"json_trackb_diff_candidates_up": 0.3},
         )
         self.assertTrue(changed)
@@ -85,7 +90,7 @@ class JsonMutationSelectionTests(unittest.TestCase):
         candidate, mutation, changed = train.json_heuristic_candidate(
             source,
             1,
-            TRACKB_PATH,
+            TRACKB_MUTABLE_PATH,
             target_config={"mutation_schedule": "ucb", "mutation_ucb_explore": 0.0},
             mutation_memory=memory,
             target_name="poseidon2_cryptanalysis_trackb_fast",
@@ -126,28 +131,28 @@ class TrackBObjectiveGuardTests(unittest.TestCase):
         self.assertFalse(train.parse_flag_bool(0.0, default=True))
 
     def test_guard_allows_search_only_change(self) -> None:
-        source = stable_trackb_source()
+        source = stable_trackb_base_source()
         payload = json.loads(source)
         payload["search"]["differential_candidates"] = int(payload["search"]["differential_candidates"]) + 8
         candidate = json.dumps(payload, indent=2, sort_keys=True) + "\n"
         ok, details = train.trackb_objective_guard(
             current_source=source,
             candidate_source=candidate,
-            source_path=TRACKB_PATH,
+            source_path=CONFIG_PATH,
             target_config={},
         )
         self.assertTrue(ok)
         self.assertEqual(details.get("status"), "ok")
 
     def test_guard_rejects_objective_change(self) -> None:
-        source = stable_trackb_source()
+        source = stable_trackb_base_source()
         payload = json.loads(source)
         payload["objective"]["weight_algebraic"] = round(float(payload["objective"]["weight_algebraic"]) + 0.05, 6)
         candidate = json.dumps(payload, indent=2, sort_keys=True) + "\n"
         ok, details = train.trackb_objective_guard(
             current_source=source,
             candidate_source=candidate,
-            source_path=TRACKB_PATH,
+            source_path=CONFIG_PATH,
             target_config={},
         )
         self.assertFalse(ok)
@@ -156,7 +161,7 @@ class TrackBObjectiveGuardTests(unittest.TestCase):
         self.assertNotIn("resolved_objective", details.get("paths", []))
 
     def test_guard_rejects_nested_profile_objective_change(self) -> None:
-        source = stable_trackb_source()
+        source = stable_trackb_base_source()
         payload = json.loads(source)
         profiles = payload.setdefault("challenge_profiles", {})
         profiles["guard_a"] = {"objective": {"weight_algebraic": 0.15}}
@@ -169,14 +174,15 @@ class TrackBObjectiveGuardTests(unittest.TestCase):
         ok, details = train.trackb_objective_guard(
             current_source=source,
             candidate_source=candidate,
-            source_path=TRACKB_PATH,
+            source_path=CONFIG_PATH,
             target_config={},
         )
         self.assertFalse(ok)
         self.assertEqual(details.get("status"), "objective_modified")
         self.assertIn("resolved_objective", details.get("paths", []))
+
     def test_guard_does_not_duplicate_active_profile_objective_change(self) -> None:
-        source = stable_trackb_source()
+        source = stable_trackb_base_source()
         payload = json.loads(source)
         profiles = payload.setdefault("challenge_profiles", {})
         profiles["guard_active"] = {"objective": {"weight_algebraic": 0.15}}
@@ -188,7 +194,7 @@ class TrackBObjectiveGuardTests(unittest.TestCase):
         ok, details = train.trackb_objective_guard(
             current_source=source,
             candidate_source=candidate,
-            source_path=TRACKB_PATH,
+            source_path=CONFIG_PATH,
             target_config={},
         )
         self.assertFalse(ok)
@@ -197,14 +203,14 @@ class TrackBObjectiveGuardTests(unittest.TestCase):
         self.assertNotIn("resolved_objective", details.get("paths", []))
 
     def test_guard_allows_objective_change_with_opt_in(self) -> None:
-        source = stable_trackb_source()
+        source = stable_trackb_base_source()
         payload = json.loads(source)
         payload["objective"]["weight_algebraic"] = round(float(payload["objective"]["weight_algebraic"]) + 0.05, 6)
         candidate = json.dumps(payload, indent=2, sort_keys=True) + "\n"
         ok, details = train.trackb_objective_guard(
             current_source=source,
             candidate_source=candidate,
-            source_path=TRACKB_PATH,
+            source_path=CONFIG_PATH,
             target_config={"json_allow_objective_mutations": True},
         )
         self.assertTrue(ok)
@@ -213,8 +219,8 @@ class TrackBObjectiveGuardTests(unittest.TestCase):
     def test_guard_rejects_unparseable_baseline(self) -> None:
         ok, details = train.trackb_objective_guard(
             current_source="{",
-            candidate_source=stable_trackb_source(),
-            source_path=TRACKB_PATH,
+            candidate_source=stable_trackb_base_source(),
+            source_path=CONFIG_PATH,
             target_config={},
         )
         self.assertFalse(ok)
@@ -222,9 +228,9 @@ class TrackBObjectiveGuardTests(unittest.TestCase):
 
     def test_guard_rejects_unparseable_candidate(self) -> None:
         ok, details = train.trackb_objective_guard(
-            current_source=stable_trackb_source(),
+            current_source=stable_trackb_base_source(),
             candidate_source="{",
-            source_path=TRACKB_PATH,
+            source_path=CONFIG_PATH,
             target_config={},
         )
         self.assertFalse(ok)
@@ -232,13 +238,37 @@ class TrackBObjectiveGuardTests(unittest.TestCase):
 
     def test_guard_is_disabled_for_non_trackb_path(self) -> None:
         ok, details = train.trackb_objective_guard(
-            current_source=stable_trackb_source(),
-            candidate_source=stable_trackb_source(),
+            current_source=stable_trackb_base_source(),
+            candidate_source=stable_trackb_base_source(),
             source_path=Path("/tmp/other.json"),
             target_config={},
         )
         self.assertTrue(ok)
         self.assertEqual(details, {"enabled": False})
+
+    def test_base_config_path_is_anchored_to_canonical_config_location(self) -> None:
+        self.assertTrue(train.is_trackb_base_config_path(CONFIG_PATH))
+        self.assertFalse(train.is_trackb_base_config_path(Path("/tmp/track_b_attack_config.json")))
+
+    def test_mutable_config_path_is_anchored_to_canonical_config_directory(self) -> None:
+        self.assertTrue(train.is_trackb_mutable_config_path(TRACKB_MUTABLE_PATH))
+        self.assertFalse(train.is_trackb_mutable_config_path(Path("/tmp/track_b_mutable_fast.json")))
+
+    def test_base_config_mutation_guard_blocks_by_default(self) -> None:
+        ok, details = train.trackb_base_config_mutation_guard(
+            source_path=CONFIG_PATH,
+            target_config={},
+        )
+        self.assertFalse(ok)
+        self.assertEqual(details.get("status"), "base_config_mutation_blocked")
+
+    def test_base_config_mutation_guard_allows_opt_in(self) -> None:
+        ok, details = train.trackb_base_config_mutation_guard(
+            source_path=CONFIG_PATH,
+            target_config={"allow_self_optimizing_config": True},
+        )
+        self.assertTrue(ok)
+        self.assertEqual(details.get("allow_self_optimizing_config"), True)
 
 
 if __name__ == "__main__":

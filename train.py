@@ -110,6 +110,35 @@ DEFAULT_OPERATOR_VALIDATION_BLOCK_PENALTY_STEP = 0.02
 DEFAULT_OPERATOR_VALIDATION_BLOCK_PENALTY_MAX = 0.25
 DEFAULT_OPERATOR_VALIDATION_BLOCK_DISABLE_STREAK = 0
 DEFAULT_OPERATOR_UCB_EXPLORE = 0.0
+TRACKB_BASE_CONFIG_NAME = "track_b_attack_config.json"
+TRACKB_MUTABLE_CONFIG_PREFIX = "track_b_mutable_"
+TRACKB_CONFIG_DIR = (ROOT / "config").resolve()
+TRACKB_BASE_CONFIG_PATH = (TRACKB_CONFIG_DIR / TRACKB_BASE_CONFIG_NAME).resolve()
+
+
+def resolve_trackb_path(path: str | Path) -> Path:
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        candidate = ROOT / candidate
+    return candidate.resolve(strict=False)
+
+
+def is_trackb_base_config_path(path: str | Path) -> bool:
+    return resolve_trackb_path(path) == TRACKB_BASE_CONFIG_PATH
+
+
+def is_trackb_mutable_config_path(path: str | Path) -> bool:
+    resolved = resolve_trackb_path(path)
+    name = resolved.name.lower()
+    return (
+        resolved.parent == TRACKB_CONFIG_DIR
+        and name.startswith(TRACKB_MUTABLE_CONFIG_PREFIX)
+        and name.endswith(".json")
+    )
+
+
+def is_trackb_json_mutation_path(path: str | Path) -> bool:
+    return is_trackb_base_config_path(path) or is_trackb_mutable_config_path(path)
 
 
 def configure_debug_environment(args: argparse.Namespace) -> None:
@@ -1564,8 +1593,7 @@ def json_heuristic_candidate(
     strict_target_scope: bool = False,
     rng: random.Random | None = None,
 ) -> tuple[str, str, bool]:
-    path = str(source_path).replace("\\", "/").lower()
-    if not path.endswith("config/track_b_attack_config.json"):
+    if not is_trackb_json_mutation_path(source_path):
         return source, "json_no_change", False
 
     try:
@@ -4552,8 +4580,7 @@ def trackb_objective_guard(
     source_path: Path,
     target_config: dict[str, Any] | None,
 ) -> tuple[bool, dict[str, Any]]:
-    path = str(source_path).replace("\\", "/").lower()
-    if not path.endswith("config/track_b_attack_config.json"):
+    if not is_trackb_base_config_path(source_path):
         return True, {"enabled": False}
 
     allow_mutation = parse_flag_bool((target_config or {}).get("json_allow_objective_mutations"), default=False)
@@ -4592,6 +4619,29 @@ def trackb_objective_guard(
         return False, {"enabled": True, "status": "objective_modified", "paths": changed_paths}
 
     return True, {"enabled": True, "status": "ok"}
+
+
+def trackb_base_config_mutation_guard(
+    *,
+    source_path: Path,
+    target_config: dict[str, Any] | None,
+) -> tuple[bool, dict[str, Any]]:
+    if not is_trackb_base_config_path(source_path):
+        return True, {"enabled": False}
+
+    allow_mutation = parse_flag_bool((target_config or {}).get("allow_self_optimizing_config"), default=False)
+    if allow_mutation:
+        return True, {"enabled": True, "allow_self_optimizing_config": True}
+
+    return False, {
+        "enabled": True,
+        "status": "base_config_mutation_blocked",
+        "message": (
+            "Track B base config mutations are disabled by default. "
+            "Use a mutable overlay source_file with attack_harness.py --config-override, "
+            "or set allow_self_optimizing_config=true to override."
+        ),
+    }
 
 
 def make_run_label() -> str:
@@ -5173,6 +5223,24 @@ def run_loop(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 2
+
+    trackb_base_guard_ok, trackb_base_guard_details = trackb_base_config_mutation_guard(
+        source_path=source_path,
+        target_config=target,
+    )
+    if not trackb_base_guard_ok:
+        prepare.append_log(
+            {
+                "event": "loop_start_failed",
+                "timestamp": prepare.now_iso(),
+                "target": args.target,
+                "reason": "trackb_base_config_mutation_blocked",
+                "source_path": str(source_path),
+                "details": trackb_base_guard_details,
+            }
+        )
+        print(str(trackb_base_guard_details.get("message", "Track B base config mutation is disabled")), file=sys.stderr)
+        return 2
 
     if str(target.get("type", "")).strip().lower() == "command" and source_file_is_executable_code(
         str(target["source_file"])

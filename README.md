@@ -22,6 +22,8 @@ This scaffold focuses on what is quickly verifiable:
 - `submission_pack.py`: generate canonical `agent.json`, `agent_log.json`, and receipts bundle
 - `readiness_check.py`: submission-readiness checker (artifacts + activity + timeline gate)
 - `config/targets.json`: benchmark targets and commands
+- `config/track_b_attack_config.json`: immutable Track B base config (objective + canonical profiles)
+- `config/track_b_mutable_*.json`: per-target mutable Track B search/analysis overlays
 - `examples/cairo_poseidon_style`: primary Cairo optimization sandbox
 - `examples/noir_poseidon2_style_t8`: optional Noir optimization sandbox
 - `examples/noir_poseidon2_style_t16`: optional larger Noir sandbox
@@ -40,6 +42,9 @@ python3 prepare.py baseline --target cairo_poseidon_style_t8 --notes baseline
 python3 train.py --target cairo_poseidon_style_t8 --iterations 12 --max-accepted 3
 # Track B evaluation harness example
 python3 prepare.py evaluate --target poseidon2_cryptanalysis_trackb_fast
+# verify/export provenance for later attestation
+python3 prepare.py provenance-verify
+python3 prepare.py provenance-export --output work/provenance_export.json
 ```
 
 ## Verbose and Debug Runs
@@ -57,6 +62,17 @@ python3 train.py --target leanmultisig_poseidon16_src_fast --iterations 4 -vv \
 # same debugging flags are available in prepare.py
 python3 prepare.py --verbose --debug-command-output evaluate --target leanmultisig_poseidon16_src_fast
 ```
+
+## Sandbox Requirement
+
+Command targets now require a sandbox by default. Set a sandbox wrapper before running command-backed evaluations or loops:
+
+```bash
+export AUTORESEARCH_SANDBOX_PREFIX="your-sandbox-wrapper ..."
+python3 prepare.py evaluate --target poseidon2_cryptanalysis_trackb_kernel_fast
+```
+
+Per-target `require_sandbox: false` is still available as an explicit opt-out, but the checked-in default is fail-closed for command targets.
 
 ## Karpathy-Compatible Mode
 
@@ -240,6 +256,8 @@ Reference implementation context can be inspected in:
 ## Track B Cryptanalysis Targets
 
 Track B uses command targets that optimize a deterministic `attack_score` extracted from JSON output.
+The scoring objective stays in the immutable base config, while JSON mutation targets now edit per-target
+`config/track_b_mutable_*.json` overlays that only carry `search` and `analysis` fields.
 The harness runs reduced-round Poseidon2-style kernels over a prime field:
 
 - differential bias search on truncated output deltas
@@ -259,8 +277,8 @@ The harness runs reduced-round Poseidon2-style kernels over a prime field:
 Quick start:
 
 ```bash
-python3 attack_harness.py --config config/track_b_attack_config.json --mode fast --output-format pretty
-python3 attack_harness.py --config config/track_b_attack_config.json --profile poseidon64_bounty_shape --mode fast --output-format pretty
+python3 attack_harness.py --config config/track_b_attack_config.json --config-override config/track_b_mutable_fast.json --mode fast --output-format pretty
+python3 attack_harness.py --config config/track_b_attack_config.json --config-override config/track_b_mutable_poseidon64_signal_fast.json --profile poseidon64_bounty_shape --mode fast --output-format pretty
 python3 prepare.py baseline --target poseidon2_cryptanalysis_trackb_fast --notes trackb_baseline
 python3 train.py --target poseidon2_cryptanalysis_trackb_fast --iterations 12 --max-accepted 2 -v
 python3 train.py --target poseidon2_cryptanalysis_trackb_verified_fast --iterations 12 --max-accepted 1 -v
@@ -304,6 +322,19 @@ python3 train.py --target poseidon2_cryptanalysis_algebraic_fast --iterations 12
 # disable replay memory
 python3 train.py --target leanmultisig_poseidon2_neon_src_fast --disable-mutation-memory
 ```
+
+## Provenance Export And Attestation
+
+Local runs maintain a verifiable hash chain in `provenance_chain.jsonl` plus `work/provenance_state.json`.
+You can verify and export a manifest covering the chain head and key outputs:
+
+```bash
+python3 prepare.py provenance-verify
+python3 prepare.py provenance-export --output work/provenance_export.json
+```
+
+For stronger off-box attestation, run the GitHub Actions workflow in
+`.github/workflows/provenance-attestation.yml`, which exports the manifest and signs it with GitHub Artifact Attestations.
 
 ## Acceptance Policy
 
