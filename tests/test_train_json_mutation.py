@@ -139,6 +139,7 @@ class TrackBObjectiveGuardTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(details.get("status"), "objective_modified")
         self.assertIn("objective", details.get("paths", []))
+        self.assertNotIn("resolved_objective", details.get("paths", []))
 
     def test_guard_rejects_nested_profile_objective_change(self) -> None:
         source = stable_trackb_source()

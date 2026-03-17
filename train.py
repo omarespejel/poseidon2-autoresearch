@@ -2465,7 +2465,7 @@ def objective_sections_from_trackb_payload(payload: dict[str, Any]) -> dict[str,
                 key = f"challenge_profiles.{profile_name}.objective"
                 sections[key] = json.loads(json.dumps(objective))
     resolved = resolved_objective_from_trackb_payload(payload)
-    if isinstance(resolved, dict):
+    if isinstance(resolved, dict) and resolved != sections.get("objective"):
         sections["resolved_objective"] = resolved
     return sections
 
