@@ -15,6 +15,19 @@ def harness_source() -> str:
 
 
 class PythonMutationSelectionTests(unittest.TestCase):
+    def test_required_snippet_profile_ignores_nested_python_helpers(self) -> None:
+        profile = train.required_snippet_profile(
+            """
+def outer():
+    def score():
+        return 1
+    return score
+""",
+            ["def score("],
+            language="Python",
+        )
+        self.assertEqual(profile["def score("], 0)
+
     def test_required_snippet_profile_counts_python_class_methods(self) -> None:
         snippets = [
             "def differential_kernel(",
@@ -214,6 +227,8 @@ def helper():
 
     def test_retryable_no_change_includes_python(self) -> None:
         self.assertTrue(train.is_retryable_no_change_mutation("python_no_change"))
+        self.assertTrue(train.is_retryable_no_change_mutation("fallback_python_no_change"))
+        self.assertTrue(train.is_retryable_no_change_mutation("fallback_fallback_heuristic_no_change"))
         self.assertFalse(train.is_retryable_no_change_mutation("python_trackb_mitm_bucket_cap_up"))
 
 

@@ -1946,7 +1946,10 @@ def normalize_mutation_label(token: str) -> str | None:
 
 
 def is_retryable_no_change_mutation(mutation: str) -> bool:
-    return mutation in {"json_trackb_no_change", "rust_no_change", "python_no_change", "heuristic_no_change"}
+    token = mutation.strip()
+    while token.startswith("fallback_"):
+        token = token[len("fallback_") :].strip()
+    return token in {"json_trackb_no_change", "rust_no_change", "python_no_change", "heuristic_no_change"}
 
 
 def extract_mutation_label_from_notes(notes: str) -> str | None:
@@ -2659,11 +2662,18 @@ def normalized_source_for_required_snippets(source: str, *, language: str) -> st
             tree = ast.parse(source)
         except SyntaxError:
             return ""
-        defs = [
-            f"def {node.name}("
-            for node in ast.walk(tree)
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        ]
+        defs: list[str] = []
+
+        def collect_defs(body: list[ast.stmt], *, prefix: str = "") -> None:
+            for node in body:
+                if isinstance(node, ast.ClassDef):
+                    collect_defs(node.body, prefix=f"{prefix}class {node.name}: ")
+                elif isinstance(node, ast.AsyncFunctionDef):
+                    defs.append(f"{prefix}async def {node.name}(")
+                elif isinstance(node, ast.FunctionDef):
+                    defs.append(f"{prefix}def {node.name}(")
+
+        collect_defs(tree.body)
         return "\n".join(defs)
     if language.lower() == "rust":
         return strip_rust_comments_and_literals(source)
