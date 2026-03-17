@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -81,7 +82,7 @@ def helper():
             Path("/tmp/some_other_file.py"),
         )
         self.assertFalse(changed)
-        self.assertEqual(mutation, "python_no_change")
+        self.assertEqual(mutation, "python_target_unsupported")
         self.assertEqual(candidate, source)
 
     def test_returns_no_change_for_lookalike_harness_path(self) -> None:
@@ -92,7 +93,7 @@ def helper():
             Path("/tmp/my_attack_harness.py"),
         )
         self.assertFalse(changed)
-        self.assertEqual(mutation, "python_no_change")
+        self.assertEqual(mutation, "python_target_unsupported")
         self.assertEqual(candidate, source)
 
     def test_returns_no_change_when_no_patterns_match(self) -> None:
@@ -306,6 +307,17 @@ def helper():
         self.assertNotEqual(candidate, source)
         self.assertNotIn("+", mutation)
 
+    def test_python_heuristic_candidate_reports_unsupported_source(self) -> None:
+        source = "def keep():\n    return 1\n"
+        candidate, mutation, changed = train.python_heuristic_candidate(
+            source,
+            1,
+            ROOT / "other_target.py",
+        )
+        self.assertEqual(candidate, source)
+        self.assertEqual(mutation, "python_target_unsupported")
+        self.assertFalse(changed)
+
     def test_algorithmic_diff_structure_mutator_applies(self) -> None:
         source = harness_source()
         candidate, mutation, changed = train.python_mutator_diff_secondary_lane_structure(source)
@@ -428,6 +440,52 @@ def helper():
         self.assertEqual(rows[0]["validation_blocked"], 1)
         self.assertEqual(rows[0]["validation_block_streak"], 0)
         self.assertNotIn("python_trackb_diff_multi_delta_prob_up", penalties)
+
+    def test_validation_block_streak_is_preserved_for_guardrail_rejects(self) -> None:
+        stats = {"version": 1, "targets": {}}
+        train.update_operator_stats(
+            stats,
+            target_name="poseidon2_cryptanalysis_trackb_kernel_fast",
+            mutation="python_trackb_diff_multi_delta_prob_up",
+            language="python",
+            accepted=False,
+            reward=0.0,
+            runtime_s=1.0,
+            timestamp="2026-03-17T00:00:00+00:00",
+            reward_epsilon=1e-12,
+            demote_streak=50,
+            disable_streak=60,
+            validation_blocked=True,
+        )
+        train.update_operator_stats(
+            stats,
+            target_name="poseidon2_cryptanalysis_trackb_kernel_fast",
+            mutation="python_trackb_diff_multi_delta_prob_up",
+            language="python",
+            accepted=False,
+            reward=0.0,
+            runtime_s=0.0,
+            timestamp="2026-03-17T00:00:01+00:00",
+            reward_epsilon=1e-12,
+            demote_streak=50,
+            disable_streak=60,
+            preserve_validation_block_streak=True,
+        )
+        _, penalties, rows = train.compute_operator_state(
+            stats,
+            target_name="poseidon2_cryptanalysis_trackb_kernel_fast",
+            language="python",
+            demote_streak=50,
+            disable_streak=60,
+            validation_block_penalty_base=0.04,
+            validation_block_penalty_step=0.02,
+            validation_block_penalty_max=0.25,
+            validation_block_disable_streak=0,
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["validation_blocked"], 1)
+        self.assertEqual(rows[0]["validation_block_streak"], 1)
+        self.assertAlmostEqual(penalties["python_trackb_diff_multi_delta_prob_up"], 0.04, places=6)
 
     def test_validation_block_disable_streak_auto_disables_operator(self) -> None:
         stats = {"version": 1, "targets": {}}
@@ -602,6 +660,31 @@ def helper():
         self.assertTrue(train.is_retryable_no_change_mutation("fallback_python_no_change"))
         self.assertTrue(train.is_retryable_no_change_mutation("fallback_fallback_heuristic_no_change"))
         self.assertFalse(train.is_retryable_no_change_mutation("python_trackb_mitm_bucket_cap_up"))
+
+    def test_save_operator_stats_artifact_uses_atomic_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            stats_path = Path(tmpdir) / "stats.json"
+            artifact_root = Path(tmpdir) / "artifacts"
+            with patch.object(train, "ARTIFACTS_DIR", artifact_root):
+                with patch("train.atomic_write_text") as atomic_write:
+                    out_path = train.save_operator_stats_artifact(
+                        target_name="target",
+                        run_label="run-1",
+                        language="python",
+                        stats_path=stats_path,
+                        reward_epsilon=0.01,
+                        demote_streak=2,
+                        disable_streak=3,
+                        validation_block_penalty_base=0.1,
+                        validation_block_penalty_step=0.05,
+                        validation_block_penalty_max=0.3,
+                        validation_block_disable_streak=4,
+                        rows=[],
+                    )
+
+        atomic_write.assert_called_once()
+        self.assertEqual(atomic_write.call_args.args[0], out_path)
+        self.assertTrue(str(atomic_write.call_args.args[1]).endswith("\n"))
 
 
 if __name__ == "__main__":
