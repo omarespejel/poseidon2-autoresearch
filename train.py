@@ -5229,6 +5229,16 @@ def run_loop(args: argparse.Namespace) -> int:
         target_config=target,
     )
     if not trackb_base_guard_ok:
+        prepare.append_log(
+            {
+                "event": "loop_start_failed",
+                "timestamp": prepare.now_iso(),
+                "target": args.target,
+                "reason": "trackb_base_config_mutation_blocked",
+                "source_path": str(source_path),
+                "details": trackb_base_guard_details,
+            }
+        )
         print(str(trackb_base_guard_details.get("message", "Track B base config mutation is disabled")), file=sys.stderr)
         return 2
 
