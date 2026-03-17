@@ -787,6 +787,61 @@ def helper():
         self.assertEqual(atomic_write.call_args.args[0], out_path)
         self.assertTrue(str(atomic_write.call_args.args[1]).endswith("\n"))
 
+    def test_function_signature_guard_accepts_unmodified_attack_kernels(self) -> None:
+        source = harness_source()
+        required = list(train.ATTACK_KERNEL_SIGNATURE_FUNCTIONS)
+        expected, parse_error = train.extract_python_function_signatures(
+            source,
+            required_names=required,
+        )
+        self.assertIsNone(parse_error)
+        self.assertEqual(set(expected.keys()), set(required))
+        ok, details = train.function_signature_guard(
+            candidate_source=source,
+            expected_signatures=expected,
+            required_names=required,
+        )
+        self.assertTrue(ok)
+        self.assertEqual(details["violations"], [])
+
+    def test_function_signature_guard_rejects_signature_change(self) -> None:
+        source = harness_source()
+        required = list(train.ATTACK_KERNEL_SIGNATURE_FUNCTIONS)
+        expected, parse_error = train.extract_python_function_signatures(
+            source,
+            required_names=required,
+        )
+        self.assertIsNone(parse_error)
+        candidate = source.replace("random_state_fn", "random_state_fn_mutated", 1)
+        ok, details = train.function_signature_guard(
+            candidate_source=candidate,
+            expected_signatures=expected,
+            required_names=required,
+        )
+        self.assertFalse(ok)
+        violations = details["violations"]
+        self.assertTrue(violations)
+        first = violations[0]
+        self.assertEqual(first["function"], "differential_kernel")
+        self.assertEqual(first["status"], "signature_changed")
+
+    def test_function_signature_guard_rejects_missing_function(self) -> None:
+        source = harness_source()
+        required = list(train.ATTACK_KERNEL_SIGNATURE_FUNCTIONS)
+        expected, parse_error = train.extract_python_function_signatures(
+            source,
+            required_names=required,
+        )
+        self.assertIsNone(parse_error)
+        candidate = source.replace("def score(", "def score_mutated(", 1)
+        ok, details = train.function_signature_guard(
+            candidate_source=candidate,
+            expected_signatures=expected,
+            required_names=required,
+        )
+        self.assertFalse(ok)
+        self.assertIn({"function": "score", "status": "missing"}, details["violations"])
+
 
 if __name__ == "__main__":
     unittest.main()
