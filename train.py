@@ -2486,7 +2486,7 @@ def upsert_population_entry(
     source_code: str,
     metric_value: float | None,
     higher_is_better: bool,
-    accepted: bool,
+    accepted: bool | None,
     timestamp: str,
     notes: str,
     max_entries: int,
@@ -2524,6 +2524,7 @@ def upsert_population_entry(
             "last_seen_at": timestamp,
             "last_sampled_at": None,
             "last_notes": notes,
+            "seeded_total": 0,
         }
         entries.append(existing)
     else:
@@ -2542,12 +2543,15 @@ def upsert_population_entry(
             existing["metric_value"] = metric_value
         existing["higher_is_better"] = higher_is_better
 
-    if accepted:
+    if accepted is True:
         existing["accepted_total"] = int(existing.get("accepted_total", 0)) + 1
         existing["last_accepted_at"] = timestamp
-    else:
+    elif accepted is False:
         existing["rejected_total"] = int(existing.get("rejected_total", 0)) + 1
         existing["last_rejected_at"] = timestamp
+    else:
+        existing["seeded_total"] = int(existing.get("seeded_total", 0)) + 1
+        existing["last_seeded_at"] = timestamp
     existing["last_seen_at"] = timestamp
     existing["last_notes"] = notes
     compact_population_entries(entries, max_entries=max_entries)
@@ -2563,7 +2567,7 @@ def update_and_save_population_memory(
     source_code: str,
     metric_value: float | None,
     higher_is_better: bool,
-    accepted: bool,
+    accepted: bool | None,
     timestamp: str,
     notes: str,
     max_entries: int,
@@ -2811,6 +2815,7 @@ def generate_population_seed_candidates(
     target_config: dict[str, Any],
     mutation_memory: dict[str, Any] | None,
     max_candidates: int,
+    rng_seed: str | None = None,
 ) -> list[dict[str, str]]:
     if max_candidates <= 0:
         return []
@@ -2826,27 +2831,35 @@ def generate_population_seed_candidates(
     out: list[dict[str, str]] = []
     max_trials = max_candidates * 5
 
-    for iteration in range(1, max_trials + 1):
-        candidate, mutation, changed = heuristic_candidate(
-            source,
-            iteration,
-            language,
-            source_path,
-            blocked_mutations=blocked,
-            mutation_attempts=mutation_attempts,
-            target_config=cfg,
-            preferred_mutations=[],
-            mutation_memory=mutation_memory,
-            operator_penalties=None,
-            target_name=target_name,
-        )
-        mutation_key = normalize_mutation_label(mutation) or mutation
-        blocked.add(mutation_key)
-        if not changed or candidate == source:
-            continue
-        out.append({"mutation": mutation_key, "source_code": candidate})
-        if len(out) >= max_candidates:
-            break
+    prior_random_state: object | None = None
+    if rng_seed:
+        prior_random_state = random.getstate()
+        random.seed(int(rng_seed, 16))
+    try:
+        for iteration in range(1, max_trials + 1):
+            candidate, mutation, changed = heuristic_candidate(
+                source,
+                iteration,
+                language,
+                source_path,
+                blocked_mutations=blocked,
+                mutation_attempts=mutation_attempts,
+                target_config=cfg,
+                preferred_mutations=[],
+                mutation_memory=mutation_memory,
+                operator_penalties=None,
+                target_name=target_name,
+            )
+            mutation_key = normalize_mutation_label(mutation) or mutation
+            blocked.add(mutation_key)
+            if not changed or candidate == source:
+                continue
+            out.append({"mutation": mutation_key, "source_code": candidate})
+            if len(out) >= max_candidates:
+                break
+    finally:
+        if prior_random_state is not None:
+            random.setstate(prior_random_state)
     return out
 
 
@@ -2867,6 +2880,16 @@ def seed_population_memory_from_heuristics(
     max_entries: int,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     initial_count = population_entries_count(population_memory)
+    _, rng_seed = make_feature_rng(
+        target_name=target_name,
+        feature="population_seed_bootstrap",
+        source_code=baseline_source,
+        config={
+            "language": language.strip().lower(),
+            "max_candidates": max_candidates,
+            "min_entries": min_entries,
+        },
+    )
     if initial_count >= max(1, min_entries):
         return population_memory, {
             "status": "skipped",
@@ -2876,6 +2899,7 @@ def seed_population_memory_from_heuristics(
             "seeded": 0,
             "attempted": 0,
             "mutations": [],
+            "rng_seed": rng_seed,
         }
 
     candidates = generate_population_seed_candidates(
@@ -2886,6 +2910,7 @@ def seed_population_memory_from_heuristics(
         target_config=target_config,
         mutation_memory=mutation_memory,
         max_candidates=max_candidates,
+        rng_seed=rng_seed,
     )
 
     seeded = 0
@@ -2904,7 +2929,7 @@ def seed_population_memory_from_heuristics(
             source_code=candidate_source,
             metric_value=baseline_metric,
             higher_is_better=higher_is_better,
-            accepted=False,
+            accepted=None,
             timestamp=prepare.now_iso(),
             notes=f"population_seed:{mutation_label}",
             max_entries=max_entries,
@@ -2925,6 +2950,7 @@ def seed_population_memory_from_heuristics(
         "seeded": seeded,
         "attempted": len(candidates),
         "mutations": seeded_mutations[:12],
+        "rng_seed": rng_seed,
     }
 
 
@@ -4818,6 +4844,7 @@ def run_loop(args: argparse.Namespace) -> int:
         "initial_entries": population_entries_count(population_memory),
         "final_entries": population_entries_count(population_memory),
         "seeded": 0,
+        "rng_seed": None,
     }
     if population_memory is not None:
         try:
@@ -4834,35 +4861,6 @@ def run_loop(args: argparse.Namespace) -> int:
                 notes="baseline_seed",
                 max_entries=population_max_entries,
             )
-            population_seed_report["initial_entries"] = population_entries_count(population_memory)
-            if population_seed_enable:
-                population_memory, population_seed_report = seed_population_memory_from_heuristics(
-                    population_memory_path=population_memory_path,
-                    population_memory=population_memory,
-                    target_name=args.target,
-                    language=language_norm,
-                    source_path=source_path,
-                    baseline_source=best_source,
-                    baseline_metric=best_metric,
-                    higher_is_better=bool(target["higher_is_better"]),
-                    target_config=target,
-                    mutation_memory=mutation_memory,
-                    min_entries=population_seed_min_entries,
-                    max_candidates=population_seed_max_candidates,
-                    max_entries=population_max_entries,
-                )
-                population_seed_report["enabled"] = True
-                train_log(
-                    args,
-                    (
-                        "population seeding "
-                        f"status={population_seed_report.get('status')} "
-                        f"seeded={population_seed_report.get('seeded', 0)} "
-                        f"entries={population_seed_report.get('initial_entries', 0)}"
-                        f"->{population_seed_report.get('final_entries', 0)}"
-                    ),
-                    level=1,
-                )
         except Exception as exc:  # noqa: BLE001
             print(
                 f"[train] Warning: population baseline seed failed ({exc}); continuing without population memory",
@@ -4876,7 +4874,58 @@ def run_loop(args: argparse.Namespace) -> int:
                 "initial_entries": 0,
                 "final_entries": 0,
                 "seeded": 0,
+                "rng_seed": None,
             }
+        else:
+            baseline_entries = population_entries_count(population_memory)
+            population_seed_report["initial_entries"] = baseline_entries
+            population_seed_report["final_entries"] = baseline_entries
+            if population_seed_enable:
+                try:
+                    population_memory, population_seed_report = seed_population_memory_from_heuristics(
+                        population_memory_path=population_memory_path,
+                        population_memory=population_memory,
+                        target_name=args.target,
+                        language=language_norm,
+                        source_path=source_path,
+                        baseline_source=best_source,
+                        baseline_metric=best_metric,
+                        higher_is_better=bool(target["higher_is_better"]),
+                        target_config=target,
+                        mutation_memory=mutation_memory,
+                        min_entries=population_seed_min_entries,
+                        max_candidates=population_seed_max_candidates,
+                        max_entries=population_max_entries,
+                    )
+                    population_seed_report["enabled"] = True
+                    train_log(
+                        args,
+                        (
+                            "population seeding "
+                            f"status={population_seed_report.get('status')} "
+                            f"seeded={population_seed_report.get('seeded', 0)} "
+                            f"entries={population_seed_report.get('initial_entries', 0)}"
+                            f"->{population_seed_report.get('final_entries', 0)}"
+                        ),
+                        level=1,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    print(
+                        (
+                            "[train] Warning: population heuristic seeding failed "
+                            f"({exc}); retaining baseline population memory"
+                        ),
+                        file=sys.stderr,
+                    )
+                    population_seed_report = {
+                        "enabled": True,
+                        "status": "failed",
+                        "reason": str(exc),
+                        "initial_entries": baseline_entries,
+                        "final_entries": population_entries_count(population_memory),
+                        "seeded": 0,
+                        "rng_seed": None,
+                    }
 
     prepare.append_log(
         {
