@@ -196,6 +196,8 @@ class AttackHarnessTests(unittest.TestCase):
             "mitm_forward_states": 0,
             "mitm_backward_states": 0,
             "collision_samples": 0,
+            "algebraic_train_samples": 0,
+            "algebraic_validation_samples": 0,
         }
         rng = seeded_rng(search["seed"])
 
@@ -207,12 +209,14 @@ class AttackHarnessTests(unittest.TestCase):
             rng=rng,
         )
         collision = attack_harness.birthday_collision_kernel(spec=spec, analysis=analysis, search=search, rng=rng)
+        algebraic = attack_harness.algebraic_elimination_kernel(spec=spec, analysis=analysis, search=search, rng=rng)
         metrics = attack_harness.score(
             config=cfg,
             search=search,
             differential=differential,
             mitm_preimage=mitm_preimage,
             collision=collision,
+            algebraic=algebraic,
         )
 
         self.assertEqual(differential["best_probability"], 0.0)
@@ -221,6 +225,8 @@ class AttackHarnessTests(unittest.TestCase):
         self.assertEqual(mitm_preimage["verified_hits"], 0)
         self.assertEqual(collision["samples"], 0)
         self.assertEqual(collision["collisions"], 0)
+        self.assertEqual(algebraic["train_samples"], 0)
+        self.assertEqual(algebraic["validation_samples"], 0)
         self.assertTrue(math_is_finite(float(metrics["attack_score"])))
 
 
