@@ -61,6 +61,9 @@ ALLOWED_TARGET_OVERRIDE_KEYS = {
     "operator_demote_streak",
     "operator_disable_streak",
     "operator_reward_epsilon",
+    "validation_targets",
+    "validation_allow_drop_abs",
+    "validation_allow_drop_rel",
 }
 DEFAULT_MUTATION_MEMORY_FILE = ROOT / "work" / "mutation_memory.json"
 DEFAULT_MUTATION_MEMORY_MAX_ENTRIES = 512
@@ -3615,6 +3618,124 @@ def is_better(
     return abs_ok and rel_ok
 
 
+def validation_metric_passes(
+    *,
+    candidate_value: float,
+    baseline_value: float,
+    higher_is_better: bool,
+    allow_drop_abs: float,
+    allow_drop_rel: float,
+) -> tuple[bool, dict[str, Any]]:
+    allow_drop_abs = max(0.0, float(allow_drop_abs))
+    allow_drop_rel = max(0.0, float(allow_drop_rel))
+
+    if higher_is_better:
+        abs_floor = baseline_value - allow_drop_abs
+        rel_floor = baseline_value * (1.0 - allow_drop_rel)
+        floor_candidates = [baseline_value]
+        if allow_drop_abs > 0.0:
+            floor_candidates.append(abs_floor)
+        if allow_drop_rel > 0.0:
+            floor_candidates.append(rel_floor)
+        effective_floor = min(floor_candidates)
+        abs_ok = candidate_value >= abs_floor
+        rel_ok = candidate_value >= rel_floor
+        effective_ok = candidate_value >= effective_floor
+        return (
+            bool(effective_ok),
+            {
+                "direction": "higher",
+                "candidate_value": candidate_value,
+                "baseline_value": baseline_value,
+                "allow_drop_abs": allow_drop_abs,
+                "allow_drop_rel": allow_drop_rel,
+                "abs_floor": abs_floor,
+                "rel_floor": rel_floor,
+                "effective_floor": effective_floor,
+                "abs_ok": abs_ok,
+                "rel_ok": rel_ok,
+                "effective_ok": effective_ok,
+            },
+        )
+
+    abs_ceiling = baseline_value + allow_drop_abs
+    rel_ceiling = baseline_value * (1.0 + allow_drop_rel)
+    ceiling_candidates = [baseline_value]
+    if allow_drop_abs > 0.0:
+        ceiling_candidates.append(abs_ceiling)
+    if allow_drop_rel > 0.0:
+        ceiling_candidates.append(rel_ceiling)
+    effective_ceiling = max(ceiling_candidates)
+    abs_ok = candidate_value <= abs_ceiling
+    rel_ok = candidate_value <= rel_ceiling
+    effective_ok = candidate_value <= effective_ceiling
+    return (
+        bool(effective_ok),
+        {
+            "direction": "lower",
+            "candidate_value": candidate_value,
+            "baseline_value": baseline_value,
+            "allow_drop_abs": allow_drop_abs,
+            "allow_drop_rel": allow_drop_rel,
+            "abs_ceiling": abs_ceiling,
+            "rel_ceiling": rel_ceiling,
+            "effective_ceiling": effective_ceiling,
+            "abs_ok": abs_ok,
+            "rel_ok": rel_ok,
+            "effective_ok": effective_ok,
+        },
+    )
+
+
+def evaluate_validation_targets(
+    *,
+    validation_targets: list[str],
+    validation_baselines: dict[str, float],
+    targets_catalog: dict[str, dict[str, Any]],
+    allow_drop_abs: float,
+    allow_drop_rel: float,
+) -> tuple[bool, dict[str, Any], dict[str, float], str]:
+    details: dict[str, Any] = {}
+    observed_metrics: dict[str, float] = {}
+
+    for target_name in validation_targets:
+        target_cfg = targets_catalog.get(target_name, {})
+        higher_is_better = bool(target_cfg.get("higher_is_better", True))
+        baseline_value = validation_baselines.get(target_name)
+        if baseline_value is None:
+            return False, details, observed_metrics, f"missing_baseline:{target_name}"
+
+        result = prepare.evaluate_target(target_name)
+        metric_value_raw = result.get("metric_value")
+        if result.get("status") != "success" or metric_value_raw is None:
+            details[target_name] = {
+                "status": result.get("status", "failed"),
+                "reason": "evaluation_failed",
+                "result_notes": result.get("notes"),
+            }
+            return False, details, observed_metrics, f"eval_failed:{target_name}"
+
+        candidate_value = float(metric_value_raw)
+        ok, gate = validation_metric_passes(
+            candidate_value=candidate_value,
+            baseline_value=float(baseline_value),
+            higher_is_better=higher_is_better,
+            allow_drop_abs=allow_drop_abs,
+            allow_drop_rel=allow_drop_rel,
+        )
+        details[target_name] = {
+            "status": "ok" if ok else "rejected",
+            "higher_is_better": higher_is_better,
+            "gate": gate,
+            "metric_name": result.get("metric_name"),
+        }
+        observed_metrics[target_name] = candidate_value
+        if not ok:
+            return False, details, observed_metrics, f"degraded:{target_name}"
+
+    return True, details, observed_metrics, "ok"
+
+
 def finite_or_zero(value: float) -> float:
     if value != value:  # NaN
         return 0.0
@@ -3800,6 +3921,42 @@ def run_loop(args: argparse.Namespace) -> int:
         return 2
     initial_source = source_path.read_text()
 
+    raw_validation_targets = target.get("validation_targets", [])
+    validation_targets: list[str] = []
+    if isinstance(raw_validation_targets, list):
+        for item in raw_validation_targets:
+            if not isinstance(item, str):
+                continue
+            name = item.strip()
+            if not name or name == args.target:
+                continue
+            validation_targets.append(name)
+    allow_drop_abs = max(0.0, float(target.get("validation_allow_drop_abs", 0.0)))
+    allow_drop_rel = max(0.0, float(target.get("validation_allow_drop_rel", 0.0)))
+    validation_baselines: dict[str, float] = {}
+    for validation_target in validation_targets:
+        if validation_target not in targets:
+            print(f"Unknown validation target: {validation_target}", file=sys.stderr)
+            return 2
+        cfg = targets[validation_target]
+        validation_source_file = cfg.get("source_file")
+        if not isinstance(validation_source_file, str):
+            print(
+                f"Validation target missing source_file: {validation_target}",
+                file=sys.stderr,
+            )
+            return 2
+        validation_source_path = ROOT / validation_source_file
+        if validation_source_path.resolve() != source_path.resolve():
+            print(
+                (
+                    "Validation target source_file mismatch; cross-target validation requires same mutable source. "
+                    f"primary={source_path} validation={validation_source_path} target={validation_target}"
+                ),
+                file=sys.stderr,
+            )
+            return 2
+
     template = load_prompt_template()
     if "language" in target:
         language = str(target["language"])
@@ -3921,6 +4078,32 @@ def run_loop(args: argparse.Namespace) -> int:
         )
         return 1
     best_metric_series = baseline_metric_series if baseline_metric_series else [best_metric]
+
+    if validation_targets:
+        for validation_target in validation_targets:
+            validation_result = prepare.evaluate_target(validation_target)
+            metric_value = validation_result.get("metric_value")
+            if validation_result.get("status") != "success" or metric_value is None:
+                print(
+                    (
+                        "Validation baseline evaluation failed; aborting optimization loop "
+                        f"(target={validation_target})"
+                    ),
+                    file=sys.stderr,
+                )
+                print(json.dumps(validation_result, indent=2, sort_keys=True), file=sys.stderr)
+                return 1
+            validation_baselines[validation_target] = float(metric_value)
+        train_log(
+            args,
+            (
+                "validation baselines "
+                + ", ".join(
+                    f"{name}={validation_baselines[name]:.6f}" for name in validation_targets
+                )
+            ),
+            level=1,
+        )
     accepted = 0
     min_improvement_abs = float(target.get("min_improvement_abs", 0.0))
     min_improvement_rel = float(target.get("min_improvement_rel", 0.0))
@@ -4004,6 +4187,12 @@ def run_loop(args: argparse.Namespace) -> int:
             "mutation_strategy": {
                 "schedule": str(target.get("mutation_schedule", "priority")),
                 "ucb_explore": float(target.get("mutation_ucb_explore", 0.75)),
+            },
+            "validation_gate": {
+                "targets": validation_targets,
+                "allow_drop_abs": allow_drop_abs,
+                "allow_drop_rel": allow_drop_rel,
+                "baselines": validation_baselines,
             },
             "source_guardrails": {
                 "required_snippets": len(required_snippet_counts),
@@ -4444,25 +4633,48 @@ def run_loop(args: argparse.Namespace) -> int:
                         diagnostics["ab_validation"] = ab_details
 
                     if ab_ok:
-                        accepted += 1
-                        blocked_mutations_until.clear()
-                        best_metric = float(metric_value) if confirmed_metric is None else confirmed_metric
-                        if confirmed_metric is not None:
-                            metric_for_row = confirmed_metric
-                        accepted_series = ab_details.get("candidate_values") if ab_details else None
-                        if isinstance(accepted_series, list) and accepted_series:
-                            best_metric_series = [float(v) for v in accepted_series]
-                        elif confirmed_values:
-                            best_metric_series = [float(v) for v in confirmed_values]
-                        elif metric_series is not None and metric_series:
-                            best_metric_series = metric_series
-                        if required_snippets:
-                            required_snippet_counts = required_snippet_profile(
-                                candidate,
-                                required_snippets,
-                                language=language_norm,
+                        validation_ok = True
+                        validation_reason = "skipped"
+                        validation_details: dict[str, Any] = {}
+                        validation_observed: dict[str, float] = {}
+                        if validation_targets:
+                            validation_ok, validation_details, validation_observed, validation_reason = (
+                                evaluate_validation_targets(
+                                    validation_targets=validation_targets,
+                                    validation_baselines=validation_baselines,
+                                    targets_catalog=targets,
+                                    allow_drop_abs=allow_drop_abs,
+                                    allow_drop_rel=allow_drop_rel,
+                                )
                             )
-                        notes = f"accepted:{notes};{confirm_reason};{ab_reason}"
+                            diagnostics["validation_targets"] = validation_details
+
+                        if validation_ok:
+                            accepted += 1
+                            blocked_mutations_until.clear()
+                            best_metric = float(metric_value) if confirmed_metric is None else confirmed_metric
+                            if confirmed_metric is not None:
+                                metric_for_row = confirmed_metric
+                            accepted_series = ab_details.get("candidate_values") if ab_details else None
+                            if isinstance(accepted_series, list) and accepted_series:
+                                best_metric_series = [float(v) for v in accepted_series]
+                            elif confirmed_values:
+                                best_metric_series = [float(v) for v in confirmed_values]
+                            elif metric_series is not None and metric_series:
+                                best_metric_series = metric_series
+                            if required_snippets:
+                                required_snippet_counts = required_snippet_profile(
+                                    candidate,
+                                    required_snippets,
+                                    language=language_norm,
+                                )
+                            if validation_observed:
+                                validation_baselines.update(validation_observed)
+                            notes = f"accepted:{notes};{confirm_reason};{ab_reason};validation={validation_reason}"
+                        else:
+                            improved = False
+                            source_path.write_text(current_source)
+                            notes = f"rejected_validation_{validation_reason}:{notes};{confirm_reason};{ab_reason}"
                     else:
                         improved = False
                         source_path.write_text(current_source)
@@ -4724,6 +4936,8 @@ def run_loop(args: argparse.Namespace) -> int:
                 "git_checkpoint_prefix": git_checkpoint_prefix if git_checkpoint_mode != "off" else None,
                 "operator_stats_file": str(operator_stats_path) if operator_stats is not None else None,
                 "operator_stats_artifact": str(operator_artifact_path) if operator_artifact_path is not None else None,
+                "validation_targets": validation_targets,
+                "validation_baselines": validation_baselines,
                 "elapsed_seconds": elapsed_seconds,
                 "stop_reason": stop_reason,
             },
