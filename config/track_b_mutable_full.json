@@ -1,0 +1,36 @@
+{
+  "active_profile": "research_fast",
+  "challenge_profiles": {
+    "research_fast": {
+      "analysis": {
+        "algebraic_degree": 2,
+        "algebraic_output_bits": 20,
+        "algebraic_rounds": 11,
+        "algebraic_target_lane": 0,
+        "algebraic_unknown_lanes": [
+          0,
+          1
+        ],
+        "middle_key_bits": 12,
+        "middle_key_lanes": [
+          0,
+          1
+        ],
+        "split_round": 11,
+        "target_lane": 0,
+        "truncated_bits": 22
+      },
+      "search": {
+        "algebraic_train_samples": 192,
+        "algebraic_validation_samples": 96,
+        "collision_samples": 4096,
+        "differential_candidates": 56,
+        "differential_samples_per_candidate": 128,
+        "mitm_backward_states": 3072,
+        "mitm_forward_states": 3328,
+        "scale_rounds_in_full_mode": 0,
+        "seed": 1337
+      }
+    }
+  }
+}

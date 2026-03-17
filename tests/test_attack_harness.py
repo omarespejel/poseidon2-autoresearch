@@ -202,6 +202,53 @@ class AttackHarnessTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             attack_harness.resolve_profile_config(tiny_config(), "unknown_profile")
 
+    def test_main_merges_config_override_before_profile_resolution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "track_b.json"
+            override_path = Path(tmpdir) / "override.json"
+            base_config = tiny_config()
+            config_path.write_text(json.dumps(base_config), encoding="utf-8")
+            override_path.write_text(
+                json.dumps(
+                    {
+                        "active_profile": "research_fast",
+                        "challenge_profiles": {
+                            "research_fast": {
+                                "search": {"differential_candidates": 99},
+                                "analysis": {"truncated_bits": 17},
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            merged, _ = attack_harness.resolve_profile_config(
+                attack_harness.deep_merge_dict(base_config, json.loads(override_path.read_text(encoding="utf-8"))),
+                "",
+            )
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                exit_code = attack_harness.main(
+                    [
+                        "--config",
+                        str(config_path),
+                        "--config-override",
+                        str(override_path),
+                        "--mode",
+                        "fast",
+                        "--output-format",
+                        "json",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["config_override_path"], str(override_path))
+        self.assertEqual(int(payload["search"]["differential_candidates"]), 99)
+        self.assertEqual(int(payload["analysis"]["truncated_bits"]), 17)
+        self.assertEqual(merged["objective"]["weight_algebraic"], base_config["objective"]["weight_algebraic"])
+        self.assertIn("--config-override", payload["repro"]["command"])
+
     def test_kernels_handle_zero_budgets(self) -> None:
         cfg = tiny_config()
         spec = attack_harness.build_spec(cfg, mode="fast")

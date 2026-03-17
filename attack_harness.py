@@ -1039,6 +1039,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run deterministic reduced-round Poseidon2 cryptanalysis harness")
     parser.add_argument("--config", default="config/track_b_attack_config.json", help="Path to Track B config JSON")
     parser.add_argument(
+        "--config-override",
+        default="",
+        help="Optional JSON overlay merged into --config before profile resolution",
+    )
+    parser.add_argument(
         "--profile",
         default="",
         help="Optional challenge profile key from config.challenge_profiles",
@@ -1060,6 +1065,13 @@ def main(argv: list[str] | None = None) -> int:
     if not config_path.is_absolute():
         config_path = ROOT / config_path
     config_raw = load_config(config_path)
+    config_override_path: Path | None = None
+    if args.config_override.strip():
+        config_override_path = Path(args.config_override)
+        if not config_override_path.is_absolute():
+            config_override_path = ROOT / config_override_path
+        config_override = load_config(config_override_path)
+        config_raw = deep_merge_dict(config_raw, config_override)
     config, selected_profile = resolve_profile_config(config_raw, args.profile)
     kernels = load_kernel_module(args.kernel_module)
 
@@ -1121,6 +1133,8 @@ def main(argv: list[str] | None = None) -> int:
 
     kernel_module_name = getattr(kernels, "__name__", args.kernel_module)
     repro_parts = [f"python3 attack_harness.py --config {config_path}"]
+    if config_override_path is not None:
+        repro_parts.append(f"--config-override {config_override_path}")
     if kernel_module_name:
         repro_parts.append(f"--kernel-module {kernel_module_name}")
     if selected_profile:
@@ -1131,6 +1145,7 @@ def main(argv: list[str] | None = None) -> int:
         "ok": True,
         "mode": args.mode,
         "config_path": str(config_path),
+        "config_override_path": str(config_override_path) if config_override_path is not None else None,
         "challenge_profile": selected_profile,
         "kernel_module": kernel_module_name,
         "spec": {
