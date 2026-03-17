@@ -86,6 +86,7 @@ def default_crypto_optimize_targets() -> str:
     return ",".join(
         [
             "poseidon2_cryptanalysis_trackb_kernel_fast",
+            "poseidon2_cryptanalysis_trackb_kernel_signal_fast",
             "poseidon2_cryptanalysis_trackb_fast",
             "poseidon2_cryptanalysis_trackb_verified_fast",
             "poseidon2_cryptanalysis_algebraic_fast",
