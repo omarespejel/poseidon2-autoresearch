@@ -1,0 +1,190 @@
+{
+  "active_profile": "research_fast",
+  "analysis": {
+    "middle_key_bits": 12,
+    "middle_key_lanes": [
+      0,
+      1
+    ],
+    "split_round": 11,
+    "target_lane": 0,
+    "truncated_bits": 22
+  },
+  "challenge_profiles": {
+    "koalabear_w16_shape": {
+      "analysis": {
+        "middle_key_bits": 10,
+        "middle_key_lanes": [
+          0,
+          1,
+          2
+        ],
+        "split_round": 7,
+        "target_lane": 0,
+        "truncated_bits": 18
+      },
+      "poseidon2": {
+        "constants_seed": "koalabear-w16-rf6-rp4",
+        "full_rounds": 6,
+        "internal_diagonal": [
+          2,
+          3,
+          5,
+          7,
+          11,
+          13,
+          17,
+          19,
+          23,
+          29,
+          31,
+          37,
+          41,
+          43,
+          47,
+          53
+        ],
+        "partial_rounds": 4,
+        "sbox_power": 3,
+        "width": 16
+      },
+      "search": {
+        "collision_samples": 512,
+        "differential_candidates": 12,
+        "differential_samples_per_candidate": 32,
+        "mitm_backward_states": 256,
+        "mitm_forward_states": 256
+      }
+    },
+    "poseidon256_bounty_shape": {
+      "analysis": {
+        "middle_key_bits": 10,
+        "middle_key_lanes": [
+          0,
+          1
+        ],
+        "split_round": 11,
+        "target_lane": 0,
+        "truncated_bits": 24
+      },
+      "poseidon2": {
+        "constants_seed": "poseidon256-bounty-shape",
+        "field_modulus": 52435875175126190479447740508185965837690552500527637822603658699938581184513,
+        "full_rounds": 8,
+        "internal_diagonal": [
+          2,
+          3,
+          5
+        ],
+        "partial_rounds": 16,
+        "sbox_power": 5,
+        "width": 3
+      },
+      "search": {
+        "collision_samples": 1024,
+        "differential_candidates": 24,
+        "differential_samples_per_candidate": 64,
+        "mitm_backward_states": 768,
+        "mitm_forward_states": 768
+      }
+    },
+    "poseidon64_bounty_shape": {
+      "analysis": {
+        "middle_key_bits": 10,
+        "middle_key_lanes": [
+          0,
+          1
+        ],
+        "split_round": 10,
+        "target_lane": 0,
+        "truncated_bits": 28
+      },
+      "poseidon2": {
+        "constants_seed": "poseidon64-bounty-shape",
+        "field_modulus": 18446744069414584321,
+        "full_rounds": 8,
+        "internal_diagonal": [
+          2,
+          3,
+          5
+        ],
+        "partial_rounds": 13,
+        "sbox_power": 7,
+        "width": 3
+      },
+      "search": {
+        "collision_samples": 1536,
+        "differential_candidates": 32,
+        "differential_samples_per_candidate": 96,
+        "mitm_backward_states": 1024,
+        "mitm_forward_states": 1024
+      }
+    },
+    "research_fast": {
+      "analysis": {
+        "middle_key_bits": 12,
+        "middle_key_lanes": [
+          0,
+          1
+        ],
+        "split_round": 11,
+        "target_lane": 0,
+        "truncated_bits": 22
+      },
+      "poseidon2": {
+        "constants_seed": "trackb-poseidon2-v2",
+        "field_modulus": 2130706433,
+        "full_rounds": 8,
+        "internal_diagonal": [
+          2,
+          3,
+          5
+        ],
+        "partial_rounds": 13,
+        "sbox_power": 5,
+        "width": 3
+      },
+      "search": {
+        "collision_samples": 4096,
+        "differential_candidates": 56,
+        "differential_samples_per_candidate": 128,
+        "mitm_backward_states": 3072,
+        "mitm_forward_states": 3328,
+        "scale_rounds_in_full_mode": 0,
+        "seed": 1337
+      }
+    }
+  },
+  "objective": {
+    "attack_found_bonus": 1.0,
+    "attack_found_threshold_bits": 6.5,
+    "complexity_cap_bits": 28.0,
+    "cost_penalty_scale": 0.06,
+    "verified_found_bonus": 3.0,
+    "weight_collision": 0.2,
+    "weight_differential": 0.35,
+    "weight_preimage": 0.45
+  },
+  "poseidon2": {
+    "constants_seed": "trackb-poseidon2-v2",
+    "field_modulus": 2130706433,
+    "full_rounds": 8,
+    "internal_diagonal": [
+      2,
+      3,
+      5
+    ],
+    "partial_rounds": 13,
+    "sbox_power": 5,
+    "width": 3
+  },
+  "search": {
+    "collision_samples": 4096,
+    "differential_candidates": 56,
+    "differential_samples_per_candidate": 128,
+    "mitm_backward_states": 3072,
+    "mitm_forward_states": 3328,
+    "scale_rounds_in_full_mode": 0,
+    "seed": 1337
+  }
+}

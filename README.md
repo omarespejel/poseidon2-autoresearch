@@ -13,9 +13,11 @@ This scaffold focuses on what is quickly verifiable:
 
 - `prepare.py`: setup + target evaluation + baseline recording (fixed/read-only)
 - `train.py`: autonomous optimization loop (editable research loop file)
+- `attack_harness.py`: deterministic reduced-round cryptanalysis harness (Track B signal target)
 - `program.md`: human-authored instructions for the agent
 - `run_loop.py`: backward-compatible alias to `train.py`
 - `portfolio_loop.py`: adaptive multi-target runner (avoids single-target plateaus)
+- `RESEARCH_POSEIDON_VULNERABILITIES.md`: current public cryptanalysis snapshot + source links
 - `evidence_pack.py`: generate submission-grade evidence bundle from logs/artifacts
 - `submission_pack.py`: generate canonical `agent.json`, `agent_log.json`, and receipts bundle
 - `readiness_check.py`: submission-readiness checker (artifacts + activity + timeline gate)
@@ -36,6 +38,8 @@ From repository root:
 python3 prepare.py list-targets
 python3 prepare.py baseline --target cairo_poseidon_style_t8 --notes baseline
 python3 train.py --target cairo_poseidon_style_t8 --iterations 12 --max-accepted 3
+# Track B evaluation harness example
+python3 prepare.py evaluate --target poseidon2_cryptanalysis_trackb_fast
 ```
 
 ## Verbose and Debug Runs
@@ -80,8 +84,15 @@ Useful controls:
 # add extra real-source optimization rounds
 python3 campaign.py --synthesis-cook --real-optimize-rounds 4
 
+# run cryptanalysis-only campaign lane
+python3 campaign.py --track cryptanalysis --real-profile none --loop-iterations 25 --crypto-optimize-rounds 2
+
+# run both lanes in one campaign
+python3 campaign.py --track hybrid --synthesis-cook --crypto-optimize-rounds 2
+
 # show the host-aware default source target set (ARM NEON vs x86 AVX2)
 python3 campaign.py --help | rg real-optimize-targets -n
+python3 campaign.py --help | rg crypto-optimize-targets -n
 
 # run loop indefinitely (stopped by max accepted)
 python3 campaign.py --synthesis-cook --loop-iterations 0 --max-accepted 3
@@ -225,6 +236,32 @@ Reference implementation context can be inspected in:
 
 - `work/leanMultisig`
 - `work/leanSig`
+
+## Track B Cryptanalysis Targets
+
+Track B uses command targets that optimize a deterministic `attack_score` extracted from JSON output.
+The harness runs reduced-round Poseidon2-style kernels over a prime field:
+
+- differential bias search on truncated output deltas
+- meet-in-the-middle truncated preimage search (prefix/suffix split with inversion)
+- birthday-style truncated collision search
+
+- `poseidon2_cryptanalysis_trackb_fast`
+- `poseidon2_cryptanalysis_trackb_full`
+- `poseidon2_cryptanalysis_trackb_verified_fast` (strict verified-hit lane)
+- `poseidon2_cryptanalysis_poseidon64_signal_fast` (profile lane)
+- `poseidon2_cryptanalysis_poseidon256_signal_fast` (profile lane)
+- `poseidon2_cryptanalysis_koalabear16_signal_fast` (profile lane)
+
+Quick start:
+
+```bash
+python3 attack_harness.py --config config/track_b_attack_config.json --mode fast --output-format pretty
+python3 attack_harness.py --config config/track_b_attack_config.json --profile poseidon64_bounty_shape --mode fast --output-format pretty
+python3 prepare.py baseline --target poseidon2_cryptanalysis_trackb_fast --notes trackb_baseline
+python3 train.py --target poseidon2_cryptanalysis_trackb_fast --iterations 12 --max-accepted 2 -v
+python3 train.py --target poseidon2_cryptanalysis_trackb_verified_fast --iterations 12 --max-accepted 1 -v
+```
 
 ## LLM Mode (Optional)
 

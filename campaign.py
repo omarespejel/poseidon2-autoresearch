@@ -81,6 +81,25 @@ def default_real_optimize_targets() -> str:
     return ",".join(targets)
 
 
+def default_crypto_optimize_targets() -> str:
+    return ",".join(
+        [
+            "poseidon2_cryptanalysis_trackb_fast",
+            "poseidon2_cryptanalysis_trackb_verified_fast",
+            "poseidon2_cryptanalysis_poseidon64_signal_fast",
+        ]
+    )
+
+
+def parse_targets_csv(raw: str) -> list[str]:
+    out: list[str] = []
+    for token in str(raw).split(","):
+        clean = token.strip()
+        if clean:
+            out.append(clean)
+    return out
+
+
 @dataclass
 class RunResult:
     argv: list[str]
@@ -220,13 +239,16 @@ def portfolio_cmd(args: argparse.Namespace, *tail: str) -> list[str]:
 
 def write_report(
     *,
+    track: str,
     rows: list[dict[str, str]],
     loop_target: str,
     real_targets: list[str],
+    crypto_targets: list[str],
     loop_iterations: int,
     loop_accepts: int,
     loop_payload: dict[str, Any],
     portfolio_payload: dict[str, Any] | None,
+    crypto_payload: dict[str, Any] | None,
     evidence_payload: dict[str, Any] | None,
     submission_payload: dict[str, Any] | None,
     readiness_payload: dict[str, Any] | None,
@@ -239,14 +261,19 @@ def write_report(
     lines.append("")
     lines.append("## Run Summary")
     lines.append("")
+    lines.append(f"- Campaign track: `{track}`")
     lines.append(f"- Synthesis cook mode: `{str(synthesis_cook).lower()}`")
     lines.append(f"- Loop target: `{loop_target}`")
     lines.append(f"- Loop iterations requested: `{loop_iterations if loop_iterations > 0 else 'infinite'}`")
     lines.append(f"- Loop accepted improvements: `{loop_accepts}`")
     lines.append(f"- Real baseline targets: `{', '.join(real_targets) if real_targets else 'none'}`")
+    lines.append(f"- Cryptanalysis targets: `{', '.join(crypto_targets) if crypto_targets else 'none'}`")
     if portfolio_payload:
         lines.append(f"- Real optimization rounds executed: `{portfolio_payload.get('rounds_executed', 'n/a')}`")
         lines.append(f"- Real optimization total accepted: `{portfolio_payload.get('total_accepted', 'n/a')}`")
+    if crypto_payload:
+        lines.append(f"- Cryptanalysis optimization rounds executed: `{crypto_payload.get('rounds_executed', 'n/a')}`")
+        lines.append(f"- Cryptanalysis optimization total accepted: `{crypto_payload.get('total_accepted', 'n/a')}`")
     lines.append("")
     lines.append("## Latest Metrics")
     lines.append("")
@@ -293,6 +320,13 @@ def write_report(
             "| real_optimize | {ok} | accepted={acc} |".format(
                 ok="yes" if portfolio_payload.get("ok", True) else "no",
                 acc=portfolio_payload.get("total_accepted", "n/a"),
+            )
+        )
+    if crypto_payload is not None:
+        lines.append(
+            "| cryptanalysis_optimize | {ok} | accepted={acc} |".format(
+                ok="yes" if crypto_payload.get("ok", True) else "no",
+                acc=crypto_payload.get("total_accepted", "n/a"),
             )
         )
     if evidence_payload is not None:
@@ -345,7 +379,14 @@ def write_report(
     lines.append("## Reproduce")
     lines.append("")
     lines.append("```bash")
-    lines.append("python3 campaign.py --fresh --synthesis-cook --real-profile fast")
+    if track == "performance":
+        lines.append("python3 campaign.py --fresh --track performance --synthesis-cook --real-profile fast")
+    elif track == "cryptanalysis":
+        lines.append("python3 campaign.py --fresh --track cryptanalysis --loop-iterations 25 --crypto-optimize-rounds 2")
+    else:
+        lines.append(
+            "python3 campaign.py --fresh --track hybrid --synthesis-cook --real-profile fast --crypto-optimize-rounds 2"
+        )
     lines.append("```")
 
     REPORT.write_text("\n".join(lines) + "\n")
@@ -374,6 +415,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--synthesis-cook",
         action="store_true",
         help="Enable a Synthesis-aligned pipeline (real optimize + evidence + submission + readiness)",
+    )
+    parser.add_argument(
+        "--track",
+        choices=["performance", "cryptanalysis", "hybrid"],
+        default="performance",
+        help="Campaign track: implementation performance, cryptanalysis, or both",
     )
     parser.add_argument(
         "--real-profile",
@@ -425,6 +472,41 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.75,
         help="UCB exploration coefficient for real-source optimization",
+    )
+    parser.add_argument(
+        "--crypto-optimize-rounds",
+        type=int,
+        default=0,
+        help="Portfolio optimization rounds for cryptanalysis targets (0 = disabled)",
+    )
+    parser.add_argument(
+        "--crypto-optimize-targets",
+        default=default_crypto_optimize_targets(),
+        help="Comma-separated cryptanalysis targets for Track B optimization",
+    )
+    parser.add_argument(
+        "--crypto-optimize-batch-iterations",
+        type=int,
+        default=8,
+        help="Iterations per target batch in cryptanalysis portfolio optimization",
+    )
+    parser.add_argument(
+        "--crypto-optimize-batch-max-accepted",
+        type=int,
+        default=2,
+        help="Max accepted per batch in cryptanalysis portfolio optimization",
+    )
+    parser.add_argument(
+        "--crypto-optimize-schedule",
+        choices=["round_robin", "ucb"],
+        default="ucb",
+        help="Scheduling strategy for cryptanalysis portfolio optimization",
+    )
+    parser.add_argument(
+        "--crypto-optimize-ucb-explore",
+        type=float,
+        default=0.70,
+        help="UCB exploration coefficient for cryptanalysis optimization",
     )
     parser.add_argument(
         "--mutation-memory-file",
@@ -517,16 +599,24 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--loop-iterations must be >= 0")
     if args.real_optimize_rounds < 0:
         raise SystemExit("--real-optimize-rounds must be >= 0")
+    if args.crypto_optimize_rounds < 0:
+        raise SystemExit("--crypto-optimize-rounds must be >= 0")
 
     if args.synthesis_cook:
-        if args.real_optimize_rounds == 0:
+        if args.track in {"performance", "hybrid"} and args.real_optimize_rounds == 0:
             args.real_optimize_rounds = 2
+        if args.track in {"cryptanalysis", "hybrid"} and args.crypto_optimize_rounds == 0:
+            args.crypto_optimize_rounds = 2
         if not args.build_evidence:
             args.build_evidence = True
         if not args.build_submission:
             args.build_submission = True
         if not args.build_readiness:
             args.build_readiness = True
+
+    if args.track == "cryptanalysis" and args.loop_target == "cairo_poseidon_style_t8":
+        # Track B defaults to cryptanalysis objective unless user explicitly overrides.
+        args.loop_target = "poseidon2_cryptanalysis_trackb_fast"
 
     start_row_count = 0 if args.fresh or not RESULTS.exists() else len(parse_results())
 
@@ -558,12 +648,13 @@ def main(argv: list[str] | None = None) -> int:
         stream_stderr=args.verbose > 0,
     )
 
-    # Real baseline targets (active Lean stack context).
+    # Performance track baseline targets (active Lean stack context).
     real_targets: list[str] = []
-    if args.real_profile == "fast":
-        real_targets = ["leanmultisig_poseidon16_fast", "leanmultisig_xmss_fast"]
-    elif args.real_profile == "full":
-        real_targets = ["leanmultisig_poseidon16_full", "leanmultisig_xmss_fast"]
+    if args.track in {"performance", "hybrid"}:
+        if args.real_profile == "fast":
+            real_targets = ["leanmultisig_poseidon16_fast", "leanmultisig_xmss_fast"]
+        elif args.real_profile == "full":
+            real_targets = ["leanmultisig_poseidon16_full", "leanmultisig_xmss_fast"]
 
     if real_targets and not args.no_bootstrap:
         for target in real_targets:
@@ -581,7 +672,7 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     portfolio_payload: dict[str, Any] | None = None
-    if args.real_optimize_rounds > 0:
+    if args.track in {"performance", "hybrid"} and args.real_optimize_rounds > 0:
         portfolio_payload = must_run_json(
             portfolio_cmd(
                 args,
@@ -604,6 +695,45 @@ def main(argv: list[str] | None = None) -> int:
             stream_stderr=args.verbose > 0,
         )
 
+    crypto_targets: list[str] = []
+    if args.track in {"cryptanalysis", "hybrid"}:
+        crypto_targets = parse_targets_csv(args.crypto_optimize_targets)
+        if not crypto_targets:
+            crypto_targets = parse_targets_csv(default_crypto_optimize_targets())
+
+    for target in crypto_targets:
+        if target == args.loop_target:
+            continue
+        must_run(
+            prepare_cmd(args, "baseline", "--target", target, "--notes", "campaign_crypto"),
+            label=f"baseline_{target}",
+            stream_stderr=args.verbose > 0,
+        )
+
+    crypto_payload: dict[str, Any] | None = None
+    if args.track in {"cryptanalysis", "hybrid"} and args.crypto_optimize_rounds > 0:
+        crypto_payload = must_run_json(
+            portfolio_cmd(
+                args,
+                "--targets",
+                ",".join(crypto_targets),
+                "--rounds",
+                str(args.crypto_optimize_rounds),
+                "--batch-iterations",
+                str(args.crypto_optimize_batch_iterations),
+                "--batch-max-accepted",
+                str(args.crypto_optimize_batch_max_accepted),
+                "--schedule",
+                args.crypto_optimize_schedule,
+                "--ucb-explore",
+                str(args.crypto_optimize_ucb_explore),
+                "--artifacts",
+                args.loop_artifacts,
+            ),
+            label="portfolio_crypto_optimize",
+            stream_stderr=args.verbose > 0,
+        )
+
     evidence_payload: dict[str, Any] | None = None
     if args.build_evidence:
         evidence_payload = must_run_json(
@@ -614,6 +744,19 @@ def main(argv: list[str] | None = None) -> int:
 
     submission_payload: dict[str, Any] | None = None
     if args.build_submission:
+        task_categories = ["autonomous_research"]
+        if args.track in {"performance", "hybrid"}:
+            task_categories.extend(["cryptographic_optimization", "zk_proving_performance"])
+        if args.track in {"cryptanalysis", "hybrid"}:
+            task_categories.extend(["cryptanalysis", "hash_security_analysis"])
+        seen_categories: set[str] = set()
+        deduped_categories: list[str] = []
+        for category in task_categories:
+            if category in seen_categories:
+                continue
+            seen_categories.add(category)
+            deduped_categories.append(category)
+
         submission_argv = [
             sys.executable,
             str(SUBMISSION_PACK),
@@ -625,11 +768,9 @@ def main(argv: list[str] | None = None) -> int:
             args.erc8004_identity.strip(),
             "--erc8004-registration-tx",
             args.erc8004_registration_tx.strip(),
-            "--task-category",
-            "cryptographic_optimization",
-            "--task-category",
-            "autonomous_research",
         ]
+        for category in deduped_categories:
+            submission_argv.extend(["--task-category", category])
         if args.submission_project_url.strip():
             submission_argv.extend(["--project-url", args.submission_project_url.strip()])
         if args.submission_notes.strip():
@@ -662,13 +803,16 @@ def main(argv: list[str] | None = None) -> int:
     accepts = count_accepts(run_rows, args.loop_target)
 
     write_report(
+        track=args.track,
         rows=run_rows,
         loop_target=args.loop_target,
         real_targets=real_targets,
+        crypto_targets=crypto_targets,
         loop_iterations=args.loop_iterations,
         loop_accepts=accepts,
         loop_payload=loop_payload,
         portfolio_payload=portfolio_payload,
+        crypto_payload=crypto_payload,
         evidence_payload=evidence_payload,
         submission_payload=submission_payload,
         readiness_payload=readiness_payload,
@@ -682,8 +826,10 @@ def main(argv: list[str] | None = None) -> int:
                 "report": str(REPORT),
                 "rows": len(run_rows),
                 "accepted": accepts,
+                "track": args.track,
                 "loop_payload": loop_payload,
                 "portfolio_payload": portfolio_payload,
+                "crypto_payload": crypto_payload,
                 "evidence_payload": evidence_payload,
                 "submission_payload": submission_payload,
                 "readiness_payload": readiness_payload,

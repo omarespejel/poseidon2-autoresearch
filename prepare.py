@@ -306,6 +306,74 @@ def extract_metric(haystack: str, metric_regex: str) -> float | None:
         return None
 
 
+def extract_last_json_payload(haystack: str) -> dict[str, Any] | list[Any] | None:
+    cleaned = strip_ansi(haystack).strip()
+    if not cleaned:
+        return None
+
+    lines = cleaned.splitlines()
+    for line in reversed(lines):
+        token = line.strip()
+        if not token:
+            continue
+        if not (token.startswith("{") or token.startswith("[")):
+            continue
+        try:
+            payload = json.loads(token)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, (dict, list)):
+            return payload
+
+    try:
+        payload = json.loads(cleaned)
+    except json.JSONDecodeError:
+        return None
+    if isinstance(payload, (dict, list)):
+        return payload
+    return None
+
+
+def resolve_json_path(payload: Any, path: str) -> Any:
+    current = payload
+    for segment in path.split("."):
+        key = segment.strip()
+        if not key:
+            continue
+        if isinstance(current, list):
+            try:
+                idx = int(key)
+            except ValueError:
+                return None
+            if idx < 0 or idx >= len(current):
+                return None
+            current = current[idx]
+            continue
+        if isinstance(current, dict):
+            if key not in current:
+                return None
+            current = current[key]
+            continue
+        return None
+    return current
+
+
+def extract_metric_from_json_payload(payload: Any, metric_json_path: str) -> float | None:
+    if not metric_json_path.strip():
+        return None
+    value = resolve_json_path(payload, metric_json_path)
+    if isinstance(value, bool):
+        return 1.0 if value else 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
 def is_git_oid(ref: str) -> bool:
     return bool(GIT_OID_RE.fullmatch(ref.strip()))
 
@@ -603,7 +671,10 @@ def evaluate_command_profile(
     project_dir: Path,
     profile_name: str,
     benchmark_command: list[str],
+    metric_source: str,
     metric_regex: str,
+    metric_json_path: str,
+    metric_json_file: str,
     warmup_runs: int,
     runs: int,
     aggregate: str,
@@ -652,6 +723,7 @@ def evaluate_command_profile(
     total_invocations = warmup_runs + runs
 
     for invocation in range(total_invocations):
+        invocation_start_ns = time.time_ns()
         bench = run_cmd(benchmark_command, project_dir)
         total_seconds += bench.seconds
         bench_runs.append(command_result_to_json(bench))
@@ -675,7 +747,32 @@ def evaluate_command_profile(
                 },
             }
 
-        value = extract_metric(bench.stdout + "\n" + bench.stderr, metric_regex)
+        extractor = metric_source.strip().lower()
+        value: float | None = None
+        if extractor == "regex":
+            value = extract_metric(bench.stdout + "\n" + bench.stderr, metric_regex)
+        elif extractor == "json_stdout":
+            payload = extract_last_json_payload(bench.stdout)
+            if payload is None:
+                payload = extract_last_json_payload(bench.stderr)
+            value = extract_metric_from_json_payload(payload, metric_json_path)
+        elif extractor == "json_file":
+            json_path = Path(metric_json_file)
+            if not json_path.is_absolute():
+                json_path = project_dir / json_path
+            if json_path.exists():
+                try:
+                    stat = json_path.stat()
+                    if stat.st_mtime_ns < invocation_start_ns:
+                        payload = None
+                    else:
+                        payload = json.loads(json_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    payload = None
+                value = extract_metric_from_json_payload(payload, metric_json_path)
+            else:
+                value = None
+
         if value is None:
             return {
                 "status": "failed",
@@ -684,11 +781,17 @@ def evaluate_command_profile(
                 "check_s": 0.0,
                 "info_or_bench_s": total_seconds,
                 "execute_s": 0.0,
-                "notes": f"profile={profile_name} metric regex did not match output at run {invocation + 1}",
+                "notes": (
+                    f"profile={profile_name} metric extraction failed at run {invocation + 1} "
+                    f"(source={extractor})"
+                ),
                 "debug": {
                     "profile": profile_name,
                     "bench_runs": bench_runs,
+                    "metric_source": extractor,
                     "metric_regex": metric_regex,
+                    "metric_json_path": metric_json_path,
+                    "metric_json_file": metric_json_file,
                 },
             }
 
@@ -791,7 +894,10 @@ def evaluate_command_profile(
         "debug": {
             "profile": profile_name,
             "benchmark_command": benchmark_command,
+            "metric_source": metric_source,
             "metric_regex": metric_regex,
+            "metric_json_path": metric_json_path,
+            "metric_json_file": metric_json_file,
             "bench_runs": bench_runs,
             "metric_values": metric_values,
             "metric_values_raw": metric_values_raw,
@@ -826,7 +932,10 @@ def evaluate_command(target_name: str, target: dict[str, Any]) -> dict[str, Any]
     default_command = target.get("benchmark_command")
     if isinstance(default_command, list):
         default_command = [str(part) for part in default_command]
+    default_metric_source = str(target.get("metric_source", "regex")).strip().lower() or "regex"
     default_regex = str(target.get("metric_regex", ""))
+    default_metric_json_path = str(target.get("metric_json_path", ""))
+    default_metric_json_file = str(target.get("metric_json_file", ""))
     try:
         default_warmup = int(target.get("warmup_runs", 0))
         default_runs = int(target.get("runs", 1))
@@ -859,7 +968,7 @@ def evaluate_command(target_name: str, target: dict[str, Any]) -> dict[str, Any]
                 "notes": "benchmark_command must be a non-empty list",
                 "debug": {},
             }
-        if not default_regex:
+        if default_metric_source == "regex" and not default_regex:
             return {
                 "status": "failed",
                 "metric_name": metric_name,
@@ -870,12 +979,48 @@ def evaluate_command(target_name: str, target: dict[str, Any]) -> dict[str, Any]
                 "notes": "metric_regex must be non-empty",
                 "debug": {},
             }
+        if default_metric_source in {"json_stdout", "json_file"} and not default_metric_json_path.strip():
+            return {
+                "status": "failed",
+                "metric_name": metric_name,
+                "metric_value": None,
+                "check_s": 0.0,
+                "info_or_bench_s": 0.0,
+                "execute_s": 0.0,
+                "notes": "metric_json_path must be non-empty for JSON metric extraction",
+                "debug": {},
+            }
+        if default_metric_source == "json_file" and not default_metric_json_file.strip():
+            return {
+                "status": "failed",
+                "metric_name": metric_name,
+                "metric_value": None,
+                "check_s": 0.0,
+                "info_or_bench_s": 0.0,
+                "execute_s": 0.0,
+                "notes": "metric_json_file must be non-empty when metric_source=json_file",
+                "debug": {},
+            }
+        if default_metric_source not in {"regex", "json_stdout", "json_file"}:
+            return {
+                "status": "failed",
+                "metric_name": metric_name,
+                "metric_value": None,
+                "check_s": 0.0,
+                "info_or_bench_s": 0.0,
+                "execute_s": 0.0,
+                "notes": f"unsupported metric_source '{default_metric_source}'",
+                "debug": {},
+            }
         return evaluate_command_profile(
             metric_name=metric_name,
             project_dir=project_dir,
             profile_name="default",
             benchmark_command=default_command,
+            metric_source=default_metric_source,
             metric_regex=default_regex,
+            metric_json_path=default_metric_json_path,
+            metric_json_file=default_metric_json_file,
             warmup_runs=default_warmup,
             runs=default_runs,
             aggregate=default_aggregate,
@@ -934,7 +1079,10 @@ def evaluate_command(target_name: str, target: dict[str, Any]) -> dict[str, Any]
         command = profile_raw.get("benchmark_command", default_command)
         if isinstance(command, list):
             command = [str(part) for part in command]
+        metric_source = str(profile_raw.get("metric_source", default_metric_source)).strip().lower() or "regex"
         metric_regex = str(profile_raw.get("metric_regex", default_regex))
+        metric_json_path = str(profile_raw.get("metric_json_path", default_metric_json_path))
+        metric_json_file = str(profile_raw.get("metric_json_file", default_metric_json_file))
         try:
             warmup_runs = int(profile_raw.get("warmup_runs", default_warmup))
             runs = int(profile_raw.get("runs", default_runs))
@@ -970,7 +1118,18 @@ def evaluate_command(target_name: str, target: dict[str, Any]) -> dict[str, Any]
                 "notes": f"profile={profile_name} benchmark_command must be a non-empty list",
                 "debug": {"profile_reports": profile_reports},
             }
-        if not metric_regex:
+        if metric_source not in {"regex", "json_stdout", "json_file"}:
+            return {
+                "status": "failed",
+                "metric_name": metric_name,
+                "metric_value": None,
+                "check_s": 0.0,
+                "info_or_bench_s": total_seconds,
+                "execute_s": 0.0,
+                "notes": f"profile={profile_name} unsupported metric_source '{metric_source}'",
+                "debug": {"profile_reports": profile_reports},
+            }
+        if metric_source == "regex" and not metric_regex:
             return {
                 "status": "failed",
                 "metric_name": metric_name,
@@ -979,6 +1138,28 @@ def evaluate_command(target_name: str, target: dict[str, Any]) -> dict[str, Any]
                 "info_or_bench_s": total_seconds,
                 "execute_s": 0.0,
                 "notes": f"profile={profile_name} metric_regex must be non-empty",
+                "debug": {"profile_reports": profile_reports},
+            }
+        if metric_source in {"json_stdout", "json_file"} and not metric_json_path.strip():
+            return {
+                "status": "failed",
+                "metric_name": metric_name,
+                "metric_value": None,
+                "check_s": 0.0,
+                "info_or_bench_s": total_seconds,
+                "execute_s": 0.0,
+                "notes": f"profile={profile_name} metric_json_path must be non-empty",
+                "debug": {"profile_reports": profile_reports},
+            }
+        if metric_source == "json_file" and not metric_json_file.strip():
+            return {
+                "status": "failed",
+                "metric_name": metric_name,
+                "metric_value": None,
+                "check_s": 0.0,
+                "info_or_bench_s": total_seconds,
+                "execute_s": 0.0,
+                "notes": f"profile={profile_name} metric_json_file must be non-empty",
                 "debug": {"profile_reports": profile_reports},
             }
         if not math.isfinite(weight) or weight <= 0.0:
@@ -998,7 +1179,10 @@ def evaluate_command(target_name: str, target: dict[str, Any]) -> dict[str, Any]
             project_dir=project_dir,
             profile_name=profile_name,
             benchmark_command=command,
+            metric_source=metric_source,
             metric_regex=metric_regex,
+            metric_json_path=metric_json_path,
+            metric_json_file=metric_json_file,
             warmup_runs=warmup_runs,
             runs=runs,
             aggregate=aggregate,

@@ -870,6 +870,166 @@ def rust_mutator_hoist_log_num_cols(source: str) -> tuple[str, str, bool]:
     return candidate, "rust_hoist_log_num_cols", True
 
 
+def json_dump_stable(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, indent=2, sort_keys=True) + "\n"
+
+
+def json_heuristic_candidate(
+    source: str,
+    iteration: int,
+    source_path: Path,
+    target_config: dict[str, Any] | None = None,
+) -> tuple[str, str, bool]:
+    path = str(source_path).replace("\\", "/").lower()
+    if not path.endswith("config/track_b_attack_config.json"):
+        return source, "json_no_change", False
+
+    try:
+        payload = json.loads(source)
+    except json.JSONDecodeError:
+        return source, "json_trackb_parse_failed", False
+    if not isinstance(payload, dict):
+        return source, "json_trackb_invalid_root", False
+
+    def clone_obj() -> dict[str, Any]:
+        return json.loads(json.dumps(payload))
+
+    def target_profile_name(obj: dict[str, Any]) -> str:
+        benchmark_command = None
+        if isinstance(target_config, dict):
+            benchmark_command = target_config.get("benchmark_command")
+            if isinstance(benchmark_command, list):
+                for idx, token in enumerate(benchmark_command[:-1]):
+                    if token == "--profile":
+                        candidate = benchmark_command[idx + 1]
+                        if isinstance(candidate, str) and candidate.strip():
+                            return candidate.strip()
+        active_profile = obj.get("active_profile")
+        if isinstance(active_profile, str) and active_profile.strip():
+            return active_profile.strip()
+        return ""
+
+    def resolve_section(obj: dict[str, Any], section_name: str) -> dict[str, Any] | None:
+        profile_name = target_profile_name(obj)
+        if profile_name:
+            profiles = obj.get("challenge_profiles")
+            if isinstance(profiles, dict):
+                profile_payload = profiles.get(profile_name)
+                if isinstance(profile_payload, dict):
+                    section = profile_payload.get(section_name)
+                    if isinstance(section, dict):
+                        return section
+        section = obj.get(section_name)
+        if isinstance(section, dict):
+            return section
+        return None
+
+    def apply_delta(
+        obj: dict[str, Any],
+        *,
+        section_name: str,
+        key: str,
+        delta: int,
+        lo: int,
+        hi: int,
+    ) -> bool:
+        section = resolve_section(obj, section_name)
+        if section is None:
+            return False
+        try:
+            current = int(section.get(key))
+        except (TypeError, ValueError):
+            return False
+        updated = max(lo, min(hi, current + delta))
+        if updated == current:
+            return False
+        section[key] = updated
+        return True
+
+    def total_rounds(obj: dict[str, Any]) -> int:
+        poseidon_cfg = resolve_section(obj, "poseidon2")
+        if poseidon_cfg is None:
+            return 21
+        full_rounds = max(2, int(poseidon_cfg.get("full_rounds", 8)))
+        if full_rounds % 2 != 0:
+            full_rounds += 1
+        partial_rounds = max(1, int(poseidon_cfg.get("partial_rounds", 13)))
+        return full_rounds + partial_rounds
+
+    def apply_split_round(obj: dict[str, Any], delta: int) -> bool:
+        analysis = resolve_section(obj, "analysis")
+        if analysis is None:
+            return False
+        try:
+            current = int(analysis.get("split_round"))
+        except (TypeError, ValueError):
+            return False
+        rounds = total_rounds(obj)
+        updated = max(1, min(max(2, rounds - 1), current + delta))
+        if updated == current:
+            return False
+        analysis["split_round"] = updated
+        return True
+
+    def op_search(key: str, delta: int, lo: int, hi: int) -> Any:
+        return lambda obj: apply_delta(
+            obj,
+            section_name="search",
+            key=key,
+            delta=delta,
+            lo=lo,
+            hi=hi,
+        )
+
+    def op_analysis(key: str, delta: int, lo: int, hi: int) -> Any:
+        return lambda obj: apply_delta(
+            obj,
+            section_name="analysis",
+            key=key,
+            delta=delta,
+            lo=lo,
+            hi=hi,
+        )
+
+    operators: list[tuple[str, Any]] = [
+        ("json_trackb_diff_candidates_up", op_search("differential_candidates", +8, 4, 65536)),
+        ("json_trackb_diff_candidates_down", op_search("differential_candidates", -8, 4, 65536)),
+        (
+            "json_trackb_diff_samples_up",
+            op_search("differential_samples_per_candidate", +32, 8, 1_000_000),
+        ),
+        (
+            "json_trackb_diff_samples_down",
+            op_search("differential_samples_per_candidate", -32, 8, 1_000_000),
+        ),
+        ("json_trackb_mitm_forward_up", op_search("mitm_forward_states", +256, 64, 1_000_000)),
+        ("json_trackb_mitm_forward_down", op_search("mitm_forward_states", -256, 64, 1_000_000)),
+        ("json_trackb_mitm_backward_up", op_search("mitm_backward_states", +256, 64, 1_000_000)),
+        ("json_trackb_mitm_backward_down", op_search("mitm_backward_states", -256, 64, 1_000_000)),
+        ("json_trackb_collision_samples_up", op_search("collision_samples", +512, 64, 1_000_000)),
+        ("json_trackb_collision_samples_down", op_search("collision_samples", -512, 64, 1_000_000)),
+        ("json_trackb_split_round_up", lambda obj: apply_split_round(obj, +1)),
+        ("json_trackb_split_round_down", lambda obj: apply_split_round(obj, -1)),
+        ("json_trackb_middle_key_bits_up", op_analysis("middle_key_bits", +1, 6, 40)),
+        ("json_trackb_middle_key_bits_down", op_analysis("middle_key_bits", -1, 6, 40)),
+        ("json_trackb_truncated_bits_up", op_analysis("truncated_bits", +1, 8, 40)),
+        ("json_trackb_truncated_bits_down", op_analysis("truncated_bits", -1, 8, 40)),
+    ]
+
+    shift = (iteration - 1) % len(operators)
+    ordered = operators[shift:] + operators[:shift]
+    for label, op in ordered:
+        candidate_obj = clone_obj()
+        changed = bool(op(candidate_obj))
+        if not changed:
+            continue
+        candidate_source = json_dump_stable(candidate_obj)
+        if candidate_source == source:
+            continue
+        return candidate_source, label, True
+    return source, "json_trackb_no_change", False
+
+
 def generic_heuristic_candidate(source: str, iteration: int) -> tuple[str, str, bool]:
     markers = [
         "AUTOCIRCUIT_NOP_ASSERT",
@@ -1144,6 +1304,15 @@ def heuristic_candidate(
     mutation_memory: dict[str, Any] | None = None,
     target_name: str = "",
 ) -> tuple[str, str, bool]:
+    if language.lower() == "json":
+        json_candidate, mutation, changed = json_heuristic_candidate(
+            source,
+            iteration,
+            source_path,
+            target_config=target_config,
+        )
+        if changed:
+            return json_candidate, mutation, True
     if language.lower() == "rust":
         rust_candidate, mutation, changed = rust_heuristic_candidate(
             source,
@@ -1429,6 +1598,8 @@ def infer_mutation_language(*, mutation: str, target_language: str | None = None
         return candidate
     if mutation.startswith("rust_"):
         return "rust"
+    if mutation.startswith("json_"):
+        return "json"
     if mutation.startswith("heuristic_"):
         return "generic"
     return "unknown"
