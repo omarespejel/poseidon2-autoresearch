@@ -89,6 +89,27 @@ class PythonMutationSelectionTests(unittest.TestCase):
         language = train.infer_mutation_language(mutation="python_trackb_mitm_bucket_cap_up")
         self.assertEqual(language, "python")
 
+    def test_algorithmic_diff_structure_mutator_applies(self) -> None:
+        source = harness_source()
+        candidate, mutation, changed = train.python_mutator_diff_secondary_lane_structure(source)
+        self.assertTrue(changed)
+        self.assertNotEqual(candidate, source)
+        self.assertEqual(mutation, "python_trackb_diff_secondary_lane_structure")
+
+    def test_algorithmic_mitm_key_mutator_applies(self) -> None:
+        source = harness_source()
+        candidate, mutation, changed = train.python_mutator_mitm_augmented_middle_key(source)
+        self.assertTrue(changed)
+        self.assertNotEqual(candidate, source)
+        self.assertEqual(mutation, "python_trackb_mitm_augmented_middle_key")
+
+    def test_algorithmic_algebraic_sampling_mutator_applies(self) -> None:
+        source = harness_source()
+        candidate, mutation, changed = train.python_mutator_algebraic_structured_unknown_samples(source)
+        self.assertTrue(changed)
+        self.assertNotEqual(candidate, source)
+        self.assertEqual(mutation, "python_trackb_algebraic_structured_unknown_samples")
+
 
 if __name__ == "__main__":
     unittest.main()

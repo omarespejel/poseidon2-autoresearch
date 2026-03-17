@@ -989,6 +989,146 @@ def python_mutator_algebraic_fit_gain_down(source: str) -> tuple[str, str, bool]
     )
 
 
+def python_mutator_diff_secondary_lane_structure(source: str) -> tuple[str, str, bool]:
+    old = (
+        "        if rng.random() < 0.35:\n"
+        "            for i in range(spec.width):\n"
+        "                if i == lane_idx:\n"
+        "                    continue\n"
+        "                if rng.random() < 0.2:\n"
+        "                    delta[i] = rng.randrange(spec.modulus)"
+    )
+    new = (
+        "        if spec.width > 1 and rng.random() < 0.35:\n"
+        "            lane_j = (lane_idx + 1 + rng.randrange(max(1, spec.width - 1))) % spec.width\n"
+        "            delta[lane_j] = rng.randrange(1, spec.modulus)\n"
+        "            if spec.width > 2 and rng.random() < 0.2:\n"
+        "                lane_k = (lane_j + 1 + rng.randrange(max(1, spec.width - 1))) % spec.width\n"
+        "                if lane_k != lane_idx:\n"
+        "                    delta[lane_k] = rng.randrange(1, spec.modulus)"
+    )
+    if old not in source:
+        return source, "python_trackb_diff_secondary_lane_structure:pattern_missing", False
+    return source.replace(old, new, 1), "python_trackb_diff_secondary_lane_structure", True
+
+
+def python_mutator_diff_tag_mix_adjacent_lane(source: str) -> tuple[str, str, bool]:
+    return python_replace_first(
+        source,
+        [
+            (
+                "            d = output_tag((y2[lane] - y1[lane]) % spec.modulus, bits)",
+                "            d_primary = (y2[lane] - y1[lane]) % spec.modulus\n"
+                "            d_neighbor = (y2[(lane + 1) % spec.width] - y1[(lane + 1) % spec.width]) % spec.modulus\n"
+                "            d = output_tag((d_primary ^ d_neighbor) % spec.modulus, bits)",
+            ),
+        ],
+        mutation="python_trackb_diff_tag_mix_adjacent_lane",
+    )
+
+
+def python_mutator_mitm_bucket_reservoir(source: str) -> tuple[str, str, bool]:
+    old = (
+        "        if len(bucket) < 4:\n"
+        "            bucket.append(x)"
+    )
+    new = (
+        "        if len(bucket) < 4:\n"
+        "            bucket.append(x)\n"
+        "        elif rng.random() < 0.35:\n"
+        "            bucket[rng.randrange(len(bucket))] = x"
+    )
+    if old not in source:
+        return source, "python_trackb_mitm_bucket_reservoir:pattern_missing", False
+    return source.replace(old, new, 1), "python_trackb_mitm_bucket_reservoir", True
+
+
+def python_mutator_mitm_augmented_middle_key(source: str) -> tuple[str, str, bool]:
+    old_forward = "        key = middle_key(mid, lanes=key_lanes, bits=key_bits)"
+    old_backward = "        key = middle_key(mid_guess, lanes=key_lanes, bits=key_bits)"
+    if old_forward not in source or old_backward not in source:
+        return source, "python_trackb_mitm_augmented_middle_key:pattern_missing", False
+    new_forward = (
+        "        key_base = middle_key(mid, lanes=key_lanes, bits=key_bits)\n"
+        "        key = key_base + (output_tag(mid[lane], min(key_bits, trunc_bits)),)"
+    )
+    new_backward = (
+        "        key_base = middle_key(mid_guess, lanes=key_lanes, bits=key_bits)\n"
+        "        key = key_base + (output_tag(mid_guess[lane], min(key_bits, trunc_bits)),)"
+    )
+    candidate = source.replace(old_forward, new_forward, 1)
+    candidate = candidate.replace(old_backward, new_backward, 1)
+    if candidate == source:
+        return source, "python_trackb_mitm_augmented_middle_key:no_change", False
+    return candidate, "python_trackb_mitm_augmented_middle_key", True
+
+
+def python_mutator_mitm_lane_value_jitter(source: str) -> tuple[str, str, bool]:
+    return python_replace_first(
+        source,
+        [
+            (
+                "        lane_value = ((hi << trunc_bits) | target_tag) % spec.modulus",
+                "        jitter = rng.randrange(1 << min(6, max(1, trunc_bits)))\n"
+                "        lane_value = (((hi << trunc_bits) | target_tag) + jitter) % spec.modulus",
+            ),
+        ],
+        mutation="python_trackb_mitm_lane_value_jitter",
+    )
+
+
+def python_mutator_collision_lane_mix_tag(source: str) -> tuple[str, str, bool]:
+    return python_replace_first(
+        source,
+        [
+            (
+                "        tag = output_tag(y[lane], bits)",
+                "        tag_primary = output_tag(y[lane], bits)\n"
+                "        tag_neighbor = output_tag(y[(lane + 1) % spec.width], max(4, bits // 2))\n"
+                "        tag = (tag_primary << max(1, bits // 2)) ^ tag_neighbor",
+            ),
+        ],
+        mutation="python_trackb_collision_lane_mix_tag",
+    )
+
+
+def python_mutator_algebraic_structured_unknown_samples(source: str) -> tuple[str, str, bool]:
+    old = (
+        "        for lane in unknown_lanes:\n"
+        "            v = rng.randrange(spec.modulus)\n"
+        "            state[lane] = v\n"
+        "            values.append(v)"
+    )
+    new = (
+        "        base = rng.randrange(spec.modulus)\n"
+        "        for offset, lane in enumerate(unknown_lanes):\n"
+        "            step = rng.randrange(spec.modulus)\n"
+        "            v = (base + ((offset + 1) * step)) % spec.modulus\n"
+        "            state[lane] = v\n"
+        "            values.append(v)"
+    )
+    if old not in source:
+        return source, "python_trackb_algebraic_structured_unknown_samples:pattern_missing", False
+    return source.replace(old, new, 1), "python_trackb_algebraic_structured_unknown_samples", True
+
+
+def python_mutator_algebraic_template_noise(source: str) -> tuple[str, str, bool]:
+    return python_replace_first(
+        source,
+        [
+            (
+                "        state = list(template)",
+                "        state = list(template)\n"
+                "        if rng.random() < 0.25:\n"
+                "            for lane in range(spec.width):\n"
+                "                if lane not in unknown_lanes:\n"
+                "                    state[lane] = rng.randrange(spec.modulus)",
+            ),
+        ],
+        mutation="python_trackb_algebraic_template_noise",
+    )
+
+
 def python_heuristic_candidate(
     source: str,
     iteration: int,
@@ -1013,6 +1153,14 @@ def python_heuristic_candidate(
         python_mutator_mitm_bucket_cap_down,
         python_mutator_algebraic_fit_gain_up,
         python_mutator_algebraic_fit_gain_down,
+        python_mutator_diff_secondary_lane_structure,
+        python_mutator_diff_tag_mix_adjacent_lane,
+        python_mutator_mitm_bucket_reservoir,
+        python_mutator_mitm_augmented_middle_key,
+        python_mutator_mitm_lane_value_jitter,
+        python_mutator_collision_lane_mix_tag,
+        python_mutator_algebraic_structured_unknown_samples,
+        python_mutator_algebraic_template_noise,
     ]
 
     shift = (iteration - 1) % len(operators)
