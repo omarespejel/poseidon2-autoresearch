@@ -174,6 +174,9 @@ class AttackHarnessTests(unittest.TestCase):
         self.assertEqual(int(merged["poseidon2"]["sbox_power"]), 7)
         self.assertEqual(int(merged["analysis"]["truncated_bits"]), 28)
 
+        with self.assertRaises(ValueError):
+            attack_harness.resolve_profile_config(tiny_config(), "unknown_profile")
+
     def test_kernels_handle_zero_budgets(self) -> None:
         cfg = tiny_config()
         spec = attack_harness.build_spec(cfg, mode="fast")

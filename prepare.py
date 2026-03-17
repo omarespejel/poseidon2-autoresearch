@@ -752,7 +752,9 @@ def evaluate_command_profile(
         if extractor == "regex":
             value = extract_metric(bench.stdout + "\n" + bench.stderr, metric_regex)
         elif extractor == "json_stdout":
-            payload = extract_last_json_payload(bench.stdout + "\n" + bench.stderr)
+            payload = extract_last_json_payload(bench.stdout)
+            if payload is None:
+                payload = extract_last_json_payload(bench.stderr)
             value = extract_metric_from_json_payload(payload, metric_json_path)
         elif extractor == "json_file":
             json_path = Path(metric_json_file)

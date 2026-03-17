@@ -1014,15 +1014,6 @@ def json_heuristic_candidate(
         ("json_trackb_middle_key_bits_down", op_analysis("middle_key_bits", -1, 6, 40)),
         ("json_trackb_truncated_bits_up", op_analysis("truncated_bits", +1, 8, 40)),
         ("json_trackb_truncated_bits_down", op_analysis("truncated_bits", -1, 8, 40)),
-        # Backward-compatible operators for earlier config schema.
-        ("json_trackb_delta_candidates_up", op_search("delta_candidates", +8, 4, 4096)),
-        ("json_trackb_delta_candidates_down", op_search("delta_candidates", -8, 4, 4096)),
-        ("json_trackb_samples_per_delta_up", op_search("samples_per_delta", +64, 16, 131072)),
-        ("json_trackb_samples_per_delta_down", op_search("samples_per_delta", -64, 16, 131072)),
-        ("json_trackb_preimage_attempts_up", op_search("preimage_attempts_per_trial", +512, 32, 1_000_000)),
-        ("json_trackb_preimage_attempts_down", op_search("preimage_attempts_per_trial", -512, 32, 1_000_000)),
-        ("json_trackb_preimage_trials_up", op_search("preimage_trials", +2, 2, 4096)),
-        ("json_trackb_preimage_trials_down", op_search("preimage_trials", -2, 2, 4096)),
     ]
 
     shift = (iteration - 1) % len(operators)
