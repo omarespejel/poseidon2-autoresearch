@@ -2571,6 +2571,7 @@ def select_population_parent(
     best_metric: float,
     best_source: str,
     max_candidates: int = 8,
+    rng: random.Random | None = None,
 ) -> dict[str, Any] | None:
     if not isinstance(memory, dict):
         return None
@@ -2618,7 +2619,8 @@ def select_population_parent(
     candidates.sort(key=lambda item: item[0], reverse=True)
     top = candidates[: max(1, min(max_candidates, len(candidates)))]
     weights = [float(len(top) - idx) for idx in range(len(top))]
-    choice_idx = random.choices(range(len(top)), weights=weights, k=1)[0]
+    chooser = rng if rng is not None else random
+    choice_idx = chooser.choices(range(len(top)), weights=weights, k=1)[0]
     return top[choice_idx][1]
 
 
@@ -2847,6 +2849,42 @@ def update_and_save_operator_stats(
     return current_stats
 
 
+def disable_operator_stats_for_run(
+    *,
+    target_name: str,
+    mutation: str,
+    phase: str,
+    exc: Exception,
+    diagnostics: dict[str, Any] | None = None,
+) -> None:
+    details = {
+        "target": target_name,
+        "mutation": mutation,
+        "phase": phase,
+        "error": f"{type(exc).__name__}: {exc}",
+    }
+    print(
+        (
+            "[train] Warning: operator stats update failed "
+            f"(phase={phase}, mutation={mutation}, error={type(exc).__name__}: {exc}); "
+            "disabling operator stats for the remainder of the run"
+        ),
+        file=sys.stderr,
+    )
+    if diagnostics is not None:
+        diagnostics["operator_stats_disabled"] = details
+    try:
+        prepare.append_log(
+            {
+                "event": "operator_stats_disabled",
+                "timestamp": prepare.now_iso(),
+                **details,
+            }
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def compute_operator_reward(
     *,
     accepted: bool,
@@ -3056,7 +3094,7 @@ def load_mutator_stats(path: Path) -> dict[str, Any]:
         return {"version": 1, "targets": {}}
     try:
         payload = json.loads(path.read_text())
-    except json.JSONDecodeError:
+    except (OSError, json.JSONDecodeError):
         return {"version": 1, "targets": {}}
     if not isinstance(payload, dict):
         return {"version": 1, "targets": {}}
@@ -3098,6 +3136,22 @@ def mutation_matches_language(label: str, *, language: str) -> bool:
     if not parts:
         return False
     return all(part.startswith(required_prefix) for part in parts)
+
+
+def make_feature_rng(*, target_name: str, feature: str, source_code: str, config: dict[str, Any]) -> tuple[random.Random, str]:
+    material = json.dumps(
+        {
+            "target": target_name,
+            "feature": feature,
+            "source_sha256": source_sha256(source_code),
+            "config": config,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
+    seed = int(digest[:16], 16)
+    return random.Random(seed), digest[:16]
 
 
 def mutator_penalty_for_label(label: str, penalties: dict[str, float]) -> float:
@@ -4183,7 +4237,9 @@ def run_loop(args: argparse.Namespace) -> int:
     if not mutation_memory_path.is_absolute():
         mutation_memory_path = ROOT / mutation_memory_path
     mutation_memory: dict[str, Any] | None = None
-    mutation_memory_enabled = (not args.disable_mutation_memory) and language_norm in {"rust", "json", "python"}
+    feature_supported_languages = {"rust", "json", "python"}
+    feature_warnings: list[str] = []
+    mutation_memory_enabled = (not args.disable_mutation_memory) and language_norm in feature_supported_languages
     if mutation_memory_enabled:
         # Persist seeded history to disk before iterations start so per-iteration
         # read/modify/write updates do not discard in-process seeded state.
@@ -4204,12 +4260,19 @@ def run_loop(args: argparse.Namespace) -> int:
     if not population_memory_path.is_absolute():
         population_memory_path = ROOT / population_memory_path
     population_memory: dict[str, Any] | None = None
-    population_memory_enabled = (not args.disable_population_memory) and language_norm in {"rust", "json", "python"}
+    population_memory_enabled = (not args.disable_population_memory) and language_norm in feature_supported_languages
     population_parent_sample_prob = min(
         1.0,
         max(0.0, float(target.get("population_parent_sample_prob", args.population_parent_sample_prob))),
     )
     population_max_entries = max(0, int(target.get("population_max_entries", args.population_max_entries)))
+    if (not population_memory_enabled) and (not args.disable_population_memory):
+        warning = (
+            f"population memory requested but unsupported for language '{language_norm or 'unknown'}'; "
+            "continuing without population memory"
+        )
+        print(f"[train] Warning: {warning}", file=sys.stderr)
+        feature_warnings.append(warning)
     if population_memory_enabled:
         lock_path = population_memory_path.with_suffix(population_memory_path.suffix + ".lock")
         try:
@@ -4227,7 +4290,7 @@ def run_loop(args: argparse.Namespace) -> int:
     if not operator_stats_path.is_absolute():
         operator_stats_path = ROOT / operator_stats_path
     operator_stats: dict[str, Any] | None = None
-    operator_stats_enabled = (not args.disable_operator_stats) and language_norm in {"rust", "json", "python"}
+    operator_stats_enabled = (not args.disable_operator_stats) and language_norm in feature_supported_languages
     operator_reward_epsilon = max(0.0, float(target.get("operator_reward_epsilon", args.operator_reward_epsilon)))
     operator_demote_streak = max(0, int(target.get("operator_demote_streak", args.operator_demote_streak)))
     operator_disable_streak = max(0, int(target.get("operator_disable_streak", args.operator_disable_streak)))
@@ -4267,6 +4330,13 @@ def run_loop(args: argparse.Namespace) -> int:
             )
         ),
     )
+    if (not operator_stats_enabled) and (not args.disable_operator_stats):
+        warning = (
+            f"operator stats requested but unsupported for language '{language_norm or 'unknown'}'; "
+            "continuing without operator stats"
+        )
+        print(f"[train] Warning: {warning}", file=sys.stderr)
+        feature_warnings.append(warning)
     if operator_stats_enabled:
         lock_path = operator_stats_path.with_suffix(operator_stats_path.suffix + ".lock")
         try:
@@ -4340,6 +4410,20 @@ def run_loop(args: argparse.Namespace) -> int:
         )
         return 1
     best_metric_series = baseline_metric_series if baseline_metric_series else [best_metric]
+    population_rng, population_rng_seed = make_feature_rng(
+        target_name=args.target,
+        feature="population_parent_sampling",
+        source_code=best_source,
+        config={
+            "language": language_norm,
+            "higher_is_better": bool(target["higher_is_better"]),
+            "population_parent_sample_prob": population_parent_sample_prob,
+            "population_max_entries": population_max_entries,
+            "max_iterations": max_iterations,
+            "max_accepted": args.max_accepted,
+            "max_runtime_seconds": args.max_runtime_seconds,
+        },
+    )
 
     if validation_targets:
         for validation_target in validation_targets:
@@ -4448,6 +4532,7 @@ def run_loop(args: argparse.Namespace) -> int:
                 "enabled": population_memory is not None,
                 "path": str(population_memory_path),
                 "parent_sample_prob": population_parent_sample_prob,
+                "rng_seed": population_rng_seed,
                 "max_entries": population_max_entries,
                 "known_entries": len((population_memory or {}).get("entries", []))
                 if isinstance((population_memory or {}).get("entries"), list)
@@ -4495,6 +4580,7 @@ def run_loop(args: argparse.Namespace) -> int:
                 "required_snippets": len(required_snippet_counts),
                 "mode": "snippet_count_preservation",
             },
+            "feature_warnings": feature_warnings,
         }
     )
 
@@ -4543,7 +4629,7 @@ def run_loop(args: argparse.Namespace) -> int:
         if (
             population_memory is not None
             and population_parent_sample_prob > 0.0
-            and random.random() < population_parent_sample_prob
+            and population_rng.random() < population_parent_sample_prob
         ):
             selected_parent = select_population_parent(
                 population_memory,
@@ -4552,6 +4638,7 @@ def run_loop(args: argparse.Namespace) -> int:
                 higher_is_better=bool(target["higher_is_better"]),
                 best_metric=best_metric,
                 best_source=best_source,
+                rng=population_rng,
             )
             if isinstance(selected_parent, dict):
                 parent_source = selected_parent.get("source_code")
@@ -4787,20 +4874,30 @@ def run_loop(args: argparse.Namespace) -> int:
                 level=1,
             )
             if operator_stats is not None:
-                operator_stats = update_and_save_operator_stats(
-                    operator_stats_path,
-                    operator_stats,
-                    target_name=args.target,
-                    mutation=mutation_key,
-                    language=infer_mutation_language(mutation=mutation_key, target_language=language_norm),
-                    accepted=False,
-                    reward=0.0,
-                    runtime_s=0.0,
-                    timestamp=prepare.now_iso(),
-                    reward_epsilon=operator_reward_epsilon,
-                    demote_streak=operator_demote_streak,
-                    disable_streak=operator_disable_streak,
-                )
+                try:
+                    operator_stats = update_and_save_operator_stats(
+                        operator_stats_path,
+                        operator_stats,
+                        target_name=args.target,
+                        mutation=mutation_key,
+                        language=infer_mutation_language(mutation=mutation_key, target_language=language_norm),
+                        accepted=False,
+                        reward=0.0,
+                        runtime_s=0.0,
+                        timestamp=prepare.now_iso(),
+                        reward_epsilon=operator_reward_epsilon,
+                        demote_streak=operator_demote_streak,
+                        disable_streak=operator_disable_streak,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    disable_operator_stats_for_run(
+                        target_name=args.target,
+                        mutation=mutation_key,
+                        phase="required_snippet_guardrail",
+                        exc=exc,
+                        diagnostics=diagnostics,
+                    )
+                    operator_stats = None
             continue
 
         objective_guard_ok, objective_guard_details = trackb_objective_guard(
@@ -4857,20 +4954,30 @@ def run_loop(args: argparse.Namespace) -> int:
                 level=1,
             )
             if operator_stats is not None:
-                operator_stats = update_and_save_operator_stats(
-                    operator_stats_path,
-                    operator_stats,
-                    target_name=args.target,
-                    mutation=mutation_key,
-                    language=infer_mutation_language(mutation=mutation_key, target_language=language_norm),
-                    accepted=False,
-                    reward=0.0,
-                    runtime_s=0.0,
-                    timestamp=prepare.now_iso(),
-                    reward_epsilon=operator_reward_epsilon,
-                    demote_streak=operator_demote_streak,
-                    disable_streak=operator_disable_streak,
-                )
+                try:
+                    operator_stats = update_and_save_operator_stats(
+                        operator_stats_path,
+                        operator_stats,
+                        target_name=args.target,
+                        mutation=mutation_key,
+                        language=infer_mutation_language(mutation=mutation_key, target_language=language_norm),
+                        accepted=False,
+                        reward=0.0,
+                        runtime_s=0.0,
+                        timestamp=prepare.now_iso(),
+                        reward_epsilon=operator_reward_epsilon,
+                        demote_streak=operator_demote_streak,
+                        disable_streak=operator_disable_streak,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    disable_operator_stats_for_run(
+                        target_name=args.target,
+                        mutation=mutation_key,
+                        phase="trackb_objective_guardrail",
+                        exc=exc,
+                        diagnostics=diagnostics,
+                    )
+                    operator_stats = None
             continue
 
         source_path.write_text(candidate)
@@ -5097,21 +5204,31 @@ def run_loop(args: argparse.Namespace) -> int:
                     best_after=best_metric,
                     runtime_s=runtime_s,
                 )
-                operator_stats = update_and_save_operator_stats(
-                    operator_stats_path,
-                    operator_stats,
-                    target_name=args.target,
-                    mutation=mutation_key,
-                    language=infer_mutation_language(mutation=mutation_key, target_language=language_norm),
-                    accepted=improved,
-                    reward=reward,
-                    runtime_s=runtime_s,
-                    timestamp=prepare.now_iso(),
-                    reward_epsilon=operator_reward_epsilon,
-                    demote_streak=operator_demote_streak,
-                    disable_streak=operator_disable_streak,
-                    validation_blocked=validation_blocked,
-                )
+                try:
+                    operator_stats = update_and_save_operator_stats(
+                        operator_stats_path,
+                        operator_stats,
+                        target_name=args.target,
+                        mutation=mutation_key,
+                        language=infer_mutation_language(mutation=mutation_key, target_language=language_norm),
+                        accepted=improved,
+                        reward=reward,
+                        runtime_s=runtime_s,
+                        timestamp=prepare.now_iso(),
+                        reward_epsilon=operator_reward_epsilon,
+                        demote_streak=operator_demote_streak,
+                        disable_streak=operator_disable_streak,
+                        validation_blocked=validation_blocked,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    disable_operator_stats_for_run(
+                        target_name=args.target,
+                        mutation=mutation_key,
+                        phase="loop_iteration_result",
+                        exc=exc,
+                        diagnostics=diagnostics,
+                    )
+                    operator_stats = None
                 diagnostics["operator_reward"] = {
                     "reward": reward,
                     "runtime_s": runtime_s,

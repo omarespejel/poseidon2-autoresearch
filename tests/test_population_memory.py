@@ -75,7 +75,12 @@ class PopulationMemoryTests(unittest.TestCase):
                 },
             ],
         }
-        with patch("train.random.choices", return_value=[0]):
+        rng = type(
+            "DeterministicRng",
+            (),
+            {"choices": staticmethod(lambda population, weights, k: [0])},
+        )()
+        with patch("train.random.choices", side_effect=AssertionError("global random should not be used")):
             selected = train.select_population_parent(
                 memory,
                 target_name="poseidon2_cryptanalysis_trackb_kernel_fast",
@@ -84,6 +89,7 @@ class PopulationMemoryTests(unittest.TestCase):
                 best_metric=15.0,
                 best_source=best_source,
                 max_candidates=8,
+                rng=rng,
             )
         self.assertIsNotNone(selected)
         self.assertEqual(selected["source_sha256"], train.source_sha256(alt_a))
@@ -141,6 +147,14 @@ class PopulationMemoryTests(unittest.TestCase):
                 notes="rejected_not_better:python_trackb_x",
             )
         )
+
+    def test_load_mutator_stats_handles_oserror(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "mutator-stats.json"
+            path.write_text("{}")
+            with patch.object(Path, "read_text", side_effect=OSError("boom")):
+                stats = train.load_mutator_stats(path)
+        self.assertEqual(stats, {"version": 1, "targets": {}})
 
 
 if __name__ == "__main__":
