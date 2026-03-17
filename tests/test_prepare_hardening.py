@@ -184,6 +184,35 @@ class PrepareHardeningTests(unittest.TestCase):
         self.assertTrue(payload["head"])
         self.assertEqual(payload["provenance_file"], str(provenance_file))
 
+    def test_verify_provenance_chain_rejects_non_integer_seq_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            provenance_file = root / "provenance_chain.jsonl"
+            state_file = root / "state.json"
+            provenance_file.write_text(
+                json.dumps(
+                    {
+                        "seq": "abc",
+                        "timestamp": "2026-03-17T00:00:00Z",
+                        "event_type": "event_a",
+                        "prev_hash": None,
+                        "payload": {"value": 1},
+                        "payload_hash": prepare.sha256_text(prepare.stable_json({"value": 1})),
+                        "node_hash": "deadbeef",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            state_file.write_text(json.dumps({"seq": "nope", "head": None}), encoding="utf-8")
+            with patch.object(prepare, "PROVENANCE_FILE", provenance_file), patch.object(
+                prepare,
+                "PROVENANCE_STATE_FILE",
+                state_file,
+            ):
+                with self.assertRaises(prepare.ToolError):
+                    prepare.verify_provenance_chain()
+
     def test_export_provenance_manifest_captures_subject_hashes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -213,6 +242,70 @@ class PrepareHardeningTests(unittest.TestCase):
             subjects = {item["path"]: item for item in manifest["subjects"]}
             self.assertEqual(subjects["results.tsv"]["sha256"], prepare.sha256_file(results_file))
             self.assertEqual(subjects["agent_log.jsonl"]["sha256"], prepare.sha256_file(log_file))
+
+    def test_export_provenance_manifest_records_external_symlink_without_hashing_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            root = workspace / "repo"
+            external_file = workspace / "outside.txt"
+            root.mkdir(parents=True, exist_ok=True)
+            external_file.write_text("secret\n", encoding="utf-8")
+            evidence_dir = root / "evidence"
+            evidence_dir.mkdir(parents=True, exist_ok=True)
+            link_path = evidence_dir / "outside-link.txt"
+            try:
+                link_path.symlink_to(external_file)
+            except (NotImplementedError, OSError):
+                self.skipTest("symlinks are not supported in this environment")
+            export_file = root / "work" / "manifest.json"
+            with patch.object(prepare, "ROOT", root), patch.object(
+                prepare,
+                "RESULTS_FILE",
+                root / "results.tsv",
+            ), patch.object(prepare, "LOG_FILE", root / "agent_log.jsonl"), patch.object(
+                prepare,
+                "PROVENANCE_FILE",
+                root / "provenance_chain.jsonl",
+            ), patch.object(
+                prepare,
+                "PROVENANCE_STATE_FILE",
+                root / "work" / "provenance_state.json",
+            ):
+                prepare.append_provenance_event("event_a", {"value": 1})
+                payload = prepare.export_provenance_manifest(output_path=export_file)
+
+            self.assertEqual(payload["subjects"], len(json.loads(export_file.read_text(encoding="utf-8"))["subjects"]))
+            manifest = json.loads(export_file.read_text(encoding="utf-8"))
+            subjects = {item["path"]: item for item in manifest["subjects"]}
+            link_subject = subjects["evidence/outside-link.txt"]
+            self.assertEqual(link_subject["kind"], "external_symlink")
+            self.assertNotIn("sha256", link_subject)
+            self.assertNotIn("size", link_subject)
+
+    def test_export_provenance_manifest_rejects_extra_paths_outside_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            root.mkdir(parents=True, exist_ok=True)
+            export_file = root / "work" / "manifest.json"
+            with patch.object(prepare, "ROOT", root), patch.object(
+                prepare,
+                "RESULTS_FILE",
+                root / "results.tsv",
+            ), patch.object(prepare, "LOG_FILE", root / "agent_log.jsonl"), patch.object(
+                prepare,
+                "PROVENANCE_FILE",
+                root / "provenance_chain.jsonl",
+            ), patch.object(
+                prepare,
+                "PROVENANCE_STATE_FILE",
+                root / "work" / "provenance_state.json",
+            ):
+                prepare.append_provenance_event("event_a", {"value": 1})
+                with self.assertRaises(prepare.ToolError):
+                    prepare.export_provenance_manifest(
+                        output_path=export_file,
+                        extra_paths=[Path("../outside.txt")],
+                    )
 
 
 if __name__ == "__main__":

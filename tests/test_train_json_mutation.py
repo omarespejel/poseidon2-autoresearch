@@ -245,6 +245,14 @@ class TrackBObjectiveGuardTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(details, {"enabled": False})
 
+    def test_base_config_path_is_anchored_to_canonical_config_location(self) -> None:
+        self.assertTrue(train.is_trackb_base_config_path(CONFIG_PATH))
+        self.assertFalse(train.is_trackb_base_config_path(Path("/tmp/track_b_attack_config.json")))
+
+    def test_mutable_config_path_is_anchored_to_canonical_config_directory(self) -> None:
+        self.assertTrue(train.is_trackb_mutable_config_path(TRACKB_MUTABLE_PATH))
+        self.assertFalse(train.is_trackb_mutable_config_path(Path("/tmp/track_b_mutable_fast.json")))
+
     def test_base_config_mutation_guard_blocks_by_default(self) -> None:
         ok, details = train.trackb_base_config_mutation_guard(
             source_path=CONFIG_PATH,

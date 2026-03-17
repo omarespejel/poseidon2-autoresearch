@@ -112,19 +112,29 @@ DEFAULT_OPERATOR_VALIDATION_BLOCK_DISABLE_STREAK = 0
 DEFAULT_OPERATOR_UCB_EXPLORE = 0.0
 TRACKB_BASE_CONFIG_NAME = "track_b_attack_config.json"
 TRACKB_MUTABLE_CONFIG_PREFIX = "track_b_mutable_"
+TRACKB_CONFIG_DIR = (ROOT / "config").resolve()
+TRACKB_BASE_CONFIG_PATH = (TRACKB_CONFIG_DIR / TRACKB_BASE_CONFIG_NAME).resolve()
 
 
-def config_basename(path: str | Path) -> str:
-    return Path(str(path).replace("\\", "/")).name.lower()
+def resolve_trackb_path(path: str | Path) -> Path:
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        candidate = ROOT / candidate
+    return candidate.resolve(strict=False)
 
 
 def is_trackb_base_config_path(path: str | Path) -> bool:
-    return config_basename(path) == TRACKB_BASE_CONFIG_NAME
+    return resolve_trackb_path(path) == TRACKB_BASE_CONFIG_PATH
 
 
 def is_trackb_mutable_config_path(path: str | Path) -> bool:
-    name = config_basename(path)
-    return name.startswith(TRACKB_MUTABLE_CONFIG_PREFIX) and name.endswith(".json")
+    resolved = resolve_trackb_path(path)
+    name = resolved.name.lower()
+    return (
+        resolved.parent == TRACKB_CONFIG_DIR
+        and name.startswith(TRACKB_MUTABLE_CONFIG_PREFIX)
+        and name.endswith(".json")
+    )
 
 
 def is_trackb_json_mutation_path(path: str | Path) -> bool:

@@ -15,6 +15,7 @@ import shutil
 import statistics
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from contextlib import contextmanager
@@ -152,9 +153,74 @@ def sha256_text(text: str) -> str:
 
 def atomic_write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(text, encoding="utf-8")
-    tmp_path.replace(path)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+        try:
+            dir_fd = os.open(str(path.parent), os.O_RDONLY)
+        except OSError:
+            dir_fd = None
+        if dir_fd is not None:
+            try:
+                os.fsync(dir_fd)
+            except OSError:
+                pass
+            finally:
+                os.close(dir_fd)
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def repo_root_path() -> Path:
+    return Path(os.path.abspath(os.path.normpath(str(ROOT))))
+
+
+def repo_absolute_path(path: Path | str) -> Path:
+    raw = Path(path)
+    if not raw.is_absolute():
+        raw = ROOT / raw
+    return Path(os.path.abspath(os.path.normpath(str(raw))))
+
+
+def repo_contains_path(path: Path | str) -> bool:
+    candidate = repo_absolute_path(path)
+    root = repo_root_path()
+    try:
+        candidate.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def manifest_path_label(path: Path | str) -> str:
+    candidate = repo_absolute_path(path)
+    root = repo_root_path()
+    try:
+        return str(candidate.relative_to(root))
+    except ValueError:
+        return str(candidate)
+
+
+def parse_provenance_seq(value: Any, *, source: str) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise ToolError(f"Invalid provenance seq in {source}: {value!r}") from exc
+
+
+def ensure_manifest_path_within_repo(path: Path | str) -> Path:
+    candidate = repo_absolute_path(path)
+    if not repo_contains_path(candidate):
+        raise ToolError(f"Manifest subject path outside repository: {path}")
+    return candidate
 
 
 def load_provenance_state() -> dict[str, Any]:
@@ -180,7 +246,7 @@ def append_provenance_event(event_type: str, payload: dict[str, Any]) -> None:
         if prev_hash_raw is not None and not isinstance(prev_hash_raw, str):
             raise ToolError(f"Invalid provenance head in state file: {PROVENANCE_STATE_FILE}")
         prev_hash = prev_hash_raw or None
-        seq = int(state.get("seq", 0)) + 1
+        seq = parse_provenance_seq(state.get("seq", 0), source=str(PROVENANCE_STATE_FILE)) + 1
         timestamp = now_iso()
         payload_hash = sha256_text(stable_json(payload))
         node_material = stable_json(
@@ -226,79 +292,84 @@ def verify_provenance_chain(
 ) -> dict[str, Any]:
     provenance_file = provenance_file or PROVENANCE_FILE
     state_file = state_file or PROVENANCE_STATE_FILE
-    records: list[dict[str, Any]] = []
-    if provenance_file.exists():
-        for line_no, line in enumerate(provenance_file.read_text(encoding="utf-8").splitlines(), start=1):
-            raw = line.strip()
-            if not raw:
-                continue
+    provenance_lock_path = provenance_file.with_suffix(provenance_file.suffix + ".lock")
+    with file_lock(provenance_lock_path):
+        records: list[dict[str, Any]] = []
+        if provenance_file.exists():
+            for line_no, line in enumerate(provenance_file.read_text(encoding="utf-8").splitlines(), start=1):
+                raw = line.strip()
+                if not raw:
+                    continue
+                try:
+                    record = json.loads(raw)
+                except json.JSONDecodeError as exc:
+                    raise ToolError(f"Malformed provenance record at {provenance_file}:{line_no}") from exc
+                if not isinstance(record, dict):
+                    raise ToolError(f"Invalid provenance record at {provenance_file}:{line_no}")
+                records.append(record)
+
+        prev_hash: str | None = None
+        last_timestamp: str | None = None
+        for expected_seq, record in enumerate(records, start=1):
+            raw_seq = record.get("seq", 0)
+            seq = parse_provenance_seq(raw_seq, source=f"{provenance_file}:record_{expected_seq}")
+            if seq != expected_seq:
+                raise ToolError(
+                    f"Invalid provenance sequence at {provenance_file}: expected {expected_seq}, got {seq}"
+                )
+            payload = record.get("payload")
+            if not isinstance(payload, dict):
+                raise ToolError(f"Invalid provenance payload at {provenance_file}: seq={seq}")
+            payload_hash = str(record.get("payload_hash", ""))
+            expected_payload_hash = sha256_text(stable_json(payload))
+            if payload_hash != expected_payload_hash:
+                raise ToolError(f"Invalid provenance payload hash at {provenance_file}: seq={seq}")
+            event_type = str(record.get("event_type", ""))
+            timestamp = str(record.get("timestamp", ""))
+            expected_node_hash = sha256_text(
+                stable_json(
+                    {
+                        "seq": seq,
+                        "timestamp": timestamp,
+                        "event_type": event_type,
+                        "prev_hash": prev_hash,
+                        "payload_hash": expected_payload_hash,
+                    }
+                )
+            )
+            node_hash = str(record.get("node_hash", ""))
+            if node_hash != expected_node_hash:
+                raise ToolError(f"Invalid provenance node hash at {provenance_file}: seq={seq}")
+            record_prev_hash = record.get("prev_hash")
+            if record_prev_hash != prev_hash:
+                raise ToolError(f"Invalid provenance prev_hash at {provenance_file}: seq={seq}")
+            prev_hash = node_hash
+            last_timestamp = timestamp
+
+        state: dict[str, Any] = {}
+        if state_file.exists():
             try:
-                record = json.loads(raw)
+                loaded = json.loads(state_file.read_text(encoding="utf-8"))
             except json.JSONDecodeError as exc:
-                raise ToolError(f"Malformed provenance record at {provenance_file}:{line_no}") from exc
-            if not isinstance(record, dict):
-                raise ToolError(f"Invalid provenance record at {provenance_file}:{line_no}")
-            records.append(record)
+                raise ToolError(f"Corrupt provenance state file: {state_file}") from exc
+            if not isinstance(loaded, dict):
+                raise ToolError(f"Invalid provenance state payload: {state_file}")
+            state = loaded
 
-    prev_hash: str | None = None
-    last_timestamp: str | None = None
-    for expected_seq, record in enumerate(records, start=1):
-        seq = int(record.get("seq", 0))
-        if seq != expected_seq:
-            raise ToolError(
-                f"Invalid provenance sequence at {provenance_file}: expected {expected_seq}, got {seq}"
-            )
-        payload = record.get("payload")
-        if not isinstance(payload, dict):
-            raise ToolError(f"Invalid provenance payload at {provenance_file}: seq={seq}")
-        payload_hash = str(record.get("payload_hash", ""))
-        expected_payload_hash = sha256_text(stable_json(payload))
-        if payload_hash != expected_payload_hash:
-            raise ToolError(f"Invalid provenance payload hash at {provenance_file}: seq={seq}")
-        event_type = str(record.get("event_type", ""))
-        timestamp = str(record.get("timestamp", ""))
-        expected_node_hash = sha256_text(
-            stable_json(
-                {
-                    "seq": seq,
-                    "timestamp": timestamp,
-                    "event_type": event_type,
-                    "prev_hash": prev_hash,
-                    "payload_hash": expected_payload_hash,
-                }
-            )
-        )
-        node_hash = str(record.get("node_hash", ""))
-        if node_hash != expected_node_hash:
-            raise ToolError(f"Invalid provenance node hash at {provenance_file}: seq={seq}")
-        record_prev_hash = record.get("prev_hash")
-        if record_prev_hash != prev_hash:
-            raise ToolError(f"Invalid provenance prev_hash at {provenance_file}: seq={seq}")
-        prev_hash = node_hash
-        last_timestamp = timestamp
-
-    state: dict[str, Any] = {}
-    if state_file.exists():
-        try:
-            loaded = json.loads(state_file.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
-            raise ToolError(f"Corrupt provenance state file: {state_file}") from exc
-        if not isinstance(loaded, dict):
-            raise ToolError(f"Invalid provenance state payload: {state_file}")
-        state = loaded
-
-    expected_seq = len(records)
-    expected_head = prev_hash
-    state_seq = int(state.get("seq", 0) or 0)
-    state_head = state.get("head")
-    if expected_seq == 0:
-        if state_seq or state_head:
-            raise ToolError("Provenance state is non-empty but provenance chain has no records")
-    else:
-        if state_seq != expected_seq:
-            raise ToolError(f"Provenance state seq mismatch: expected {expected_seq}, got {state_seq}")
-        if state_head != expected_head:
-            raise ToolError(f"Provenance state head mismatch: expected {expected_head}, got {state_head}")
+        expected_seq = len(records)
+        expected_head = prev_hash
+        state_seq = parse_provenance_seq(state.get("seq", 0) or 0, source=str(state_file))
+        state_head = state.get("head")
+        if state_head is not None and not isinstance(state_head, str):
+            raise ToolError(f"Invalid provenance head in state file: {state_file}")
+        if expected_seq == 0:
+            if state_seq or state_head:
+                raise ToolError("Provenance state is non-empty but provenance chain has no records")
+        else:
+            if state_seq != expected_seq:
+                raise ToolError(f"Provenance state seq mismatch: expected {expected_seq}, got {state_seq}")
+            if state_head != expected_head:
+                raise ToolError(f"Provenance state head mismatch: expected {expected_head}, got {state_head}")
 
     return {
         "ok": True,
@@ -315,49 +386,74 @@ def sha256_file(path: Path) -> str:
 
 
 def file_manifest_entry(path: Path) -> dict[str, Any]:
-    rel = path.relative_to(ROOT) if path.is_absolute() and ROOT in path.parents else path
-    entry: dict[str, Any] = {"path": str(rel)}
-    if not path.exists():
+    candidate = repo_absolute_path(path)
+    entry: dict[str, Any] = {"path": manifest_path_label(candidate)}
+    if candidate.is_symlink():
+        resolved = candidate.resolve(strict=False)
+        entry["exists"] = candidate.exists()
+        entry["target"] = str(candidate.readlink())
+        if repo_contains_path(resolved):
+            entry["kind"] = "symlink"
+            entry["resolved_path"] = manifest_path_label(resolved)
+        else:
+            entry["kind"] = "external_symlink"
+            entry["resolved_path"] = str(resolved)
+        return entry
+    if not candidate.exists():
         entry["exists"] = False
         entry["kind"] = "missing"
         return entry
-    if path.is_dir():
+    if candidate.is_dir():
         entry["exists"] = True
         entry["kind"] = "directory"
         return entry
+    if not candidate.is_file():
+        entry["exists"] = True
+        entry["kind"] = "other"
+        return entry
     entry["exists"] = True
     entry["kind"] = "file"
-    entry["size"] = path.stat().st_size
-    entry["sha256"] = sha256_file(path)
+    entry["size"] = candidate.stat().st_size
+    entry["sha256"] = sha256_file(candidate)
     return entry
 
 
 def expand_manifest_subjects(paths: list[Path]) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for path in paths:
-        candidate = path if path.is_absolute() else ROOT / path
-        if candidate.exists() and candidate.is_dir():
-            nested_files = sorted(item for item in candidate.rglob("*") if item.is_file())
-            if not nested_files:
-                key = f"dir:{candidate.resolve()}"
-                if key in seen:
-                    continue
-                seen.add(key)
-                entries.append(file_manifest_entry(candidate))
-                continue
-            for nested in nested_files:
-                key = f"file:{nested.resolve()}"
-                if key in seen:
-                    continue
-                seen.add(key)
-                entries.append(file_manifest_entry(nested))
-            continue
-        key = f"path:{candidate.resolve()}"
+
+    def add_entry(candidate: Path) -> None:
+        normalized = repo_absolute_path(candidate)
+        key = str(normalized)
         if key in seen:
-            continue
+            return
         seen.add(key)
-        entries.append(file_manifest_entry(candidate))
+        entries.append(file_manifest_entry(normalized))
+
+    for path in paths:
+        candidate = repo_absolute_path(path)
+        if candidate.exists() and candidate.is_dir() and not candidate.is_symlink():
+            found_nested = False
+            for dirpath, dirnames, filenames in os.walk(candidate, followlinks=False):
+                current_dir = Path(dirpath)
+                dirnames.sort()
+                filenames.sort()
+                nested_dirnames: list[str] = []
+                for dirname in dirnames:
+                    child = current_dir / dirname
+                    if child.is_symlink():
+                        add_entry(child)
+                        found_nested = True
+                    else:
+                        nested_dirnames.append(dirname)
+                dirnames[:] = nested_dirnames
+                for filename in filenames:
+                    add_entry(current_dir / filename)
+                    found_nested = True
+            if not found_nested:
+                add_entry(candidate)
+                continue
+        add_entry(candidate)
     return entries
 
 
@@ -393,6 +489,7 @@ def export_provenance_manifest(
     extra_paths: list[Path] | None = None,
 ) -> dict[str, Any]:
     verification = verify_provenance_chain()
+    sanitized_extra_paths = [ensure_manifest_path_within_repo(path) for path in (extra_paths or [])]
     subjects = expand_manifest_subjects(
         [
             RESULTS_FILE,
@@ -405,7 +502,7 @@ def export_provenance_manifest(
             ROOT / "readiness_check.md",
             ROOT / "evidence",
             ROOT / "submission",
-            *(extra_paths or []),
+            *sanitized_extra_paths,
         ]
     )
     payload = {
