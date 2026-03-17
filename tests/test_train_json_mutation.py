@@ -104,5 +104,50 @@ class JsonMutationSelectionTests(unittest.TestCase):
         self.assertIn("json_trackb_algebraic_degree_down", preferred)
 
 
+class TrackBObjectiveGuardTests(unittest.TestCase):
+    def test_guard_allows_search_only_change(self) -> None:
+        source = stable_trackb_source()
+        payload = json.loads(source)
+        payload["search"]["differential_candidates"] = int(payload["search"]["differential_candidates"]) + 8
+        candidate = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+        ok, details = train.trackb_objective_guard(
+            current_source=source,
+            candidate_source=candidate,
+            source_path=TRACKB_PATH,
+            target_config={},
+        )
+        self.assertTrue(ok)
+        self.assertEqual(details.get("status"), "ok")
+
+    def test_guard_rejects_objective_change(self) -> None:
+        source = stable_trackb_source()
+        payload = json.loads(source)
+        payload["objective"]["weight_algebraic"] = round(float(payload["objective"]["weight_algebraic"]) + 0.05, 6)
+        candidate = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+        ok, details = train.trackb_objective_guard(
+            current_source=source,
+            candidate_source=candidate,
+            source_path=TRACKB_PATH,
+            target_config={},
+        )
+        self.assertFalse(ok)
+        self.assertEqual(details.get("status"), "objective_modified")
+        self.assertIn("objective", details.get("paths", []))
+
+    def test_guard_allows_objective_change_with_opt_in(self) -> None:
+        source = stable_trackb_source()
+        payload = json.loads(source)
+        payload["objective"]["weight_algebraic"] = round(float(payload["objective"]["weight_algebraic"]) + 0.05, 6)
+        candidate = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+        ok, details = train.trackb_objective_guard(
+            current_source=source,
+            candidate_source=candidate,
+            source_path=TRACKB_PATH,
+            target_config={"json_allow_objective_mutations": True},
+        )
+        self.assertTrue(ok)
+        self.assertEqual(details.get("allow_objective_mutations"), True)
+
+
 if __name__ == "__main__":
     unittest.main()
