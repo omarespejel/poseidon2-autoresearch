@@ -84,6 +84,10 @@
       "mutation_schedule": "ucb",
       "mutation_ucb_explore": 0.6,
       "mutation_memory_namespace": "kernel_fast_research",
+      "compound_every": 2,
+      "compound_limit": 8,
+      "compound_second_window": 6,
+      "mutation_memory_namespace": "kernel_fast_research",
       "required_snippets": [
         "def differential_kernel(",
         "def mitm_truncated_preimage_kernel(",
@@ -123,6 +127,10 @@
       "blocked_mutation_ttl": 4,
       "mutation_schedule": "ucb",
       "mutation_ucb_explore": 0.6,
+      "mutation_memory_namespace": "kernel_signal_poseidon64",
+      "compound_every": 2,
+      "compound_limit": 8,
+      "compound_second_window": 6,
       "mutation_memory_namespace": "kernel_signal_poseidon64",
       "required_snippets": [
         "def differential_kernel(",

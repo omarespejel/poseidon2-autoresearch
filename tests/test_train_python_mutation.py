@@ -218,6 +218,121 @@ def helper():
         self.assertTrue(low_up_changed)
         self.assertEqual(reraised, source)
 
+    def test_compound_schedule_prefers_compound_mutation_on_trigger_iteration(self) -> None:
+        source = harness_source()
+        candidate, mutation, changed = train.python_heuristic_candidate(
+            source,
+            2,
+            HARNESS_PATH,
+            target_config={
+                "compound_every": 2,
+                "compound_limit": 6,
+                "compound_second_window": 6,
+                "mutation_schedule": "priority",
+            },
+        )
+        self.assertTrue(changed)
+        self.assertNotEqual(candidate, source)
+        self.assertIn("+", mutation)
+
+    def test_compound_schedule_prefers_compound_mutation_in_ucb_mode(self) -> None:
+        source = harness_source()
+        heavy_attempts = {
+            "python_trackb_diff_multi_delta_prob_down": 9,
+            "python_trackb_diff_cross_lane_prob_up": 9,
+            "python_trackb_mitm_bucket_cap_up": 9,
+            "python_trackb_algebraic_fit_gain_up": 9,
+        }
+        candidate, mutation, changed = train.python_heuristic_candidate(
+            source,
+            2,
+            HARNESS_PATH,
+            mutation_attempts=heavy_attempts,
+            target_config={
+                "compound_every": 2,
+                "compound_limit": 6,
+                "compound_second_window": 6,
+                "mutation_schedule": "ucb",
+                "mutation_ucb_explore": 0.0,
+            },
+        )
+        self.assertTrue(changed)
+        self.assertNotEqual(candidate, source)
+        self.assertIn("+", mutation)
+
+    def test_compound_schedule_skips_blocked_compound_labels(self) -> None:
+        source = harness_source()
+        target_config = {
+            "compound_every": 2,
+            "compound_limit": 6,
+            "compound_second_window": 6,
+            "mutation_schedule": "priority",
+        }
+        _, blocked_label, changed = train.python_heuristic_candidate(
+            source,
+            2,
+            HARNESS_PATH,
+            target_config=target_config,
+        )
+        self.assertTrue(changed)
+        self.assertIn("+", blocked_label)
+
+        candidate, mutation, changed = train.python_heuristic_candidate(
+            source,
+            2,
+            HARNESS_PATH,
+            blocked_mutations={blocked_label},
+            target_config=target_config,
+        )
+        self.assertTrue(changed)
+        self.assertNotEqual(candidate, source)
+        self.assertNotEqual(mutation, blocked_label)
+
+    def test_compound_schedule_ignores_invalid_integer_config(self) -> None:
+        source = harness_source()
+        candidate, mutation, changed = train.python_heuristic_candidate(
+            source,
+            2,
+            HARNESS_PATH,
+            target_config={
+                "compound_every": "two",
+                "compound_limit": "many",
+                "compound_second_window": "wide",
+                "mutation_schedule": "priority",
+            },
+        )
+        self.assertTrue(changed)
+        self.assertNotEqual(candidate, source)
+        self.assertNotIn("+", mutation)
+
+    def test_algorithmic_diff_structure_mutator_applies(self) -> None:
+        source = harness_source()
+        candidate, mutation, changed = train.python_mutator_diff_secondary_lane_structure(source)
+        self.assertTrue(changed)
+        self.assertNotEqual(candidate, source)
+        self.assertEqual(mutation, "python_trackb_diff_secondary_lane_structure")
+
+    def test_algorithmic_mitm_key_mutator_applies(self) -> None:
+        source = harness_source()
+        candidate, mutation, changed = train.python_mutator_mitm_augmented_middle_key(source)
+        self.assertTrue(changed)
+        self.assertNotEqual(candidate, source)
+        self.assertEqual(mutation, "python_trackb_mitm_augmented_middle_key")
+
+    def test_algorithmic_algebraic_sampling_mutator_applies(self) -> None:
+        source = harness_source()
+        candidate, mutation, changed = train.python_mutator_algebraic_structured_unknown_samples(source)
+        self.assertTrue(changed)
+        self.assertNotEqual(candidate, source)
+        self.assertEqual(mutation, "python_trackb_algebraic_structured_unknown_samples")
+
+    def test_collision_lane_mix_tag_masks_back_to_bit_width(self) -> None:
+        source = harness_source()
+        candidate, mutation, changed = train.python_mutator_collision_lane_mix_tag(source)
+        self.assertTrue(changed)
+        self.assertEqual(mutation, "python_trackb_collision_lane_mix_tag")
+        self.assertIn("& ((1 << bits) - 1)", candidate)
+
     def test_mutation_language_inference_supports_python_prefix(self) -> None:
         language = train.infer_mutation_language(mutation="python_trackb_mitm_bucket_cap_up")
         self.assertEqual(language, "python")
