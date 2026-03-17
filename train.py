@@ -4230,6 +4230,8 @@ def extract_python_function_signatures(
         tree = ast.parse(source_code)
     except SyntaxError as exc:
         return {}, f"parse_error:{exc.msg}:line={exc.lineno}"
+    except ValueError as exc:
+        return {}, f"parse_error:{exc}:line=None"
 
     required = set(required_names)
     signatures: dict[str, str] = {}

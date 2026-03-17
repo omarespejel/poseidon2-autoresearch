@@ -907,6 +907,28 @@ def helper():
         self.assertFalse(ok)
         self.assertIn({"function": "score", "status": "missing"}, details["violations"])
 
+    def test_extract_python_function_signatures_rejects_null_bytes(self) -> None:
+        signatures, parse_error = train.extract_python_function_signatures(
+            "def score():\n    return 1\n\x00",
+            required_names=["score"],
+        )
+        self.assertEqual(signatures, {})
+        self.assertIsNotNone(parse_error)
+        self.assertTrue(str(parse_error).startswith("parse_error:"))
+
+    def test_signature_guard_constant_matches_kernel_target_config(self) -> None:
+        expected = set(train.ATTACK_KERNEL_SIGNATURE_FUNCTIONS)
+        targets = train.prepare.load_targets()
+        guarded_targets = [
+            name
+            for name, cfg in targets.items()
+            if str(cfg.get("source_file", "")).replace("\\", "/").lower().endswith("attack_kernels.py")
+        ]
+        self.assertTrue(guarded_targets)
+        for target_name in guarded_targets:
+            names = set(train.signature_guard_functions_from_target(targets[target_name]))
+            self.assertEqual(names, expected, target_name)
+
     def test_signature_guard_blocks_mutation_ttl_skips_parse_errors(self) -> None:
         self.assertFalse(
             train.signature_guard_blocks_mutation_ttl(
