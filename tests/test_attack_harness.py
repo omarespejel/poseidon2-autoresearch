@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 import attack_harness
 
@@ -111,6 +112,11 @@ class AttackHarnessTests(unittest.TestCase):
     def test_load_kernel_module_rejects_unapproved_modules(self) -> None:
         with self.assertRaises(ValueError):
             attack_harness.load_kernel_module("os")
+
+    def test_load_kernel_module_rejects_tampered_immutable_copy(self) -> None:
+        with patch("pathlib.Path.read_bytes", return_value=b"tampered"):
+            with self.assertRaises(RuntimeError):
+                attack_harness.load_kernel_module("")
 
     def test_kernels_are_deterministic_with_fixed_seed(self) -> None:
         cfg = tiny_config()

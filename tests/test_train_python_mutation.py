@@ -100,7 +100,7 @@ def helper():
         candidate, mutation, changed = train.python_heuristic_candidate(
             "",
             1,
-            HARNESS_PATH,
+            KERNEL_PATH,
         )
         self.assertFalse(changed)
         self.assertEqual(mutation, "python_no_change")
@@ -248,7 +248,7 @@ def helper():
         candidate, mutation, changed = train.python_heuristic_candidate(
             source,
             2,
-            HARNESS_PATH,
+            KERNEL_PATH,
             mutation_attempts=heavy_attempts,
             target_config={
                 "compound_every": 2,
@@ -273,7 +273,7 @@ def helper():
         _, blocked_label, changed = train.python_heuristic_candidate(
             source,
             2,
-            HARNESS_PATH,
+            KERNEL_PATH,
             target_config=target_config,
         )
         self.assertTrue(changed)
@@ -282,7 +282,7 @@ def helper():
         candidate, mutation, changed = train.python_heuristic_candidate(
             source,
             2,
-            HARNESS_PATH,
+            KERNEL_PATH,
             blocked_mutations={blocked_label},
             target_config=target_config,
         )
@@ -295,7 +295,7 @@ def helper():
         candidate, mutation, changed = train.python_heuristic_candidate(
             source,
             2,
-            HARNESS_PATH,
+            KERNEL_PATH,
             target_config={
                 "compound_every": "two",
                 "compound_limit": "many",
@@ -331,6 +331,13 @@ def helper():
             source_file="attack_kernels.py",
         )
         self.assertEqual(refs, [])
+
+    def test_benchmark_self_reference_detection_handles_flag_equals_value(self) -> None:
+        refs = train.benchmark_references_source_file(
+            target_config={"benchmark_command": ["python3", "--config=track_b.json", "attack_kernels.py"]},
+            source_file="attack_kernels.py",
+        )
+        self.assertEqual(refs, ["attack_kernels.py"])
 
     def test_executable_source_detection_distinguishes_json(self) -> None:
         self.assertTrue(train.source_file_is_executable_code("attack_kernels.py"))

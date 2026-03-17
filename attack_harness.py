@@ -23,6 +23,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent
 DEFAULT_KERNEL_MODULE = "attack_kernels_immutable"
 ALLOWED_KERNEL_MODULES = frozenset({"attack_kernels", "attack_kernels_immutable"})
+IMMUTABLE_KERNEL_SHA256 = "89dffc2a6b4edcd89417426c1881fc133d9e7cef8058fc97c40348bfe9466fea"
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -1023,6 +1024,14 @@ def load_kernel_module(module_name: str):
     if selected not in ALLOWED_KERNEL_MODULES:
         allowed = ", ".join(sorted(ALLOWED_KERNEL_MODULES))
         raise ValueError(f"kernel module {selected!r} must be one of: {allowed}")
+    if selected == DEFAULT_KERNEL_MODULE:
+        module_path = ROOT / f"{selected}.py"
+        digest = hashlib.sha256(module_path.read_bytes()).hexdigest()
+        if digest != IMMUTABLE_KERNEL_SHA256:
+            raise RuntimeError(
+                f"Integrity check failed for {module_path.name}: "
+                f"expected {IMMUTABLE_KERNEL_SHA256}, got {digest}"
+            )
     return importlib.import_module(selected)
 
 

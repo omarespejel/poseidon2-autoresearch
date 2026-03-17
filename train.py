@@ -4059,7 +4059,7 @@ def benchmark_references_source_file(*, target_config: dict[str, Any], source_fi
             if not token:
                 continue
             previous_token = str(command[idx - 1]).strip() if idx > 0 else ""
-            if previous_token.startswith("-"):
+            if previous_token.startswith("-") and "=" not in previous_token:
                 continue
             normalized = token.replace("\\", "/").lower().lstrip("./")
             if not normalized:
