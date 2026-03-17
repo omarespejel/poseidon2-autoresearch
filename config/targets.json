@@ -86,6 +86,8 @@
       "compound_every": 2,
       "compound_limit": 12,
       "compound_second_window": 10,
+      "operator_demote_streak": 5,
+      "operator_disable_streak": 10,
       "required_snippets": [
         "def differential_kernel(",
         "def mitm_truncated_preimage_kernel(",
@@ -128,6 +130,8 @@
       "compound_every": 2,
       "compound_limit": 12,
       "compound_second_window": 10,
+      "operator_demote_streak": 5,
+      "operator_disable_streak": 10,
       "required_snippets": [
         "def differential_kernel(",
         "def mitm_truncated_preimage_kernel(",
