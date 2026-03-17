@@ -9,11 +9,11 @@ import train
 
 
 ROOT = Path(__file__).resolve().parents[1]
-HARNESS_PATH = ROOT / "attack_harness.py"
+KERNEL_PATH = ROOT / "attack_kernels.py"
 
 
 def harness_source() -> str:
-    return HARNESS_PATH.read_text(encoding="utf-8")
+    return KERNEL_PATH.read_text(encoding="utf-8")
 
 
 class PythonMutationSelectionTests(unittest.TestCase):
@@ -22,7 +22,7 @@ class PythonMutationSelectionTests(unittest.TestCase):
         candidate, mutation, changed = train.python_heuristic_candidate(
             source,
             1,
-            HARNESS_PATH,
+            KERNEL_PATH,
         )
         self.assertTrue(changed)
         self.assertNotEqual(candidate, source)
@@ -33,7 +33,7 @@ class PythonMutationSelectionTests(unittest.TestCase):
         candidate, mutation, changed = train.python_heuristic_candidate(
             source,
             1,
-            HARNESS_PATH,
+            KERNEL_PATH,
             blocked_mutations={"python_trackb_diff_multi_delta_prob_up"},
         )
         self.assertTrue(changed)
@@ -61,7 +61,7 @@ class PythonMutationSelectionTests(unittest.TestCase):
         candidate, mutation, changed = train.python_heuristic_candidate(
             source,
             1,
-            HARNESS_PATH,
+            KERNEL_PATH,
             target_config={"mutation_schedule": "ucb", "mutation_ucb_explore": 0.0},
             mutation_memory=memory,
             target_name="poseidon2_cryptanalysis_trackb_kernel_fast",
@@ -75,7 +75,7 @@ class PythonMutationSelectionTests(unittest.TestCase):
         candidate, mutation, changed = train.python_heuristic_candidate(
             source,
             2,
-            HARNESS_PATH,
+            KERNEL_PATH,
             target_config={
                 "compound_every": 2,
                 "compound_limit": 6,
@@ -101,6 +101,17 @@ class PythonMutationSelectionTests(unittest.TestCase):
         self.assertEqual(candidate, source)
         self.assertEqual(mutation, "python_target_unsupported")
         self.assertFalse(changed)
+
+    def test_benchmark_self_reference_detection_for_python_source(self) -> None:
+        refs = train.benchmark_references_source_file(
+            target_config={"benchmark_command": ["python3", "attack_kernels.py", "--mode", "fast"]},
+            source_file="attack_kernels.py",
+        )
+        self.assertEqual(refs, ["attack_kernels.py"])
+
+    def test_executable_source_detection_distinguishes_json(self) -> None:
+        self.assertTrue(train.source_file_is_executable_code("attack_kernels.py"))
+        self.assertFalse(train.source_file_is_executable_code("config/track_b_attack_config.json"))
 
     def test_algorithmic_diff_structure_mutator_applies(self) -> None:
         source = harness_source()
@@ -371,7 +382,7 @@ class PythonMutationSelectionTests(unittest.TestCase):
         candidate, mutation, changed = train.python_heuristic_candidate(
             source,
             1,
-            HARNESS_PATH,
+            KERNEL_PATH,
             blocked_mutations=blocked,
             target_config={"mutation_schedule": "priority"},
         )
