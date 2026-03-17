@@ -69,6 +69,26 @@ class PopulationMemoryTests(unittest.TestCase):
         self.assertEqual(entry["rejected_total"], 1)
         self.assertEqual(entry["metric_value"], 12.5)
 
+    def test_upsert_population_entry_seed_does_not_increment_rejections(self) -> None:
+        memory = {"version": 1, "entries": []}
+        source = "def f():\n    return 1\n"
+        train.upsert_population_entry(
+            memory,
+            target_name="poseidon2_cryptanalysis_trackb_kernel_fast",
+            language="python",
+            source_code=source,
+            metric_value=12.5,
+            higher_is_better=True,
+            accepted=None,
+            timestamp="2026-03-17T00:00:00+00:00",
+            notes="population_seed:test",
+            max_entries=32,
+        )
+        entry = memory["entries"][0]
+        self.assertEqual(entry["accepted_total"], 0)
+        self.assertEqual(entry["rejected_total"], 0)
+        self.assertEqual(entry["seeded_total"], 1)
+
     def test_select_population_parent_uses_ranked_candidates(self) -> None:
         best_source = "def f():\n    return 0\n"
         alt_a = "def f():\n    return 1\n"
@@ -364,6 +384,53 @@ class PopulationMemoryTests(unittest.TestCase):
         self.assertEqual(len(mutations), len(set(mutations)))
         self.assertTrue(all(item["source_code"] != source for item in seeds))
 
+    def test_generate_population_seed_candidates_zero_max_returns_empty(self) -> None:
+        seeds = train.generate_population_seed_candidates(
+            source=harness_source(),
+            source_path=HARNESS_PATH,
+            language="python",
+            target_name="poseidon2_cryptanalysis_trackb_kernel_fast",
+            target_config={},
+            mutation_memory=None,
+            max_candidates=0,
+        )
+        self.assertEqual(seeds, [])
+
+    def test_generate_population_seed_candidates_uses_seeded_random_state(self) -> None:
+        source = "baseline\n"
+
+        def fake_heuristic(
+            source: str,
+            iteration: int,
+            language: str,
+            source_path: Path,
+            **_: object,
+        ) -> tuple[str, str, bool]:
+            return f"{source}{train.random.random():.8f}\n", f"mutation_{iteration}", True
+
+        with patch("train.heuristic_candidate", side_effect=fake_heuristic):
+            first = train.generate_population_seed_candidates(
+                source=source,
+                source_path=HARNESS_PATH,
+                language="python",
+                target_name="poseidon2_cryptanalysis_trackb_kernel_fast",
+                target_config={},
+                mutation_memory=None,
+                max_candidates=3,
+                rng_seed="00ff11aa22bb33cc",
+            )
+            second = train.generate_population_seed_candidates(
+                source=source,
+                source_path=HARNESS_PATH,
+                language="python",
+                target_name="poseidon2_cryptanalysis_trackb_kernel_fast",
+                target_config={},
+                mutation_memory=None,
+                max_candidates=3,
+                rng_seed="00ff11aa22bb33cc",
+            )
+        self.assertEqual(first, second)
+
     def test_seed_population_memory_from_heuristics_hits_min_entries(self) -> None:
         source = harness_source()
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -401,7 +468,87 @@ class PopulationMemoryTests(unittest.TestCase):
             )
             self.assertGreaterEqual(report.get("final_entries", 0), 4)
             self.assertGreater(report.get("seeded", 0), 0)
+            self.assertIsInstance(report.get("rng_seed"), str)
             self.assertEqual(train.population_entries_count(seeded_memory), report.get("final_entries", 0))
+            seeded_entries = [
+                entry
+                for entry in seeded_memory.get("entries", [])
+                if isinstance(entry, dict) and str(entry.get("last_notes", "")).startswith("population_seed:")
+            ]
+            self.assertTrue(seeded_entries)
+            self.assertTrue(all(int(entry.get("rejected_total", 0)) == 0 for entry in seeded_entries))
+            self.assertTrue(all(int(entry.get("seeded_total", 0)) >= 1 for entry in seeded_entries))
+
+    def test_seed_population_memory_from_heuristics_skips_when_already_sufficient(self) -> None:
+        source = harness_source()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pop_path = Path(tmpdir) / "population.json"
+            memory = {"version": 1, "entries": []}
+            for idx in range(3):
+                train.upsert_population_entry(
+                    memory,
+                    target_name="poseidon2_cryptanalysis_trackb_kernel_fast",
+                    language="python",
+                    source_code=f"{source}# {idx}\n",
+                    metric_value=15.35 + idx,
+                    higher_is_better=True,
+                    accepted=True,
+                    timestamp=f"2026-03-17T00:00:0{idx}+00:00",
+                    notes=f"accepted:{idx}",
+                    max_entries=48,
+                )
+            train.save_population_memory(pop_path, memory)
+            loaded = train.load_population_memory(pop_path)
+            seeded_memory, report = train.seed_population_memory_from_heuristics(
+                population_memory_path=pop_path,
+                population_memory=loaded,
+                target_name="poseidon2_cryptanalysis_trackb_kernel_fast",
+                language="python",
+                source_path=HARNESS_PATH,
+                baseline_source=source,
+                baseline_metric=15.35,
+                higher_is_better=True,
+                target_config={},
+                mutation_memory=None,
+                min_entries=3,
+                max_candidates=8,
+                max_entries=48,
+            )
+            self.assertEqual(seeded_memory, loaded)
+            self.assertEqual(report["status"], "skipped")
+            self.assertEqual(report["reason"], "already_sufficient")
+            self.assertEqual(report["initial_entries"], 3)
+            self.assertEqual(report["final_entries"], 3)
+            self.assertEqual(report["seeded"], 0)
+            self.assertIsInstance(report.get("rng_seed"), str)
+
+    def test_seed_population_memory_from_heuristics_propagates_write_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pop_path = Path(tmpdir) / "population.json"
+            memory = {"version": 1, "entries": []}
+            with patch(
+                "train.generate_population_seed_candidates",
+                return_value=[{"mutation": "population_seed:test", "source_code": "candidate"}],
+            ), patch(
+                "train.update_and_save_population_memory",
+                side_effect=OSError("read only"),
+            ):
+                with self.assertRaises(OSError):
+                    train.seed_population_memory_from_heuristics(
+                        population_memory_path=pop_path,
+                        population_memory=memory,
+                        target_name="poseidon2_cryptanalysis_trackb_kernel_fast",
+                        language="python",
+                        source_path=HARNESS_PATH,
+                        baseline_source="baseline",
+                        baseline_metric=15.35,
+                        higher_is_better=True,
+                        target_config={},
+                        mutation_memory=None,
+                        min_entries=2,
+                        max_candidates=1,
+                        max_entries=48,
+                    )
 
 
 if __name__ == "__main__":
