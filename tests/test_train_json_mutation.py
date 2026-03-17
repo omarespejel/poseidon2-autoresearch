@@ -161,7 +161,6 @@ class TrackBObjectiveGuardTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(details.get("status"), "objective_modified")
         self.assertIn("resolved_objective", details.get("paths", []))
-
     def test_guard_does_not_duplicate_active_profile_objective_change(self) -> None:
         source = stable_trackb_source()
         payload = json.loads(source)

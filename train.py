@@ -954,9 +954,10 @@ def python_mutator_mitm_bucket_cap_up(source: str) -> tuple[str, str, bool]:
     return python_replace_first(
         source,
         [
+            ("if len(bucket) < 2:", "if len(bucket) < 4:"),
+            ("if len(bucket) < 3:", "if len(bucket) < 5:"),
             ("if len(bucket) < 4:", "if len(bucket) < 6:"),
             ("if len(bucket) < 5:", "if len(bucket) < 7:"),
-            ("if len(bucket) < 3:", "if len(bucket) < 5:"),
         ],
         mutation="python_trackb_mitm_bucket_cap_up",
     )
@@ -966,9 +967,10 @@ def python_mutator_mitm_bucket_cap_down(source: str) -> tuple[str, str, bool]:
     return python_replace_first(
         source,
         [
-            ("if len(bucket) < 4:", "if len(bucket) < 2:"),
-            ("if len(bucket) < 3:", "if len(bucket) < 2:"),
+            ("if len(bucket) < 7:", "if len(bucket) < 5:"),
+            ("if len(bucket) < 6:", "if len(bucket) < 4:"),
             ("if len(bucket) < 5:", "if len(bucket) < 3:"),
+            ("if len(bucket) < 4:", "if len(bucket) < 2:"),
         ],
         mutation="python_trackb_mitm_bucket_cap_down",
     )
@@ -2734,6 +2736,24 @@ def resolved_objective_from_trackb_payload(payload: dict[str, Any]) -> tuple[dic
     return (json.loads(json.dumps(resolved)), source_key)
 
 
+def resolved_objective_from_trackb_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
+    top_level = payload.get("objective")
+    resolved = top_level if isinstance(top_level, dict) else None
+
+    active_profile = payload.get("active_profile")
+    profiles = payload.get("challenge_profiles")
+    if isinstance(active_profile, str) and active_profile.strip() and isinstance(profiles, dict):
+        profile_payload = profiles.get(active_profile.strip())
+        if isinstance(profile_payload, dict):
+            profile_objective = profile_payload.get("objective")
+            if isinstance(profile_objective, dict):
+                resolved = profile_objective
+
+    if not isinstance(resolved, dict):
+        return None
+    return json.loads(json.dumps(resolved))
+
+
 def objective_sections_from_trackb_payload(payload: dict[str, Any]) -> dict[str, Any]:
     sections: dict[str, Any] = {}
     top_level = payload.get("objective")
@@ -2750,6 +2770,9 @@ def objective_sections_from_trackb_payload(payload: dict[str, Any]) -> dict[str,
             if isinstance(objective, dict):
                 key = f"challenge_profiles.{profile_name}.objective"
                 sections[key] = json.loads(json.dumps(objective))
+    resolved = resolved_objective_from_trackb_payload(payload)
+    if isinstance(resolved, dict) and resolved != sections.get("objective"):
+        sections["resolved_objective"] = resolved
     return sections
 
 

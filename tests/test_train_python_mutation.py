@@ -131,6 +131,14 @@ def helper():
         self.assertTrue(cross_down_changed)
         self.assertEqual(cross_down, source)
 
+    def test_mitm_bucket_cap_mutations_are_reversible(self) -> None:
+        source = harness_source()
+        up_candidate, _, up_changed = train.python_mutator_mitm_bucket_cap_up(source)
+        self.assertTrue(up_changed)
+        restored, _, down_changed = train.python_mutator_mitm_bucket_cap_down(up_candidate)
+        self.assertTrue(down_changed)
+        self.assertEqual(restored, source)
+
     def test_mutation_language_inference_supports_python_prefix(self) -> None:
         language = train.infer_mutation_language(mutation="python_trackb_mitm_bucket_cap_up")
         self.assertEqual(language, "python")
