@@ -111,30 +111,35 @@ class AttackHarnessTests(unittest.TestCase):
         d_a = attack_harness.differential_kernel(spec=spec, analysis=analysis, search=search, rng=rng_a)
         p_a = attack_harness.mitm_truncated_preimage_kernel(spec=spec, analysis=analysis, search=search, rng=rng_a)
         c_a = attack_harness.birthday_collision_kernel(spec=spec, analysis=analysis, search=search, rng=rng_a)
+        a_a = attack_harness.algebraic_elimination_kernel(spec=spec, analysis=analysis, search=search, rng=rng_a)
         m_a = attack_harness.score(
             config=cfg,
             search=search,
             differential=d_a,
             mitm_preimage=p_a,
             collision=c_a,
+            algebraic=a_a,
         )
 
         rng_b = seeded_rng(int(search["seed"]))
         d_b = attack_harness.differential_kernel(spec=spec, analysis=analysis, search=search, rng=rng_b)
         p_b = attack_harness.mitm_truncated_preimage_kernel(spec=spec, analysis=analysis, search=search, rng=rng_b)
         c_b = attack_harness.birthday_collision_kernel(spec=spec, analysis=analysis, search=search, rng=rng_b)
+        a_b = attack_harness.algebraic_elimination_kernel(spec=spec, analysis=analysis, search=search, rng=rng_b)
         m_b = attack_harness.score(
             config=cfg,
             search=search,
             differential=d_b,
             mitm_preimage=p_b,
             collision=c_b,
+            algebraic=a_b,
         )
 
         self.assertEqual(rng_a.getstate(), rng_b.getstate())
         self.assertEqual(d_a, d_b)
         self.assertEqual(p_a, p_b)
         self.assertEqual(c_a, c_b)
+        self.assertEqual(a_a, a_b)
         self.assertEqual(m_a, m_b)
 
     def test_payload_shape(self) -> None:
@@ -147,14 +152,17 @@ class AttackHarnessTests(unittest.TestCase):
         d = attack_harness.differential_kernel(spec=spec, analysis=analysis, search=search, rng=rng)
         p = attack_harness.mitm_truncated_preimage_kernel(spec=spec, analysis=analysis, search=search, rng=rng)
         c = attack_harness.birthday_collision_kernel(spec=spec, analysis=analysis, search=search, rng=rng)
-        m = attack_harness.score(config=cfg, search=search, differential=d, mitm_preimage=p, collision=c)
+        a = attack_harness.algebraic_elimination_kernel(spec=spec, analysis=analysis, search=search, rng=rng)
+        m = attack_harness.score(config=cfg, search=search, differential=d, mitm_preimage=p, collision=c, algebraic=a)
 
         self.assertIn("attack_score", m)
         self.assertIn("attack_score_signal", m)
         self.assertIn("attack_score_verified", m)
+        self.assertIn("attack_score_algebraic", m)
         self.assertIn("differential_complexity_bits", m)
         self.assertIn("preimage_complexity_bits", m)
         self.assertIn("collision_complexity_bits", m)
+        self.assertIn("algebraic_complexity_bits", m)
         self.assertTrue(math_is_finite(float(m["attack_score"])))
         self.assertIn("attack_found", m)
         self.assertIn(m["attack_found"], (0.0, 1.0))
@@ -188,6 +196,8 @@ class AttackHarnessTests(unittest.TestCase):
             "mitm_forward_states": 0,
             "mitm_backward_states": 0,
             "collision_samples": 0,
+            "algebraic_train_samples": 0,
+            "algebraic_validation_samples": 0,
         }
         rng = seeded_rng(search["seed"])
 
@@ -199,12 +209,14 @@ class AttackHarnessTests(unittest.TestCase):
             rng=rng,
         )
         collision = attack_harness.birthday_collision_kernel(spec=spec, analysis=analysis, search=search, rng=rng)
+        algebraic = attack_harness.algebraic_elimination_kernel(spec=spec, analysis=analysis, search=search, rng=rng)
         metrics = attack_harness.score(
             config=cfg,
             search=search,
             differential=differential,
             mitm_preimage=mitm_preimage,
             collision=collision,
+            algebraic=algebraic,
         )
 
         self.assertEqual(differential["best_probability"], 0.0)
@@ -213,6 +225,8 @@ class AttackHarnessTests(unittest.TestCase):
         self.assertEqual(mitm_preimage["verified_hits"], 0)
         self.assertEqual(collision["samples"], 0)
         self.assertEqual(collision["collisions"], 0)
+        self.assertEqual(algebraic["train_samples"], 0)
+        self.assertEqual(algebraic["validation_samples"], 0)
         self.assertTrue(math_is_finite(float(metrics["attack_score"])))
 
 

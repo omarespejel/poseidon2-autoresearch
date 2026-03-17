@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import itertools
 import json
 import math
 import random
@@ -436,6 +437,8 @@ def parse_search(config: dict[str, Any], *, mode: str) -> dict[str, int]:
         "mitm_forward_states": scaled("mitm_forward_states", 4096, 64, 1_000_000),
         "mitm_backward_states": scaled("mitm_backward_states", 4096, 64, 1_000_000),
         "collision_samples": scaled("collision_samples", 4096, 64, 1_000_000),
+        "algebraic_train_samples": scaled("algebraic_train_samples", 192, 16, 1_000_000),
+        "algebraic_validation_samples": scaled("algebraic_validation_samples", 96, 8, 1_000_000),
     }
 
 
@@ -459,12 +462,31 @@ def parse_analysis(config: dict[str, Any], spec: Poseidon2Spec) -> dict[str, Any
     if not key_lanes:
         key_lanes = [0]
 
+    algebraic_unknown_raw = raw.get("algebraic_unknown_lanes")
+    algebraic_unknown_lanes: list[int] = []
+    if isinstance(algebraic_unknown_raw, list):
+        for item in algebraic_unknown_raw:
+            idx = parse_int(item, -1)
+            if 0 <= idx < spec.width and idx not in algebraic_unknown_lanes:
+                algebraic_unknown_lanes.append(idx)
+    if not algebraic_unknown_lanes:
+        algebraic_unknown_lanes = list(key_lanes)
+    if not algebraic_unknown_lanes:
+        algebraic_unknown_lanes = [0]
+    # Keep algebraic basis compact for elimination runtime.
+    algebraic_unknown_lanes = algebraic_unknown_lanes[:4]
+
     return {
         "target_lane": target_lane,
         "truncated_bits": truncated_bits,
         "split_round": split_round,
         "middle_key_bits": middle_key_bits,
         "middle_key_lanes": key_lanes,
+        "algebraic_rounds": clamp_int(parse_int(raw.get("algebraic_rounds"), split_round), 1, spec.total_rounds),
+        "algebraic_degree": clamp_int(parse_int(raw.get("algebraic_degree"), 2), 1, 3),
+        "algebraic_target_lane": clamp_int(parse_int(raw.get("algebraic_target_lane"), target_lane), 0, spec.width - 1),
+        "algebraic_output_bits": clamp_int(parse_int(raw.get("algebraic_output_bits"), truncated_bits), 4, 64),
+        "algebraic_unknown_lanes": algebraic_unknown_lanes,
     }
 
 
@@ -479,6 +501,130 @@ def middle_key(state: list[int], *, lanes: list[int], bits: int) -> tuple[int, .
     for lane in lanes:
         out.append(int(state[lane]) & mask)
     return tuple(out)
+
+
+def monomial_exponents(num_vars: int, max_degree: int) -> list[tuple[int, ...]]:
+    exps: list[tuple[int, ...]] = [tuple(0 for _ in range(num_vars))]
+    for degree in range(1, max_degree + 1):
+        for comb in itertools.combinations_with_replacement(range(num_vars), degree):
+            out = [0] * num_vars
+            for idx in comb:
+                out[idx] += 1
+            exps.append(tuple(out))
+    return exps
+
+
+def eval_monomial(values: list[int], exponents: tuple[int, ...], modulus: int) -> int:
+    acc = 1
+    for value, exp in zip(values, exponents):
+        if exp <= 0:
+            continue
+        acc = (acc * pow(int(value) % modulus, int(exp), modulus)) % modulus
+    return acc
+
+
+def build_design_row(values: list[int], exponents: list[tuple[int, ...]], modulus: int) -> list[int]:
+    return [eval_monomial(values, exp, modulus) for exp in exponents]
+
+
+def solve_linear_system_mod(
+    matrix_rows: list[list[int]],
+    rhs: list[int],
+    *,
+    modulus: int,
+) -> dict[str, Any]:
+    if not matrix_rows:
+        return {
+            "rank": 0,
+            "nullity": 0,
+            "inconsistent": False,
+            "solution": [],
+            "row_ops": 0,
+            "pivot_columns": [],
+        }
+
+    n_rows = len(matrix_rows)
+    n_cols = len(matrix_rows[0])
+    aug: list[list[int]] = []
+    for row, b in zip(matrix_rows, rhs):
+        if len(row) != n_cols:
+            raise ValueError("all matrix rows must have equal length")
+        aug.append([int(v) % modulus for v in row] + [int(b) % modulus])
+
+    row_ops = 0
+    pivot_columns: list[int] = []
+    pivot_row = 0
+
+    for col in range(n_cols):
+        pivot = None
+        for r in range(pivot_row, n_rows):
+            if aug[r][col] % modulus != 0:
+                pivot = r
+                break
+        if pivot is None:
+            continue
+
+        if pivot != pivot_row:
+            aug[pivot_row], aug[pivot] = aug[pivot], aug[pivot_row]
+            row_ops += 1
+
+        inv = modinv(aug[pivot_row][col], modulus)
+        for c in range(col, n_cols + 1):
+            aug[pivot_row][c] = (aug[pivot_row][c] * inv) % modulus
+        row_ops += n_cols - col + 1
+
+        for r in range(n_rows):
+            if r == pivot_row:
+                continue
+            factor = aug[r][col] % modulus
+            if factor == 0:
+                continue
+            for c in range(col, n_cols + 1):
+                aug[r][c] = (aug[r][c] - factor * aug[pivot_row][c]) % modulus
+            row_ops += n_cols - col + 1
+
+        pivot_columns.append(col)
+        pivot_row += 1
+        if pivot_row >= n_rows:
+            break
+
+    inconsistent = False
+    for r in range(n_rows):
+        all_zero = True
+        for c in range(n_cols):
+            if aug[r][c] % modulus != 0:
+                all_zero = False
+                break
+        if all_zero and aug[r][n_cols] % modulus != 0:
+            inconsistent = True
+            break
+
+    solution = [0] * n_cols
+    if not inconsistent:
+        for r, c in enumerate(pivot_columns):
+            solution[c] = aug[r][n_cols] % modulus
+
+    rank = len(pivot_columns)
+    return {
+        "rank": rank,
+        "nullity": max(0, n_cols - rank),
+        "inconsistent": inconsistent,
+        "solution": solution,
+        "row_ops": row_ops,
+        "pivot_columns": pivot_columns,
+    }
+
+
+def eval_linearized_polynomial(
+    row: list[int],
+    coeffs: list[int],
+    *,
+    modulus: int,
+) -> int:
+    acc = 0
+    for a, b in zip(row, coeffs):
+        acc = (acc + (int(a) * int(b))) % modulus
+    return acc
 
 
 def differential_kernel(
@@ -681,6 +827,101 @@ def birthday_collision_kernel(
     }
 
 
+def algebraic_elimination_kernel(
+    *,
+    spec: Poseidon2Spec,
+    analysis: dict[str, Any],
+    search: dict[str, int],
+    rng: random.Random,
+) -> dict[str, Any]:
+    rounds = clamp_int(int(analysis["algebraic_rounds"]), 1, spec.total_rounds)
+    degree = clamp_int(int(analysis["algebraic_degree"]), 1, 3)
+    target_lane = clamp_int(int(analysis["algebraic_target_lane"]), 0, spec.width - 1)
+    output_bits = clamp_int(int(analysis["algebraic_output_bits"]), 4, 64)
+    unknown_lanes = list(analysis["algebraic_unknown_lanes"])
+    train_samples = int(search["algebraic_train_samples"])
+    val_samples = int(search["algebraic_validation_samples"])
+
+    # Fix non-symbolic lanes to a deterministic template and vary only selected unknown lanes.
+    template = random_state(rng, spec)
+    for lane in unknown_lanes:
+        template[lane] = 0
+
+    exponents = monomial_exponents(len(unknown_lanes), degree)
+    term_count = len(exponents)
+    train_matrix: list[list[int]] = []
+    train_rhs: list[int] = []
+    val_matrix: list[list[int]] = []
+    val_rhs: list[int] = []
+
+    def sample_point() -> tuple[list[int], int]:
+        state = list(template)
+        values: list[int] = []
+        for lane in unknown_lanes:
+            v = rng.randrange(spec.modulus)
+            state[lane] = v
+            values.append(v)
+        out = poseidon2_prefix(state, spec, rounds)
+        y = output_tag(out[target_lane], output_bits)
+        return values, y
+
+    for _ in range(train_samples):
+        values, y = sample_point()
+        train_matrix.append(build_design_row(values, exponents, spec.modulus))
+        train_rhs.append(y % spec.modulus)
+
+    for _ in range(val_samples):
+        values, y = sample_point()
+        val_matrix.append(build_design_row(values, exponents, spec.modulus))
+        val_rhs.append(y % spec.modulus)
+
+    solve = solve_linear_system_mod(train_matrix, train_rhs, modulus=spec.modulus)
+    coeffs = list(solve["solution"])
+    inconsistent = bool(solve["inconsistent"])
+    rank = int(solve["rank"])
+    nullity = int(solve["nullity"])
+
+    train_exact = 0
+    for row, y in zip(train_matrix, train_rhs):
+        pred = eval_linearized_polynomial(row, coeffs, modulus=spec.modulus)
+        if pred == y:
+            train_exact += 1
+
+    val_exact = 0
+    for row, y in zip(val_matrix, val_rhs):
+        pred = eval_linearized_polynomial(row, coeffs, modulus=spec.modulus)
+        if pred == y:
+            val_exact += 1
+
+    train_exact_rate = float(train_exact) / float(max(1, train_samples))
+    val_exact_rate = float(val_exact) / float(max(1, val_samples))
+    base_bits = math.log2(max(2, term_count))
+    if inconsistent:
+        complexity_bits = base_bits + 4.0
+    else:
+        rank_gain = math.log2(max(1, nullity + 1))
+        fit_gain = (2.5 * val_exact_rate) + (1.5 * train_exact_rate)
+        complexity_bits = max(1.0, base_bits - rank_gain - fit_gain)
+
+    return {
+        "rounds": rounds,
+        "degree": degree,
+        "target_lane": target_lane,
+        "output_bits": output_bits,
+        "unknown_lanes": unknown_lanes,
+        "train_samples": train_samples,
+        "validation_samples": val_samples,
+        "term_count": term_count,
+        "rank": rank,
+        "nullity": nullity,
+        "inconsistent": inconsistent,
+        "row_ops": int(solve["row_ops"]),
+        "train_exact_rate": train_exact_rate,
+        "validation_exact_rate": val_exact_rate,
+        "complexity_bits": complexity_bits,
+    }
+
+
 def score(
     *,
     config: dict[str, Any],
@@ -688,6 +929,7 @@ def score(
     differential: dict[str, Any],
     mitm_preimage: dict[str, Any],
     collision: dict[str, Any],
+    algebraic: dict[str, Any],
 ) -> dict[str, float]:
     objective = config.get("objective", {})
     if not isinstance(objective, dict):
@@ -696,12 +938,14 @@ def score(
     wd = clamp_float(parse_float(objective.get("weight_differential"), 0.35), 0.0, 1.0)
     wp = clamp_float(parse_float(objective.get("weight_preimage"), 0.45), 0.0, 1.0)
     wc = clamp_float(parse_float(objective.get("weight_collision"), 0.20), 0.0, 1.0)
-    tw = wd + wp + wc
+    wa = clamp_float(parse_float(objective.get("weight_algebraic"), 0.0), 0.0, 1.0)
+    tw = wd + wp + wc + wa
     if tw <= 0.0:
-        wd, wp, wc, tw = 0.35, 0.45, 0.20, 1.0
+        wd, wp, wc, wa, tw = 0.35, 0.45, 0.20, 0.0, 1.0
     wd /= tw
     wp /= tw
     wc /= tw
+    wa /= tw
 
     cap_bits = clamp_float(parse_float(objective.get("complexity_cap_bits"), 32.0), 8.0, 128.0)
     found_threshold_bits = clamp_float(parse_float(objective.get("attack_found_threshold_bits"), 16.0), 4.0, 64.0)
@@ -712,15 +956,18 @@ def score(
     diff_bits = float(differential["complexity_bits"])
     pre_bits = float(mitm_preimage["complexity_bits"])
     coll_bits = float(collision["observed_complexity_bits"])
+    alg_bits = float(algebraic["complexity_bits"])
 
     diff_signal = max(0.0, cap_bits - diff_bits)
     pre_signal = max(0.0, cap_bits - pre_bits)
     coll_signal = max(0.0, float(collision["advantage_bits"]))
+    alg_signal = max(0.0, cap_bits - alg_bits)
 
     heuristic_found = (
         bool(mitm_preimage.get("attack_found", False))
         or diff_bits <= found_threshold_bits
         or pre_bits <= found_threshold_bits
+        or alg_bits <= found_threshold_bits
     )
     verified_found = bool(int(mitm_preimage.get("verified_hits", 0)) > 0)
     heuristic_component = found_bonus if heuristic_found else 0.0
@@ -734,9 +981,10 @@ def score(
     )
     cost_penalty = cost_penalty_scale * math.log2(max(2, search_cost))
 
-    base_signal_score = (wd * diff_signal) + (wp * pre_signal) + (wc * coll_signal) - cost_penalty
+    base_signal_score = (wd * diff_signal) + (wp * pre_signal) + (wc * coll_signal) + (wa * alg_signal) - cost_penalty
     attack_score_signal = base_signal_score + heuristic_component
     attack_score_verified = base_signal_score + verified_component
+    attack_score_algebraic = alg_signal - cost_penalty
 
     return {
         # Backward-compatible default score: heuristic signal lane.
@@ -744,15 +992,18 @@ def score(
         "attack_score_signal": attack_score_signal,
         "attack_score_verified": attack_score_verified,
         "attack_found": 1.0 if verified_found else 0.0,
+        "attack_score_algebraic": attack_score_algebraic,
         "heuristic_found": 1.0 if heuristic_found else 0.0,
         "verified_found": 1.0 if verified_found else 0.0,
-        "best_attack_complexity_bits": min(diff_bits, pre_bits, coll_bits),
+        "best_attack_complexity_bits": min(diff_bits, pre_bits, coll_bits, alg_bits),
         "differential_complexity_bits": diff_bits,
         "preimage_complexity_bits": pre_bits,
         "collision_complexity_bits": coll_bits,
+        "algebraic_complexity_bits": alg_bits,
         "differential_signal": diff_signal,
         "preimage_signal": pre_signal,
         "collision_signal": coll_signal,
+        "algebraic_signal": alg_signal,
         "cost_penalty": cost_penalty,
     }
 
@@ -804,12 +1055,14 @@ def main(argv: list[str] | None = None) -> int:
         rng=kernel_rng("mitm_preimage"),
     )
     collision = birthday_collision_kernel(spec=spec, analysis=analysis, search=search, rng=kernel_rng("collision"))
+    algebraic = algebraic_elimination_kernel(spec=spec, analysis=analysis, search=search, rng=kernel_rng("algebraic"))
     metrics = score(
         config=config,
         search=search,
         differential=differential,
         mitm_preimage=mitm_preimage,
         collision=collision,
+        algebraic=algebraic,
     )
 
     payload = {
@@ -835,18 +1088,22 @@ def main(argv: list[str] | None = None) -> int:
             "differential_complexity_bits": metrics["differential_complexity_bits"],
             "preimage_complexity_bits": metrics["preimage_complexity_bits"],
             "collision_complexity_bits": metrics["collision_complexity_bits"],
+            "algebraic_complexity_bits": metrics["algebraic_complexity_bits"],
             "attack_found": int(metrics["attack_found"]),
             "heuristic_found": int(metrics["heuristic_found"]),
             "verified_found": int(metrics["verified_found"]),
+            "attack_score_algebraic": metrics["attack_score_algebraic"],
         },
         "details": {
             "differential": differential,
             "mitm_preimage": mitm_preimage,
             "collision": collision,
+            "algebraic": algebraic,
             "signals": {
                 "differential_signal": metrics["differential_signal"],
                 "preimage_signal": metrics["preimage_signal"],
                 "collision_signal": metrics["collision_signal"],
+                "algebraic_signal": metrics["algebraic_signal"],
                 "cost_penalty": metrics["cost_penalty"],
             },
         },
