@@ -149,6 +149,90 @@ class PopulationMemoryTests(unittest.TestCase):
                 rng=None,
             )
 
+    def test_select_population_parent_can_replay_cross_target_when_enabled(self) -> None:
+        best_source = "def f():\n    return 0\n"
+        local_alt = "def f():\n    return 1\n"
+        cross_alt = "def f():\n    return 9\n"
+        memory = {
+            "version": 1,
+            "entries": [
+                {
+                    "target": "poseidon2_cryptanalysis_trackb_kernel_fast",
+                    "language": "python",
+                    "source_sha256": train.source_sha256(local_alt),
+                    "source_code": local_alt,
+                    "metric_value": 0.1,
+                    "higher_is_better": True,
+                    "accepted_total": 0,
+                    "rejected_total": 2,
+                    "sampled_total": 0,
+                },
+                {
+                    "target": "poseidon2_cryptanalysis_trackb_kernel_signal_fast",
+                    "language": "python",
+                    "source_sha256": train.source_sha256(cross_alt),
+                    "source_code": cross_alt,
+                    "metric_value": 99.0,
+                    "higher_is_better": True,
+                    "accepted_total": 5,
+                    "rejected_total": 1,
+                    "sampled_total": 0,
+                },
+            ],
+        }
+        rng = DeterministicRng(choices_result=0)
+        with patch("train.random.choices", side_effect=AssertionError("global random should not be used")):
+            selected = train.select_population_parent(
+                memory,
+                target_name="poseidon2_cryptanalysis_trackb_kernel_fast",
+                language="python",
+                higher_is_better=True,
+                best_metric=15.0,
+                best_source=best_source,
+                allow_cross_target_replay=True,
+                cross_target_min_accepted=2,
+                cross_target_score_scale=0.7,
+                max_candidates=8,
+                rng=rng,
+            )
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected["target"], "poseidon2_cryptanalysis_trackb_kernel_signal_fast")
+        self.assertEqual(selected["source_sha256"], train.source_sha256(cross_alt))
+
+    def test_select_population_parent_respects_cross_target_min_accepted(self) -> None:
+        best_source = "def f():\n    return 0\n"
+        cross_alt = "def f():\n    return 9\n"
+        memory = {
+            "version": 1,
+            "entries": [
+                {
+                    "target": "poseidon2_cryptanalysis_trackb_kernel_signal_fast",
+                    "language": "python",
+                    "source_sha256": train.source_sha256(cross_alt),
+                    "source_code": cross_alt,
+                    "metric_value": 99.0,
+                    "higher_is_better": True,
+                    "accepted_total": 1,
+                    "rejected_total": 0,
+                    "sampled_total": 0,
+                },
+            ],
+        }
+        selected = train.select_population_parent(
+            memory,
+            target_name="poseidon2_cryptanalysis_trackb_kernel_fast",
+            language="python",
+            higher_is_better=True,
+            best_metric=15.0,
+            best_source=best_source,
+            allow_cross_target_replay=True,
+            cross_target_min_accepted=2,
+            cross_target_score_scale=0.7,
+            max_candidates=8,
+            rng=DeterministicRng(choices_result=0),
+        )
+        self.assertIsNone(selected)
+
     def test_mark_population_entry_sampled_updates_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "population.json"
@@ -230,6 +314,40 @@ class PopulationMemoryTests(unittest.TestCase):
         self.assertNotIn("max_iterations", config)
         self.assertNotIn("max_accepted", config)
         self.assertNotIn("max_runtime_seconds", config)
+
+    def test_mark_population_entry_sampled_can_mark_cross_target_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "population.json"
+            source = "def f():\n    return 7\n"
+            base = {
+                "version": 1,
+                "entries": [
+                    {
+                        "target": "poseidon2_cryptanalysis_trackb_kernel_signal_fast",
+                        "language": "python",
+                        "source_sha256": train.source_sha256(source),
+                        "source_code": source,
+                        "metric_value": 15.0,
+                        "higher_is_better": True,
+                        "accepted_total": 3,
+                        "rejected_total": 0,
+                        "sampled_total": 0,
+                    }
+                ],
+            }
+            train.save_population_memory(path, base)
+            memory = train.load_population_memory(path)
+            updated = train.mark_population_entry_sampled(
+                path,
+                memory,
+                target_name="poseidon2_cryptanalysis_trackb_kernel_fast",
+                language="python",
+                source_hash=train.source_sha256(source),
+                timestamp="2026-03-17T00:00:00+00:00",
+                entry_target="poseidon2_cryptanalysis_trackb_kernel_signal_fast",
+            )
+            entries = updated.get("entries", [])
+            self.assertEqual(entries[0]["sampled_total"], 1)
 
     def test_should_record_population_candidate(self) -> None:
         self.assertTrue(train.should_record_population_candidate(accepted=True, notes="accepted:x"))
