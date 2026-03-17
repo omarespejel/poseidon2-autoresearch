@@ -6095,6 +6095,7 @@ def run_loop(args: argparse.Namespace) -> int:
     print(
         json.dumps(
             {
+                "ok": True,
                 "target": args.target,
                 "best_metric": best_metric,
                 "accepted": accepted,
