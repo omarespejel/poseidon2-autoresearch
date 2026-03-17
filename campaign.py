@@ -86,7 +86,9 @@ def default_crypto_optimize_targets() -> str:
         [
             "poseidon2_cryptanalysis_trackb_fast",
             "poseidon2_cryptanalysis_trackb_verified_fast",
+            "poseidon2_cryptanalysis_algebraic_fast",
             "poseidon2_cryptanalysis_poseidon64_signal_fast",
+            "poseidon2_cryptanalysis_poseidon64_algebraic_fast",
         ]
     )
 

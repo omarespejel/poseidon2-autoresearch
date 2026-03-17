@@ -8,7 +8,15 @@
     ],
     "split_round": 11,
     "target_lane": 0,
-    "truncated_bits": 22
+    "truncated_bits": 22,
+    "algebraic_rounds": 11,
+    "algebraic_degree": 2,
+    "algebraic_target_lane": 0,
+    "algebraic_output_bits": 20,
+    "algebraic_unknown_lanes": [
+      0,
+      1
+    ]
   },
   "challenge_profiles": {
     "koalabear_w16_shape": {
@@ -21,7 +29,16 @@
         ],
         "split_round": 7,
         "target_lane": 0,
-        "truncated_bits": 18
+        "truncated_bits": 18,
+        "algebraic_rounds": 7,
+        "algebraic_degree": 2,
+        "algebraic_target_lane": 0,
+        "algebraic_output_bits": 14,
+        "algebraic_unknown_lanes": [
+          0,
+          1,
+          2
+        ]
       },
       "poseidon2": {
         "constants_seed": "koalabear-w16-rf6-rp4",
@@ -53,7 +70,9 @@
         "differential_candidates": 12,
         "differential_samples_per_candidate": 32,
         "mitm_backward_states": 256,
-        "mitm_forward_states": 256
+        "mitm_forward_states": 256,
+        "algebraic_train_samples": 64,
+        "algebraic_validation_samples": 32
       }
     },
     "poseidon256_bounty_shape": {
@@ -65,7 +84,15 @@
         ],
         "split_round": 11,
         "target_lane": 0,
-        "truncated_bits": 24
+        "truncated_bits": 24,
+        "algebraic_rounds": 11,
+        "algebraic_degree": 2,
+        "algebraic_target_lane": 0,
+        "algebraic_output_bits": 20,
+        "algebraic_unknown_lanes": [
+          0,
+          1
+        ]
       },
       "poseidon2": {
         "constants_seed": "poseidon256-bounty-shape",
@@ -85,7 +112,9 @@
         "differential_candidates": 24,
         "differential_samples_per_candidate": 64,
         "mitm_backward_states": 768,
-        "mitm_forward_states": 768
+        "mitm_forward_states": 768,
+        "algebraic_train_samples": 96,
+        "algebraic_validation_samples": 48
       }
     },
     "poseidon64_bounty_shape": {
@@ -97,7 +126,15 @@
         ],
         "split_round": 10,
         "target_lane": 0,
-        "truncated_bits": 28
+        "truncated_bits": 28,
+        "algebraic_rounds": 10,
+        "algebraic_degree": 2,
+        "algebraic_target_lane": 0,
+        "algebraic_output_bits": 20,
+        "algebraic_unknown_lanes": [
+          0,
+          1
+        ]
       },
       "poseidon2": {
         "constants_seed": "poseidon64-bounty-shape",
@@ -117,7 +154,9 @@
         "differential_candidates": 32,
         "differential_samples_per_candidate": 96,
         "mitm_backward_states": 1024,
-        "mitm_forward_states": 1024
+        "mitm_forward_states": 1024,
+        "algebraic_train_samples": 96,
+        "algebraic_validation_samples": 48
       }
     },
     "research_fast": {
@@ -129,7 +168,15 @@
         ],
         "split_round": 11,
         "target_lane": 0,
-        "truncated_bits": 22
+        "truncated_bits": 22,
+        "algebraic_rounds": 11,
+        "algebraic_degree": 2,
+        "algebraic_target_lane": 0,
+        "algebraic_output_bits": 20,
+        "algebraic_unknown_lanes": [
+          0,
+          1
+        ]
       },
       "poseidon2": {
         "constants_seed": "trackb-poseidon2-v2",
@@ -151,7 +198,9 @@
         "mitm_backward_states": 3072,
         "mitm_forward_states": 3328,
         "scale_rounds_in_full_mode": 0,
-        "seed": 1337
+        "seed": 1337,
+        "algebraic_train_samples": 192,
+        "algebraic_validation_samples": 96
       }
     }
   },
@@ -162,8 +211,9 @@
     "cost_penalty_scale": 0.06,
     "verified_found_bonus": 3.0,
     "weight_collision": 0.2,
-    "weight_differential": 0.35,
-    "weight_preimage": 0.45
+    "weight_differential": 0.3,
+    "weight_preimage": 0.35,
+    "weight_algebraic": 0.15
   },
   "poseidon2": {
     "constants_seed": "trackb-poseidon2-v2",
@@ -185,6 +235,8 @@
     "mitm_backward_states": 3072,
     "mitm_forward_states": 3328,
     "scale_rounds_in_full_mode": 0,
-    "seed": 1337
+    "seed": 1337,
+    "algebraic_train_samples": 192,
+    "algebraic_validation_samples": 96
   }
 }
