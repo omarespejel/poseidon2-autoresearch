@@ -10,6 +10,7 @@ This is the canonical loop entrypoint in compatibility mode:
 from __future__ import annotations
 
 import argparse
+import ast
 import datetime as dt
 import difflib
 import hashlib
@@ -1933,6 +1934,10 @@ def normalize_mutation_label(token: str) -> str | None:
     return token
 
 
+def is_retryable_no_change_mutation(mutation: str) -> bool:
+    return mutation in {"json_trackb_no_change", "rust_no_change", "python_no_change", "heuristic_no_change"}
+
+
 def extract_mutation_label_from_notes(notes: str) -> str | None:
     if not notes:
         return None
@@ -2638,6 +2643,17 @@ def strip_rust_comments_and_literals(source: str) -> str:
 
 
 def normalized_source_for_required_snippets(source: str, *, language: str) -> str:
+    if language.lower() == "python":
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            return ""
+        defs = [
+            f"def {node.name}("
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        ]
+        return "\n".join(defs)
     if language.lower() == "rust":
         return strip_rust_comments_and_literals(source)
     return source
@@ -3501,7 +3517,7 @@ def run_loop(args: argparse.Namespace) -> int:
 
         if (
             not changed
-            and mutation in {"json_trackb_no_change", "rust_no_change", "heuristic_no_change"}
+            and is_retryable_no_change_mutation(mutation)
             and bool(target.get("recover_from_no_change", True))
             and active_blocked
         ):

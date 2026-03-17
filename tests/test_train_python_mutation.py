@@ -15,6 +15,26 @@ def harness_source() -> str:
 
 
 class PythonMutationSelectionTests(unittest.TestCase):
+    def test_required_snippet_guard_uses_python_ast(self) -> None:
+        profile = {
+            "def differential_kernel(": 1,
+            "def mitm_truncated_preimage_kernel(": 1,
+            "def algebraic_elimination_kernel(": 1,
+            "def score(": 1,
+        }
+        fake_source = '''"""def differential_kernel(
+def mitm_truncated_preimage_kernel(
+def algebraic_elimination_kernel(
+def score(
+"""
+
+def helper():
+    return 1
+'''
+        ok, details = train.required_snippet_guard(fake_source, profile, language="Python")
+        self.assertFalse(ok)
+        self.assertEqual(len(details["violations"]), 4)
+
     def test_returns_no_change_for_non_harness_path(self) -> None:
         source = harness_source()
         candidate, mutation, changed = train.python_heuristic_candidate(
@@ -117,6 +137,10 @@ class PythonMutationSelectionTests(unittest.TestCase):
 
     def test_normalize_mutation_label_handles_python_no_change(self) -> None:
         self.assertIsNone(train.normalize_mutation_label("python_no_change"))
+
+    def test_retryable_no_change_includes_python(self) -> None:
+        self.assertTrue(train.is_retryable_no_change_mutation("python_no_change"))
+        self.assertFalse(train.is_retryable_no_change_mutation("python_trackb_mitm_bucket_cap_up"))
 
 
 if __name__ == "__main__":
