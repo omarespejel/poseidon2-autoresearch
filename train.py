@@ -1038,16 +1038,25 @@ def python_heuristic_candidate(
         target_name=target_name,
         language="python",
     )
+    compound_every = int((target_config or {}).get("compound_every", 0))
+    compound_limit = max(0, int((target_config or {}).get("compound_limit", 0)))
+    compound_second_window = max(1, int((target_config or {}).get("compound_second_window", len(ordered))))
+    prefer_compound = compound_every > 0 and (iteration % compound_every == 0)
+    single_tier = 1 if prefer_compound else 0
+    compound_tier = 0 if prefer_compound else 1
 
     candidates: list[dict[str, Any]] = []
+    single_candidates: list[tuple[int, str, str]] = []
     for idx, operator in enumerate(ordered):
         candidate, mutation, changed = operator(source)
         if blocked_mutations and mutation in blocked_mutations:
             continue
         if not changed:
             continue
+        single_candidates.append((idx, candidate, mutation))
         pref_class, pref_rank_value = preference_for_label(mutation)
         candidate_entry: dict[str, Any] = {
+            "tier": single_tier,
             "candidate": candidate,
             "mutation": mutation,
             "pref_class": pref_class,
@@ -1055,29 +1064,71 @@ def python_heuristic_candidate(
             "attempts": attempts.get(mutation, 0),
             "index": idx,
         }
-        if use_ucb_schedule:
-            accepted_hist, rejected_hist, history_scope = mutation_memory_counts(
-                mutation_memory,
-                mutation,
-                target_name=target_name,
-                language="python",
-            )
-            total_memory_observations = float(
-                scope_totals.get(history_scope, scope_totals.get("global", 0.0))
-            )
-            candidate_entry["ucb_score"] = mutation_ucb_score(
-                accepted=accepted_hist,
-                rejected=rejected_hist,
-                total_observations=total_memory_observations,
-                explore=mutation_ucb_explore,
-                preference_class=int(pref_class),
-                schedule_tier=0,
-                attempt_count=int(candidate_entry["attempts"]),
-            )
         candidates.append(candidate_entry)
+
+    if compound_every > 0 and compound_limit > 0 and single_candidates:
+        second_ops = ordered[: min(len(ordered), compound_second_window)]
+        seen_labels: set[str] = set()
+        added = 0
+        for idx_a, candidate_a, mutation_a in single_candidates:
+            if blocked_mutations and mutation_a in blocked_mutations:
+                continue
+            for idx_b, operator_b in enumerate(second_ops):
+                candidate_b, mutation_b, changed_b = operator_b(candidate_a)
+                if not changed_b:
+                    continue
+                if blocked_mutations and mutation_b in blocked_mutations:
+                    continue
+                if mutation_b == mutation_a:
+                    continue
+                combo_mutation = f"{mutation_a}+{mutation_b}"
+                if combo_mutation in seen_labels:
+                    continue
+                seen_labels.add(combo_mutation)
+                combo_attempts = attempts.get(
+                    combo_mutation,
+                    attempts.get(mutation_a, 0) + attempts.get(mutation_b, 0),
+                )
+                combo_idx = idx_a * 1000 + idx_b
+                pref_class, pref_rank_value = preference_for_label(combo_mutation)
+                candidates.append(
+                    {
+                        "tier": compound_tier,
+                        "pref_class": pref_class,
+                        "pref_rank": pref_rank_value,
+                        "attempts": combo_attempts,
+                        "index": combo_idx,
+                        "candidate": candidate_b,
+                        "mutation": combo_mutation,
+                    }
+                )
+                added += 1
+                if added >= compound_limit:
+                    break
+            if added >= compound_limit:
+                break
 
     if candidates:
         if use_ucb_schedule:
+            for item in candidates:
+                accepted_hist, rejected_hist, history_scope = mutation_memory_counts(
+                    mutation_memory,
+                    str(item["mutation"]),
+                    target_name=target_name,
+                    language="python",
+                )
+                total_memory_observations = float(
+                    scope_totals.get(history_scope, scope_totals.get("global", 0.0))
+                )
+                item["ucb_score"] = mutation_ucb_score(
+                    accepted=accepted_hist,
+                    rejected=rejected_hist,
+                    total_observations=total_memory_observations,
+                    explore=mutation_ucb_explore,
+                    preference_class=int(item["pref_class"]),
+                    schedule_tier=int(item["tier"]),
+                    attempt_count=int(item["attempts"]),
+                )
             candidates.sort(
                 key=lambda item: (
                     -float(item.get("ucb_score", 0.0)),
@@ -1090,6 +1141,7 @@ def python_heuristic_candidate(
         else:
             candidates.sort(
                 key=lambda item: (
+                    int(item["tier"]),
                     int(item["pref_class"]),
                     int(item["pref_rank"]),
                     int(item["attempts"]),

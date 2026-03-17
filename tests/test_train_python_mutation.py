@@ -68,6 +68,23 @@ class PythonMutationSelectionTests(unittest.TestCase):
         self.assertNotEqual(candidate, source)
         self.assertEqual(mutation, "python_trackb_mitm_bucket_cap_up")
 
+    def test_compound_schedule_prefers_compound_mutation_on_trigger_iteration(self) -> None:
+        source = harness_source()
+        candidate, mutation, changed = train.python_heuristic_candidate(
+            source,
+            2,
+            HARNESS_PATH,
+            target_config={
+                "compound_every": 2,
+                "compound_limit": 6,
+                "compound_second_window": 6,
+                "mutation_schedule": "priority",
+            },
+        )
+        self.assertTrue(changed)
+        self.assertNotEqual(candidate, source)
+        self.assertIn("+", mutation)
+
     def test_mutation_language_inference_supports_python_prefix(self) -> None:
         language = train.infer_mutation_language(mutation="python_trackb_mitm_bucket_cap_up")
         self.assertEqual(language, "python")
