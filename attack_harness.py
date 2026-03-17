@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import attack_kernels
+
 ROOT = Path(__file__).resolve().parent
 
 
@@ -1047,22 +1049,50 @@ def main(argv: list[str] | None = None) -> int:
         seed = int.from_bytes(hashlib.sha256(material).digest()[:8], "big")
         return random.Random(seed)  # noqa: S311 - deterministic benchmarking harness, not crypto RNG.
 
-    differential = differential_kernel(spec=spec, analysis=analysis, search=search, rng=kernel_rng("differential"))
-    mitm_preimage = mitm_truncated_preimage_kernel(
+    differential = attack_kernels.differential_kernel(
+        spec=spec,
+        analysis=analysis,
+        search=search,
+        rng=kernel_rng("differential"),
+        random_state_fn=random_state,
+        poseidon2_permute_fn=poseidon2_permute,
+    )
+    mitm_preimage = attack_kernels.mitm_truncated_preimage_kernel(
         spec=spec,
         analysis=analysis,
         search=search,
         rng=kernel_rng("mitm_preimage"),
+        random_state_fn=random_state,
+        poseidon2_permute_fn=poseidon2_permute,
+        poseidon2_prefix_fn=poseidon2_prefix,
+        poseidon2_invert_to_prefix_fn=poseidon2_invert_to_prefix,
     )
-    collision = birthday_collision_kernel(spec=spec, analysis=analysis, search=search, rng=kernel_rng("collision"))
-    algebraic = algebraic_elimination_kernel(spec=spec, analysis=analysis, search=search, rng=kernel_rng("algebraic"))
-    metrics = score(
+    collision = attack_kernels.birthday_collision_kernel(
+        spec=spec,
+        analysis=analysis,
+        search=search,
+        rng=kernel_rng("collision"),
+        random_state_fn=random_state,
+        poseidon2_permute_fn=poseidon2_permute,
+    )
+    algebraic = attack_kernels.algebraic_elimination_kernel(
+        spec=spec,
+        analysis=analysis,
+        search=search,
+        rng=kernel_rng("algebraic"),
+        random_state_fn=random_state,
+        poseidon2_prefix_fn=poseidon2_prefix,
+        clamp_int_fn=clamp_int,
+    )
+    metrics = attack_kernels.score(
         config=config,
         search=search,
         differential=differential,
         mitm_preimage=mitm_preimage,
         collision=collision,
         algebraic=algebraic,
+        clamp_float_fn=clamp_float,
+        parse_float_fn=parse_float,
     )
 
     payload = {

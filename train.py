@@ -4027,6 +4027,82 @@ def resolved_objective_from_trackb_payload(payload: dict[str, Any]) -> tuple[dic
     return (json.loads(json.dumps(resolved)), source_key)
 
 
+def iter_target_benchmark_commands(target_config: dict[str, Any]) -> list[list[str]]:
+    commands: list[list[str]] = []
+
+    benchmark_command = target_config.get("benchmark_command")
+    if isinstance(benchmark_command, list):
+        commands.append([str(token) for token in benchmark_command])
+
+    profiles = target_config.get("benchmark_profiles")
+    if isinstance(profiles, list):
+        for profile in profiles:
+            if not isinstance(profile, dict):
+                continue
+            profile_command = profile.get("benchmark_command")
+            if isinstance(profile_command, list):
+                commands.append([str(token) for token in profile_command])
+
+    return commands
+
+
+def benchmark_references_source_file(*, target_config: dict[str, Any], source_file: str) -> list[str]:
+    source_norm = source_file.strip().replace("\\", "/").lower().lstrip("./")
+    source_name = Path(source_norm).name
+    if not source_norm:
+        return []
+
+    refs: list[str] = []
+    for command in iter_target_benchmark_commands(target_config):
+        for raw_token in command:
+            token = str(raw_token).strip()
+            if not token:
+                continue
+            normalized = token.replace("\\", "/").lower().lstrip("./")
+            if not normalized:
+                continue
+            token_name = Path(normalized).name
+            if (
+                normalized == source_norm
+                or normalized.endswith("/" + source_norm)
+                or token_name == source_name
+            ):
+                refs.append(token)
+
+    seen: set[str] = set()
+    unique_refs: list[str] = []
+    for token in refs:
+        if token in seen:
+            continue
+        seen.add(token)
+        unique_refs.append(token)
+    return unique_refs
+
+
+def source_file_is_executable_code(source_file: str) -> bool:
+    suffix = Path(source_file.strip()).suffix.lower()
+    return suffix in {
+        ".py",
+        ".rs",
+        ".go",
+        ".c",
+        ".cc",
+        ".cpp",
+        ".h",
+        ".hpp",
+        ".java",
+        ".js",
+        ".ts",
+        ".tsx",
+        ".nr",
+        ".cairo",
+        ".sol",
+        ".sh",
+        ".bash",
+        ".zsh",
+    }
+
+
 def objective_sections_from_trackb_payload(payload: dict[str, Any]) -> dict[str, Any]:
     sections: dict[str, Any] = {}
     top_level = payload.get("objective")
@@ -4641,6 +4717,29 @@ def run_loop(args: argparse.Namespace) -> int:
         print(f"Source file not found: {source_path}", file=sys.stderr)
         return 2
     initial_source = source_path.read_text()
+
+    if str(target.get("type", "")).strip().lower() == "command" and source_file_is_executable_code(
+        str(target["source_file"])
+    ):
+        self_scoring_refs = benchmark_references_source_file(
+            target_config=target,
+            source_file=str(target["source_file"]),
+        )
+        allow_self_modifying_evaluator = parse_flag_bool(
+            target.get("allow_self_modifying_evaluator"),
+            default=False,
+        )
+        if self_scoring_refs and not allow_self_modifying_evaluator:
+            joined = ", ".join(self_scoring_refs)
+            print(
+                (
+                    "Unsafe target config: benchmark command references mutable source_file "
+                    f"({target['source_file']}) via tokens [{joined}]. "
+                    "Set allow_self_modifying_evaluator=true to override."
+                ),
+                file=sys.stderr,
+            )
+            return 2
 
     raw_validation_targets = target.get("validation_targets", [])
     validation_targets: list[str] = []
