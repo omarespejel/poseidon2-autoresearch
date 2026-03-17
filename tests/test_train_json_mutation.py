@@ -1,0 +1,108 @@
+from __future__ import annotations
+
+import json
+import unittest
+from pathlib import Path
+
+import train
+
+
+ROOT = Path(__file__).resolve().parents[1]
+CONFIG_PATH = ROOT / "config" / "track_b_attack_config.json"
+TRACKB_PATH = ROOT / "config" / "track_b_attack_config.json"
+
+
+def stable_trackb_source() -> str:
+    payload = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    return json.dumps(payload, indent=2, sort_keys=True) + "\n"
+
+
+class JsonMutationSelectionTests(unittest.TestCase):
+    def test_priority_schedule_uses_first_available_operator(self) -> None:
+        source = stable_trackb_source()
+        candidate, mutation, changed = train.json_heuristic_candidate(
+            source,
+            1,
+            TRACKB_PATH,
+        )
+        self.assertTrue(changed)
+        self.assertNotEqual(candidate, source)
+        self.assertEqual(mutation, "json_trackb_diff_candidates_up")
+
+    def test_blocked_operator_falls_back_to_next_candidate(self) -> None:
+        source = stable_trackb_source()
+        candidate, mutation, changed = train.json_heuristic_candidate(
+            source,
+            1,
+            TRACKB_PATH,
+            blocked_mutations={"json_trackb_diff_candidates_up"},
+        )
+        self.assertTrue(changed)
+        self.assertNotEqual(candidate, source)
+        self.assertEqual(mutation, "json_trackb_diff_candidates_down")
+
+    def test_ucb_schedule_prefers_known_successful_operator(self) -> None:
+        source = stable_trackb_source()
+        memory = {
+            "version": 1,
+            "mutations": {
+                "json_trackb_split_round_up": {
+                    "accepted_total": 12,
+                    "rejected_total": 1,
+                    "languages": {"json": {"accepted": 12, "rejected": 1}},
+                    "targets": {
+                        "poseidon2_cryptanalysis_trackb_fast": {
+                            "accepted": 12,
+                            "rejected": 1,
+                        }
+                    },
+                },
+                "json_trackb_diff_candidates_up": {
+                    "accepted_total": 0,
+                    "rejected_total": 7,
+                    "languages": {"json": {"accepted": 0, "rejected": 7}},
+                    "targets": {
+                        "poseidon2_cryptanalysis_trackb_fast": {
+                            "accepted": 0,
+                            "rejected": 7,
+                        }
+                    },
+                },
+            },
+        }
+        candidate, mutation, changed = train.json_heuristic_candidate(
+            source,
+            1,
+            TRACKB_PATH,
+            target_config={"mutation_schedule": "ucb", "mutation_ucb_explore": 0.0},
+            mutation_memory=memory,
+            target_name="poseidon2_cryptanalysis_trackb_fast",
+        )
+        self.assertTrue(changed)
+        self.assertNotEqual(candidate, source)
+        self.assertEqual(mutation, "json_trackb_split_round_up")
+
+    def test_preferred_mutations_accepts_json_prefix_fallback(self) -> None:
+        memory = {
+            "version": 1,
+            "mutations": {
+                "json_trackb_algebraic_degree_down": {
+                    "accepted_total": 3,
+                    "rejected_total": 1,
+                    "targets": {"other_trackb": {"accepted": 3, "rejected": 1}},
+                }
+            },
+        }
+        preferred = train.preferred_mutations_from_memory(
+            memory,
+            target_name="poseidon2_cryptanalysis_algebraic_fast",
+            language="json",
+            limit=5,
+            min_accepted_total=1,
+            min_success_rate=0.0,
+        )
+        self.assertIn("json_trackb_algebraic_degree_down", preferred)
+
+
+if __name__ == "__main__":
+    unittest.main()

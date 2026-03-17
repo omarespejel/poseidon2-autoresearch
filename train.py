@@ -61,6 +61,7 @@ DEFAULT_MUTATION_MEMORY_STALE_SECONDS = 14 * 24 * 60 * 60
 DEFAULT_MUTATION_MEMORY_ACCEPTED_STALE_MULTIPLIER = 4.0
 DEFAULT_MUTATION_MEMORY_MIN_ACCEPTED_TOTAL = 2
 DEFAULT_MUTATION_MEMORY_MIN_SUCCESS_RATE = 0.30
+DEFAULT_MUTATION_MEMORY_SEED_VERSION = 2
 
 
 def configure_debug_environment(args: argparse.Namespace) -> None:
@@ -878,7 +879,12 @@ def json_heuristic_candidate(
     source: str,
     iteration: int,
     source_path: Path,
+    blocked_mutations: set[str] | None = None,
+    mutation_attempts: dict[str, int] | None = None,
     target_config: dict[str, Any] | None = None,
+    preferred_mutations: list[str] | None = None,
+    mutation_memory: dict[str, Any] | None = None,
+    target_name: str = "",
 ) -> tuple[str, str, bool]:
     path = str(source_path).replace("\\", "/").lower()
     if not path.endswith("config/track_b_attack_config.json"):
@@ -971,6 +977,21 @@ def json_heuristic_candidate(
         analysis["split_round"] = updated
         return True
 
+    def apply_algebraic_rounds(obj: dict[str, Any], delta: int) -> bool:
+        analysis = resolve_section(obj, "analysis")
+        if analysis is None:
+            return False
+        try:
+            current = int(analysis.get("algebraic_rounds"))
+        except (TypeError, ValueError):
+            return False
+        rounds = total_rounds(obj)
+        updated = max(1, min(rounds, current + delta))
+        if updated == current:
+            return False
+        analysis["algebraic_rounds"] = updated
+        return True
+
     def op_search(key: str, delta: int, lo: int, hi: int) -> Any:
         return lambda obj: apply_delta(
             obj,
@@ -1010,15 +1031,50 @@ def json_heuristic_candidate(
         ("json_trackb_collision_samples_down", op_search("collision_samples", -512, 64, 1_000_000)),
         ("json_trackb_split_round_up", lambda obj: apply_split_round(obj, +1)),
         ("json_trackb_split_round_down", lambda obj: apply_split_round(obj, -1)),
+        ("json_trackb_algebraic_rounds_up", lambda obj: apply_algebraic_rounds(obj, +1)),
+        ("json_trackb_algebraic_rounds_down", lambda obj: apply_algebraic_rounds(obj, -1)),
+        ("json_trackb_algebraic_degree_up", op_analysis("algebraic_degree", +1, 1, 3)),
+        ("json_trackb_algebraic_degree_down", op_analysis("algebraic_degree", -1, 1, 3)),
+        ("json_trackb_algebraic_output_bits_up", op_analysis("algebraic_output_bits", +1, 4, 64)),
+        ("json_trackb_algebraic_output_bits_down", op_analysis("algebraic_output_bits", -1, 4, 64)),
         ("json_trackb_middle_key_bits_up", op_analysis("middle_key_bits", +1, 6, 40)),
         ("json_trackb_middle_key_bits_down", op_analysis("middle_key_bits", -1, 6, 40)),
         ("json_trackb_truncated_bits_up", op_analysis("truncated_bits", +1, 8, 40)),
         ("json_trackb_truncated_bits_down", op_analysis("truncated_bits", -1, 8, 40)),
+        ("json_trackb_alg_train_samples_up", op_search("algebraic_train_samples", +32, 16, 1_000_000)),
+        ("json_trackb_alg_train_samples_down", op_search("algebraic_train_samples", -32, 16, 1_000_000)),
+        ("json_trackb_alg_val_samples_up", op_search("algebraic_validation_samples", +16, 8, 1_000_000)),
+        ("json_trackb_alg_val_samples_down", op_search("algebraic_validation_samples", -16, 8, 1_000_000)),
     ]
 
     shift = (iteration - 1) % len(operators)
     ordered = operators[shift:] + operators[:shift]
-    for label, op in ordered:
+    preferred_rank = {name: idx for idx, name in enumerate(preferred_mutations or [])}
+
+    def preference_for_label(label: str) -> tuple[int, int]:
+        if label in preferred_rank:
+            return (0, preferred_rank[label])
+        if "+" in label:
+            parts = [part.strip() for part in label.split("+") if part.strip()]
+            part_ranks = [preferred_rank[part] for part in parts if part in preferred_rank]
+            if part_ranks:
+                return (1, min(part_ranks))
+        return (2, 1_000_000)
+
+    attempts = mutation_attempts or {}
+    mutation_schedule = str((target_config or {}).get("mutation_schedule", "priority")).strip().lower()
+    use_ucb_schedule = mutation_schedule == "ucb"
+    mutation_ucb_explore = float((target_config or {}).get("mutation_ucb_explore", 0.75))
+    scope_totals = mutation_memory_scope_totals(
+        mutation_memory,
+        target_name=target_name,
+        language="json",
+    )
+
+    candidates: list[dict[str, Any]] = []
+    for idx, (label, op) in enumerate(ordered):
+        if blocked_mutations and label in blocked_mutations:
+            continue
         candidate_obj = clone_obj()
         changed = bool(op(candidate_obj))
         if not changed:
@@ -1026,7 +1082,59 @@ def json_heuristic_candidate(
         candidate_source = json_dump_stable(candidate_obj)
         if candidate_source == source:
             continue
-        return candidate_source, label, True
+        pref_class, pref_rank_value = preference_for_label(label)
+        candidate_entry: dict[str, Any] = {
+            "candidate": candidate_source,
+            "mutation": label,
+            "pref_class": pref_class,
+            "pref_rank": pref_rank_value,
+            "attempts": attempts.get(label, 0),
+            "index": idx,
+        }
+        if use_ucb_schedule:
+            accepted_hist, rejected_hist, history_scope = mutation_memory_counts(
+                mutation_memory,
+                label,
+                target_name=target_name,
+                language="json",
+            )
+            total_memory_observations = float(
+                scope_totals.get(history_scope, scope_totals.get("global", 0.0))
+            )
+            candidate_entry["ucb_score"] = mutation_ucb_score(
+                accepted=accepted_hist,
+                rejected=rejected_hist,
+                total_observations=total_memory_observations,
+                explore=mutation_ucb_explore,
+                preference_class=int(pref_class),
+                schedule_tier=0,
+                attempt_count=int(candidate_entry["attempts"]),
+            )
+        candidates.append(candidate_entry)
+
+    if candidates:
+        if use_ucb_schedule:
+            candidates.sort(
+                key=lambda item: (
+                    -float(item.get("ucb_score", 0.0)),
+                    int(item["pref_class"]),
+                    int(item["pref_rank"]),
+                    int(item["attempts"]),
+                    int(item["index"]),
+                )
+            )
+        else:
+            candidates.sort(
+                key=lambda item: (
+                    int(item["pref_class"]),
+                    int(item["pref_rank"]),
+                    int(item["attempts"]),
+                    int(item["index"]),
+                )
+            )
+        chosen = candidates[0]
+        return str(chosen["candidate"]), str(chosen["mutation"]), True
+
     return source, "json_trackb_no_change", False
 
 
@@ -1309,7 +1417,12 @@ def heuristic_candidate(
             source,
             iteration,
             source_path,
+            blocked_mutations=blocked_mutations,
+            mutation_attempts=mutation_attempts,
             target_config=target_config,
+            preferred_mutations=preferred_mutations,
+            mutation_memory=mutation_memory,
+            target_name=target_name,
         )
         if changed:
             return json_candidate, mutation, True
@@ -1675,7 +1788,13 @@ def file_lock(lock_path: Path) -> Any:
 
 
 def load_mutation_memory(path: Path) -> dict[str, Any]:
-    base: dict[str, Any] = {"version": 1, "updated_at": None, "seeded_from_results": False, "mutations": {}}
+    base: dict[str, Any] = {
+        "version": 1,
+        "updated_at": None,
+        "seeded_from_results": False,
+        "seeded_from_results_version": 0,
+        "mutations": {},
+    }
     if path.exists():
         try:
             payload = json.loads(path.read_text())
@@ -1685,6 +1804,7 @@ def load_mutation_memory(path: Path) -> dict[str, Any]:
             payload.setdefault("version", 1)
             payload.setdefault("updated_at", None)
             payload.setdefault("seeded_from_results", False)
+            payload.setdefault("seeded_from_results_version", 0)
             payload.setdefault("mutations", {})
             if isinstance(payload.get("mutations"), dict):
                 return payload
@@ -1692,13 +1812,13 @@ def load_mutation_memory(path: Path) -> dict[str, Any]:
 
 
 def seed_mutation_memory_from_results(memory: dict[str, Any]) -> None:
-    if bool(memory.get("seeded_from_results")):
+    seed_version = int(memory.get("seeded_from_results_version", 0) or 0)
+    if bool(memory.get("seeded_from_results")) and seed_version >= DEFAULT_MUTATION_MEMORY_SEED_VERSION:
         return
 
-    mutations = memory.get("mutations")
-    if not isinstance(mutations, dict):
-        memory["mutations"] = {}
-        mutations = memory["mutations"]
+    # Rebuild from results.tsv whenever seed logic changes to avoid stale language coverage.
+    memory["mutations"] = {}
+    mutations = memory["mutations"]
 
     targets = prepare.load_targets()
     target_language_map: dict[str, str] = {}
@@ -1714,10 +1834,12 @@ def seed_mutation_memory_from_results(memory: dict[str, Any]) -> None:
     results_file = ROOT / "results.tsv"
     if not results_file.exists():
         memory["seeded_from_results"] = True
+        memory["seeded_from_results_version"] = DEFAULT_MUTATION_MEMORY_SEED_VERSION
         return
     rows = results_file.read_text().splitlines()
     if len(rows) <= 1:
         memory["seeded_from_results"] = True
+        memory["seeded_from_results_version"] = DEFAULT_MUTATION_MEMORY_SEED_VERSION
         return
 
     for row in rows[1:]:
@@ -1765,6 +1887,7 @@ def seed_mutation_memory_from_results(memory: dict[str, Any]) -> None:
         )
     compact_mutation_memory(mutations, now_epoch=time.time())
     memory["seeded_from_results"] = True
+    memory["seeded_from_results_version"] = DEFAULT_MUTATION_MEMORY_SEED_VERSION
 
 
 def save_mutation_memory(path: Path, memory: dict[str, Any]) -> None:
@@ -1948,6 +2071,8 @@ def preferred_mutations_from_memory(
             if isinstance(lang_entry, dict) and int(lang_entry.get("accepted", 0)) > 0:
                 language_ok = True
         if not language_ok and language == "rust" and mutation.startswith("rust_"):
+            language_ok = True
+        if not language_ok and language == "json" and mutation.startswith("json_"):
             language_ok = True
         if not language_ok:
             continue
@@ -2730,7 +2855,7 @@ def run_loop(args: argparse.Namespace) -> int:
     if not mutation_memory_path.is_absolute():
         mutation_memory_path = ROOT / mutation_memory_path
     mutation_memory: dict[str, Any] | None = None
-    mutation_memory_enabled = (not args.disable_mutation_memory) and language_norm == "rust"
+    mutation_memory_enabled = (not args.disable_mutation_memory) and language_norm in {"rust", "json"}
     if mutation_memory_enabled:
         # Persist seeded history to disk before iterations start so per-iteration
         # read/modify/write updates do not discard in-process seeded state.
@@ -2934,7 +3059,7 @@ def run_loop(args: argparse.Namespace) -> int:
         if active_blocked:
             diagnostics["active_blocked_mutations"] = sorted(active_blocked)
         preferred_mutations: list[str] = []
-        if mutation_memory is not None and language_norm == "rust":
+        if mutation_memory is not None:
             preferred_mutations = preferred_mutations_from_memory(
                 mutation_memory,
                 target_name=args.target,
@@ -2998,7 +3123,7 @@ def run_loop(args: argparse.Namespace) -> int:
 
         if (
             not changed
-            and mutation in {"rust_no_change", "heuristic_no_change"}
+            and mutation in {"json_trackb_no_change", "rust_no_change", "heuristic_no_change"}
             and bool(target.get("recover_from_no_change", True))
             and active_blocked
         ):
@@ -3246,7 +3371,7 @@ def run_loop(args: argparse.Namespace) -> int:
             if not improved:
                 blocked_mutations_until[mutation_key] = iteration + blocked_mutation_ttl
 
-            if mutation_memory is not None and language_norm == "rust":
+            if mutation_memory is not None:
                 mutation_memory = update_and_save_mutation_memory(
                     mutation_memory_path,
                     mutation_memory,

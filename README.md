@@ -283,11 +283,11 @@ The loop falls back to heuristics automatically if an API call fails.
 
 ## Cross-Target Mutation Replay
 
-Rust targets now share accepted mutation history through persisted replay memory:
+Rust and Track B JSON targets share accepted mutation history through persisted replay memory:
 
 - default file: `work/mutation_memory.json`
 - memory is seeded from historical `results.tsv` accepted/rejected rows
-- successful mutations on one Rust target are prioritized on other Rust targets
+- successful mutations on one target are prioritized on sibling targets of the same language
 
 Controls:
 
@@ -297,6 +297,9 @@ python3 train.py --target leanmultisig_poseidon16_src_fast --iterations 12
 
 # custom memory file
 python3 train.py --target leanmultisig_poseidon2_neon_src_fast --mutation-memory-file work/custom_memory.json
+
+# Track B JSON lane with operator-level UCB + replay
+python3 train.py --target poseidon2_cryptanalysis_algebraic_fast --iterations 12 -v
 
 # disable replay memory
 python3 train.py --target leanmultisig_poseidon2_neon_src_fast --disable-mutation-memory
