@@ -105,6 +105,12 @@ class JsonMutationSelectionTests(unittest.TestCase):
 
 
 class TrackBObjectiveGuardTests(unittest.TestCase):
+    def test_parse_flag_bool_fails_closed_for_unknown_values(self) -> None:
+        self.assertFalse(train.parse_flag_bool({}, default=False))
+        self.assertFalse(train.parse_flag_bool([False], default=False))
+        self.assertFalse(train.parse_flag_bool("disabled", default=False))
+        self.assertTrue(train.parse_flag_bool("disabled", default=True))
+
     def test_guard_allows_search_only_change(self) -> None:
         source = stable_trackb_source()
         payload = json.loads(source)
@@ -134,6 +140,27 @@ class TrackBObjectiveGuardTests(unittest.TestCase):
         self.assertEqual(details.get("status"), "objective_modified")
         self.assertIn("objective", details.get("paths", []))
 
+    def test_guard_rejects_nested_profile_objective_change(self) -> None:
+        source = stable_trackb_source()
+        payload = json.loads(source)
+        profiles = payload.setdefault("challenge_profiles", {})
+        profiles["guard_a"] = {"objective": {"weight_algebraic": 0.15}}
+        profiles["guard_b"] = {"objective": {"weight_algebraic": 0.35}}
+        payload["active_profile"] = "guard_a"
+        source = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+
+        payload["active_profile"] = "guard_b"
+        candidate = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+        ok, details = train.trackb_objective_guard(
+            current_source=source,
+            candidate_source=candidate,
+            source_path=TRACKB_PATH,
+            target_config={},
+        )
+        self.assertFalse(ok)
+        self.assertEqual(details.get("status"), "objective_modified")
+        self.assertIn("resolved_objective", details.get("paths", []))
+
     def test_guard_allows_objective_change_with_opt_in(self) -> None:
         source = stable_trackb_source()
         payload = json.loads(source)
@@ -147,6 +174,36 @@ class TrackBObjectiveGuardTests(unittest.TestCase):
         )
         self.assertTrue(ok)
         self.assertEqual(details.get("allow_objective_mutations"), True)
+
+    def test_guard_rejects_unparseable_baseline(self) -> None:
+        ok, details = train.trackb_objective_guard(
+            current_source="{",
+            candidate_source=stable_trackb_source(),
+            source_path=TRACKB_PATH,
+            target_config={},
+        )
+        self.assertFalse(ok)
+        self.assertEqual(details.get("status"), "baseline_parse_failed")
+
+    def test_guard_rejects_unparseable_candidate(self) -> None:
+        ok, details = train.trackb_objective_guard(
+            current_source=stable_trackb_source(),
+            candidate_source="{",
+            source_path=TRACKB_PATH,
+            target_config={},
+        )
+        self.assertFalse(ok)
+        self.assertEqual(details.get("status"), "candidate_parse_failed")
+
+    def test_guard_is_disabled_for_non_trackb_path(self) -> None:
+        ok, details = train.trackb_objective_guard(
+            current_source=stable_trackb_source(),
+            candidate_source=stable_trackb_source(),
+            source_path=Path("/tmp/other.json"),
+            target_config={},
+        )
+        self.assertTrue(ok)
+        self.assertEqual(details, {"enabled": False})
 
 
 if __name__ == "__main__":

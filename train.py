@@ -2415,14 +2415,37 @@ def parse_flag_bool(value: Any, default: bool = False) -> bool:
         return value
     if isinstance(value, str):
         token = value.strip().lower()
+        if not token:
+            return default
         if token in {"1", "true", "yes", "on"}:
             return True
         if token in {"0", "false", "no", "off"}:
             return False
-    try:
-        return bool(int(value))
-    except (TypeError, ValueError):
-        return bool(value)
+        try:
+            return int(token) != 0
+        except ValueError:
+            return default
+    if isinstance(value, int):
+        return value != 0
+    return default
+
+
+def resolved_objective_from_trackb_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
+    top_level = payload.get("objective")
+    resolved = top_level if isinstance(top_level, dict) else None
+
+    active_profile = payload.get("active_profile")
+    profiles = payload.get("challenge_profiles")
+    if isinstance(active_profile, str) and active_profile.strip() and isinstance(profiles, dict):
+        profile_payload = profiles.get(active_profile.strip())
+        if isinstance(profile_payload, dict):
+            profile_objective = profile_payload.get("objective")
+            if isinstance(profile_objective, dict):
+                resolved = profile_objective
+
+    if not isinstance(resolved, dict):
+        return None
+    return json.loads(json.dumps(resolved))
 
 
 def objective_sections_from_trackb_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -2441,6 +2464,9 @@ def objective_sections_from_trackb_payload(payload: dict[str, Any]) -> dict[str,
             if isinstance(objective, dict):
                 key = f"challenge_profiles.{profile_name}.objective"
                 sections[key] = json.loads(json.dumps(objective))
+    resolved = resolved_objective_from_trackb_payload(payload)
+    if isinstance(resolved, dict):
+        sections["resolved_objective"] = resolved
     return sections
 
 
@@ -2462,7 +2488,7 @@ def trackb_objective_guard(
     try:
         before_payload = json.loads(current_source)
     except json.JSONDecodeError:
-        return True, {"enabled": True, "status": "baseline_parse_failed"}
+        return False, {"enabled": True, "status": "baseline_parse_failed"}
     try:
         after_payload = json.loads(candidate_source)
     except json.JSONDecodeError:
@@ -3310,7 +3336,6 @@ def run_loop(args: argparse.Namespace) -> int:
         )
         diagnostics["trackb_objective_guard"] = objective_guard_details
         if not objective_guard_ok:
-            blocked_mutations_until[mutation_key] = iteration + blocked_mutation_ttl
             reason = str(objective_guard_details.get("status", "objective_guard_failed"))
             changed_paths_raw = objective_guard_details.get("paths", [])
             changed_paths = ",".join(str(item) for item in changed_paths_raw) if isinstance(changed_paths_raw, list) else ""
