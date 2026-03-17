@@ -102,7 +102,7 @@
         "json"
       ],
       "warmup_runs": 0,
-      "runs": 2,
+      "runs": 3,
       "aggregate": "median",
       "metric_source": "json_stdout",
       "metric_json_path": "metrics.attack_score"

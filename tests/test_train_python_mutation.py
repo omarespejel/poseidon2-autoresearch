@@ -15,6 +15,27 @@ def harness_source() -> str:
 
 
 class PythonMutationSelectionTests(unittest.TestCase):
+    def test_returns_no_change_for_non_harness_path(self) -> None:
+        source = harness_source()
+        candidate, mutation, changed = train.python_heuristic_candidate(
+            source,
+            1,
+            Path("/tmp/some_other_file.py"),
+        )
+        self.assertFalse(changed)
+        self.assertEqual(mutation, "python_no_change")
+        self.assertEqual(candidate, source)
+
+    def test_returns_no_change_when_no_patterns_match(self) -> None:
+        candidate, mutation, changed = train.python_heuristic_candidate(
+            "",
+            1,
+            HARNESS_PATH,
+        )
+        self.assertFalse(changed)
+        self.assertEqual(mutation, "python_no_change")
+        self.assertEqual(candidate, "")
+
     def test_priority_schedule_uses_first_available_operator(self) -> None:
         source = harness_source()
         candidate, mutation, changed = train.python_heuristic_candidate(
@@ -68,9 +89,34 @@ class PythonMutationSelectionTests(unittest.TestCase):
         self.assertNotEqual(candidate, source)
         self.assertEqual(mutation, "python_trackb_mitm_bucket_cap_up")
 
+    def test_diff_probability_mutations_target_distinct_sites(self) -> None:
+        source = harness_source()
+        multi_candidate, _, multi_changed = train.python_mutator_diff_multi_delta_prob_up(source)
+        cross_candidate, _, cross_changed = train.python_mutator_diff_cross_lane_prob_up(source)
+        self.assertTrue(multi_changed)
+        self.assertTrue(cross_changed)
+        self.assertNotEqual(multi_candidate, cross_candidate)
+
+    def test_diff_probability_down_mutations_reverse_up_states(self) -> None:
+        source = harness_source()
+        multi_up, _, multi_up_changed = train.python_mutator_diff_multi_delta_prob_up(source)
+        self.assertTrue(multi_up_changed)
+        multi_down, _, multi_down_changed = train.python_mutator_diff_multi_delta_prob_down(multi_up)
+        self.assertTrue(multi_down_changed)
+        self.assertEqual(multi_down, source)
+
+        cross_up, _, cross_up_changed = train.python_mutator_diff_cross_lane_prob_up(source)
+        self.assertTrue(cross_up_changed)
+        cross_down, _, cross_down_changed = train.python_mutator_diff_cross_lane_prob_down(cross_up)
+        self.assertTrue(cross_down_changed)
+        self.assertEqual(cross_down, source)
+
     def test_mutation_language_inference_supports_python_prefix(self) -> None:
         language = train.infer_mutation_language(mutation="python_trackb_mitm_bucket_cap_up")
         self.assertEqual(language, "python")
+
+    def test_normalize_mutation_label_handles_python_no_change(self) -> None:
+        self.assertIsNone(train.normalize_mutation_label("python_no_change"))
 
 
 if __name__ == "__main__":

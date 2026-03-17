@@ -883,9 +883,24 @@ def python_replace_first(
     return source, f"{mutation}:pattern_missing", False
 
 
-def python_mutator_diff_multi_delta_prob_up(source: str) -> tuple[str, str, bool]:
+def python_replace_first_with_prefix(
+    source: str,
+    prefix: str,
+    replacements: list[tuple[str, str]],
+    *,
+    mutation: str,
+) -> tuple[str, str, bool]:
     return python_replace_first(
         source,
+        [(f"{prefix}{old}", f"{prefix}{new}") for old, new in replacements],
+        mutation=mutation,
+    )
+
+
+def python_mutator_diff_multi_delta_prob_up(source: str) -> tuple[str, str, bool]:
+    return python_replace_first_with_prefix(
+        source,
+        "        delta[lane_idx] = rng.randrange(1, spec.modulus)\n        ",
         [
             ("if rng.random() < 0.35:", "if rng.random() < 0.50:"),
             ("if rng.random() < 0.30:", "if rng.random() < 0.45:"),
@@ -896,20 +911,22 @@ def python_mutator_diff_multi_delta_prob_up(source: str) -> tuple[str, str, bool
 
 
 def python_mutator_diff_multi_delta_prob_down(source: str) -> tuple[str, str, bool]:
-    return python_replace_first(
+    return python_replace_first_with_prefix(
         source,
+        "        delta[lane_idx] = rng.randrange(1, spec.modulus)\n        ",
         [
+            ("if rng.random() < 0.50:", "if rng.random() < 0.35:"),
+            ("if rng.random() < 0.45:", "if rng.random() < 0.30:"),
             ("if rng.random() < 0.35:", "if rng.random() < 0.25:"),
-            ("if rng.random() < 0.30:", "if rng.random() < 0.20:"),
-            ("if rng.random() < 0.25:", "if rng.random() < 0.15:"),
         ],
         mutation="python_trackb_diff_multi_delta_prob_down",
     )
 
 
 def python_mutator_diff_cross_lane_prob_up(source: str) -> tuple[str, str, bool]:
-    return python_replace_first(
+    return python_replace_first_with_prefix(
         source,
+        "                if i == lane_idx:\n                    continue\n                ",
         [
             ("if rng.random() < 0.2:", "if rng.random() < 0.30:"),
             ("if rng.random() < 0.25:", "if rng.random() < 0.35:"),
@@ -920,12 +937,13 @@ def python_mutator_diff_cross_lane_prob_up(source: str) -> tuple[str, str, bool]
 
 
 def python_mutator_diff_cross_lane_prob_down(source: str) -> tuple[str, str, bool]:
-    return python_replace_first(
+    return python_replace_first_with_prefix(
         source,
+        "                if i == lane_idx:\n                    continue\n                ",
         [
-            ("if rng.random() < 0.2:", "if rng.random() < 0.12:"),
-            ("if rng.random() < 0.15:", "if rng.random() < 0.10:"),
-            ("if rng.random() < 0.25:", "if rng.random() < 0.18:"),
+            ("if rng.random() < 0.30:", "if rng.random() < 0.2:"),
+            ("if rng.random() < 0.35:", "if rng.random() < 0.25:"),
+            ("if rng.random() < 0.25:", "if rng.random() < 0.15:"),
         ],
         mutation="python_trackb_diff_cross_lane_prob_down",
     )
@@ -1040,12 +1058,16 @@ def python_heuristic_candidate(
     )
 
     candidates: list[dict[str, Any]] = []
+    seen_candidates: set[str] = set()
     for idx, operator in enumerate(ordered):
         candidate, mutation, changed = operator(source)
         if blocked_mutations and mutation in blocked_mutations:
             continue
         if not changed:
             continue
+        if candidate in seen_candidates:
+            continue
+        seen_candidates.add(candidate)
         pref_class, pref_rank_value = preference_for_label(mutation)
         candidate_entry: dict[str, Any] = {
             "candidate": candidate,
@@ -2676,8 +2698,6 @@ def parse_flag_bool(value: Any, default: bool = False) -> bool:
     if isinstance(value, int):
         return value != 0
     return default
-
-
 def resolved_objective_from_trackb_payload(payload: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
     top_level = payload.get("objective")
     resolved = top_level if isinstance(top_level, dict) else None
