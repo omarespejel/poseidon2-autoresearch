@@ -2584,6 +2584,8 @@ def select_population_parent(
     max_candidates: int = 8,
     rng: random.Random | None = None,
 ) -> dict[str, Any] | None:
+    if rng is None:
+        raise ValueError("select_population_parent requires an explicit rng for reproducibility")
     if not isinstance(memory, dict):
         return None
     entries = memory.get("entries")
@@ -2632,8 +2634,7 @@ def select_population_parent(
     candidates.sort(key=lambda item: item[0], reverse=True)
     top = candidates[: max(1, min(max_candidates, len(candidates)))]
     weights = [float(len(top) - idx) for idx in range(len(top))]
-    chooser = rng if rng is not None else random
-    choice_idx = chooser.choices(range(len(top)), weights=weights, k=1)[0]
+    choice_idx = rng.choices(range(len(top)), weights=weights, k=1)[0]
     return top[choice_idx][1]
 
 

@@ -94,6 +94,19 @@ class PopulationMemoryTests(unittest.TestCase):
         self.assertIsNotNone(selected)
         self.assertEqual(selected["source_sha256"], train.source_sha256(alt_a))
 
+    def test_select_population_parent_requires_explicit_rng(self) -> None:
+        with self.assertRaises(ValueError):
+            train.select_population_parent(
+                {"version": 1, "entries": []},
+                target_name="poseidon2_cryptanalysis_trackb_kernel_fast",
+                language="python",
+                higher_is_better=True,
+                best_metric=15.0,
+                best_source="def f():\n    return 0\n",
+                max_candidates=8,
+                rng=None,
+            )
+
     def test_mark_population_entry_sampled_updates_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "population.json"
