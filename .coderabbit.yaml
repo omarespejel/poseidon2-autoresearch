@@ -1,10 +1,9 @@
 # yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
 language: "en-US"
 tone_instructions: |
-  Be direct, technical, and thorough. Flag every potential issue.
-  Do not sugarcoat feedback. Prioritize correctness, security,
-  and performance. This is a Poseidon2 implementation and research
-  tool in Rust — treat every PR as if it could ship to production.
+  Be direct and technical. Prioritize correctness, security, evaluator integrity,
+  reproducibility, and host-execution risk in this mixed Python, Rust, Cairo, Noir,
+  and JSON research codebase.
 early_access: true
 enable_free_tier: true
 reviews:
@@ -41,6 +40,11 @@ reviews:
     - "!**/*.so"
     - "!**/*.dylib"
   path_instructions:
+    - path: "**/*.py"
+      instructions: |
+        Review Python with emphasis on evaluator integrity, sandbox boundaries,
+        prompt-injection exposure, reproducibility, file locking, and regression
+        coverage for mutation/replay logic.
     - path: "**/*.rs"
       instructions: |
         Review Rust code with extreme rigor. Check for:
@@ -53,7 +57,7 @@ reviews:
         - Concurrency safety if applicable
         - Proper use of Result/Option types
         - Documentation on all public items
-        - Cryptographic correctness for Poseidon2 hash operations
+        - Cryptographic correctness for Poseidon2 and related hash operations
         - Constant-time operations where security-relevant
     - path: "**/*.toml"
       instructions: |
@@ -123,9 +127,8 @@ reviews:
     # Semgrep for additional security patterns
     semgrep:
       enabled: true
-    # Disabled — not applicable to this project (Rust-only)
     ruff:
-      enabled: false
+      enabled: true
     eslint:
       enabled: false
     biome:
