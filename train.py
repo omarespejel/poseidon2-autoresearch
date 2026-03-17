@@ -1184,6 +1184,14 @@ def python_mutator_algebraic_template_noise(source: str) -> tuple[str, str, bool
     )
 
 
+PYTHON_MUTATOR_SOURCE_SUFFIXES = ("attack_harness.py", "attack_kernels.py")
+
+
+def python_mutation_target_supported(source_path: Path | str) -> bool:
+    path = str(source_path).replace("\\", "/").lower()
+    return any(path.endswith(suffix) for suffix in PYTHON_MUTATOR_SOURCE_SUFFIXES)
+
+
 def python_heuristic_candidate(
     source: str,
     iteration: int,
@@ -1197,8 +1205,8 @@ def python_heuristic_candidate(
     target_name: str = "",
     strict_target_scope: bool = False,
 ) -> tuple[str, str, bool]:
-    if source_path.name.lower() != "attack_harness.py":
-        return source, "python_no_change", False
+    if not python_mutation_target_supported(source_path):
+        return source, "python_target_unsupported", False
 
     operators: list[Any] = [
         python_mutator_diff_multi_delta_prob_up,
@@ -3490,7 +3498,7 @@ def save_operator_stats_artifact(
         "validation_block_disable_streak": validation_block_disable_streak,
         "mutations": rows,
     }
-    out_path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+    atomic_write_text(out_path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
     return out_path
 
 
@@ -4409,7 +4417,16 @@ def run_loop(args: argparse.Namespace) -> int:
     mutation_memory: dict[str, Any] | None = None
     feature_supported_languages = {"rust", "json", "python"}
     feature_warnings: list[str] = []
-    mutation_memory_enabled = (not args.disable_mutation_memory) and language_norm in feature_supported_languages
+    python_target_supported = language_norm != "python" or python_mutation_target_supported(source_path)
+    stateful_feature_supported = language_norm in feature_supported_languages and python_target_supported
+    if language_norm == "python" and not python_target_supported:
+        warning = (
+            f"python mutators do not support source_file '{target['source_file']}'; "
+            "continuing with generic mutations and disabling mutation memory, population memory, and operator stats"
+        )
+        print(f"[train] Warning: {warning}", file=sys.stderr)
+        feature_warnings.append(warning)
+    mutation_memory_enabled = (not args.disable_mutation_memory) and stateful_feature_supported
     if mutation_memory_enabled:
         # Persist seeded history to disk before iterations start so per-iteration
         # read/modify/write updates do not discard in-process seeded state.
@@ -4434,13 +4451,13 @@ def run_loop(args: argparse.Namespace) -> int:
     if not population_memory_path.is_absolute():
         population_memory_path = ROOT / population_memory_path
     population_memory: dict[str, Any] | None = None
-    population_memory_enabled = (not args.disable_population_memory) and language_norm in feature_supported_languages
+    population_memory_enabled = (not args.disable_population_memory) and stateful_feature_supported
     population_parent_sample_prob = min(
         1.0,
         max(0.0, float(target.get("population_parent_sample_prob", args.population_parent_sample_prob))),
     )
     population_max_entries = max(0, int(target.get("population_max_entries", args.population_max_entries)))
-    if (not population_memory_enabled) and (not args.disable_population_memory):
+    if (not population_memory_enabled) and (not args.disable_population_memory) and python_target_supported:
         warning = (
             f"population memory requested but unsupported for language '{language_norm or 'unknown'}'; "
             "continuing without population memory"
@@ -4464,7 +4481,7 @@ def run_loop(args: argparse.Namespace) -> int:
     if not operator_stats_path.is_absolute():
         operator_stats_path = ROOT / operator_stats_path
     operator_stats: dict[str, Any] | None = None
-    operator_stats_enabled = (not args.disable_operator_stats) and language_norm in feature_supported_languages
+    operator_stats_enabled = (not args.disable_operator_stats) and stateful_feature_supported
     operator_reward_epsilon = max(0.0, float(target.get("operator_reward_epsilon", args.operator_reward_epsilon)))
     operator_demote_streak = max(0, int(target.get("operator_demote_streak", args.operator_demote_streak)))
     operator_disable_streak = max(0, int(target.get("operator_disable_streak", args.operator_disable_streak)))
@@ -4504,7 +4521,7 @@ def run_loop(args: argparse.Namespace) -> int:
             )
         ),
     )
-    if (not operator_stats_enabled) and (not args.disable_operator_stats):
+    if (not operator_stats_enabled) and (not args.disable_operator_stats) and python_target_supported:
         warning = (
             f"operator stats requested but unsupported for language '{language_norm or 'unknown'}'; "
             "continuing without operator stats"
