@@ -41,6 +41,11 @@ class CampaignLogTests(unittest.TestCase):
 
 
 class ResolveLoopTargetTests(unittest.TestCase):
+    def test_default_crypto_targets_replace_poseidon64_config_signal_lane(self) -> None:
+        targets = campaign.parse_targets_csv(campaign.default_crypto_optimize_targets())
+        self.assertIn("poseidon2_cryptanalysis_trackb_kernel_signal_fast", targets)
+        self.assertNotIn("poseidon2_cryptanalysis_poseidon64_signal_fast", targets)
+
     def test_cryptanalysis_uses_kernel_first_default_for_sentinel(self) -> None:
         resolved = campaign.resolve_loop_target("cryptanalysis", campaign.DEFAULT_LOOP_TARGET_SENTINEL)
         self.assertEqual(resolved, campaign.DEFAULT_CRYPTANALYSIS_LOOP_TARGET)

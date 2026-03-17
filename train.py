@@ -1030,6 +1030,7 @@ def python_heuristic_candidate(
     preferred_mutations: list[str] | None = None,
     mutation_memory: dict[str, Any] | None = None,
     target_name: str = "",
+    strict_target_scope: bool = False,
 ) -> tuple[str, str, bool]:
     if source_path.name.lower() != "attack_harness.py":
         return source, "python_no_change", False
@@ -1067,6 +1068,7 @@ def python_heuristic_candidate(
         mutation_memory,
         target_name=target_name,
         language="python",
+        strict_target_scope=strict_target_scope,
     )
 
     candidates: list[dict[str, Any]] = []
@@ -1095,6 +1097,7 @@ def python_heuristic_candidate(
                 mutation,
                 target_name=target_name,
                 language="python",
+                strict_target_scope=strict_target_scope,
             )
             total_memory_observations = float(
                 scope_totals.get(history_scope, scope_totals.get("global", 0.0))
@@ -1149,6 +1152,7 @@ def json_heuristic_candidate(
     preferred_mutations: list[str] | None = None,
     mutation_memory: dict[str, Any] | None = None,
     target_name: str = "",
+    strict_target_scope: bool = False,
 ) -> tuple[str, str, bool]:
     path = str(source_path).replace("\\", "/").lower()
     if not path.endswith("config/track_b_attack_config.json"):
@@ -1333,6 +1337,7 @@ def json_heuristic_candidate(
         mutation_memory,
         target_name=target_name,
         language="json",
+        strict_target_scope=strict_target_scope,
     )
 
     candidates: list[dict[str, Any]] = []
@@ -1361,6 +1366,7 @@ def json_heuristic_candidate(
                 label,
                 target_name=target_name,
                 language="json",
+                strict_target_scope=strict_target_scope,
             )
             total_memory_observations = float(
                 scope_totals.get(history_scope, scope_totals.get("global", 0.0))
@@ -1440,6 +1446,7 @@ def rust_heuristic_candidate(
     preferred_mutations: list[str] | None = None,
     mutation_memory: dict[str, Any] | None = None,
     target_name: str = "",
+    strict_target_scope: bool = False,
 ) -> tuple[str, str, bool]:
     path = str(source_path).replace("\\", "/").lower()
 
@@ -1551,6 +1558,7 @@ def rust_heuristic_candidate(
         mutation_memory,
         target_name=target_name,
         language="rust",
+        strict_target_scope=strict_target_scope,
     )
 
     compound_every = int((target_config or {}).get("compound_every", 0))
@@ -1627,6 +1635,7 @@ def rust_heuristic_candidate(
                     str(item["mutation"]),
                     target_name=target_name,
                     language="rust",
+                    strict_target_scope=strict_target_scope,
                 )
                 total_memory_observations = float(
                     scope_totals.get(history_scope, scope_totals.get("global", 0.0))
@@ -1675,6 +1684,7 @@ def heuristic_candidate(
     preferred_mutations: list[str] | None = None,
     mutation_memory: dict[str, Any] | None = None,
     target_name: str = "",
+    strict_target_scope: bool = False,
 ) -> tuple[str, str, bool]:
     if language.lower() == "json":
         json_candidate, mutation, changed = json_heuristic_candidate(
@@ -1687,6 +1697,7 @@ def heuristic_candidate(
             preferred_mutations=preferred_mutations,
             mutation_memory=mutation_memory,
             target_name=target_name,
+            strict_target_scope=strict_target_scope,
         )
         if changed:
             return json_candidate, mutation, True
@@ -1701,6 +1712,7 @@ def heuristic_candidate(
             preferred_mutations=preferred_mutations,
             mutation_memory=mutation_memory,
             target_name=target_name,
+            strict_target_scope=strict_target_scope,
         )
         if changed:
             return rust_candidate, mutation, True
@@ -1715,6 +1727,7 @@ def heuristic_candidate(
             preferred_mutations=preferred_mutations,
             mutation_memory=mutation_memory,
             target_name=target_name,
+            strict_target_scope=strict_target_scope,
         )
         if changed:
             return python_candidate, mutation, True
@@ -2328,11 +2341,22 @@ def update_and_save_mutation_memory(
     return current_memory
 
 
+def resolve_mutation_memory_target_scope(
+    target_name: str,
+    target_config: dict[str, Any],
+) -> tuple[str, bool]:
+    namespace = str(target_config.get("mutation_memory_namespace", "")).strip()
+    if not namespace:
+        return (target_name, False)
+    return (f"namespace:{namespace}", True)
+
+
 def preferred_mutations_from_memory(
     memory: dict[str, Any],
     *,
     target_name: str,
     language: str,
+    strict_target_scope: bool = False,
     limit: int = 8,
     min_accepted_total: int = DEFAULT_MUTATION_MEMORY_MIN_ACCEPTED_TOTAL,
     min_success_rate: float = DEFAULT_MUTATION_MEMORY_MIN_SUCCESS_RATE,
@@ -2373,6 +2397,9 @@ def preferred_mutations_from_memory(
             if isinstance(current, dict) and int(current.get("accepted", 0)) > 0:
                 has_current_target_success = True
 
+        if strict_target_scope and not has_current_target_success:
+            continue
+
         cross_target_tier = 0 if has_current_target_success else 1
         total = accepted_total + max(0, rejected_total)
         success_rate = accepted_total / total if total > 0 else 0.0
@@ -2389,6 +2416,7 @@ def mutation_memory_scope_totals(
     *,
     target_name: str,
     language: str,
+    strict_target_scope: bool = False,
 ) -> dict[str, float]:
     totals = {"target": 0.0, "language": 0.0, "global": 0.0}
     if not isinstance(memory, dict):
@@ -2420,6 +2448,10 @@ def mutation_memory_scope_totals(
                 target_rejected = max(0.0, float(target_counts.get("rejected", 0) or 0.0))
                 totals["target"] += target_accepted + target_rejected
 
+    if strict_target_scope:
+        totals["language"] = totals["target"]
+        totals["global"] = totals["target"]
+        return totals
     if totals["language"] <= 0.0:
         totals["language"] = totals["global"]
     if totals["target"] <= 0.0:
@@ -2433,6 +2465,7 @@ def mutation_memory_counts(
     *,
     target_name: str,
     language: str,
+    strict_target_scope: bool = False,
 ) -> tuple[float, float, str]:
     if not isinstance(memory, dict):
         return (0.0, 0.0, "global")
@@ -2462,6 +2495,8 @@ def mutation_memory_counts(
             target_rejected = max(0.0, float(target_counts.get("rejected", 0) or 0.0))
             if target_accepted + target_rejected > 0.0:
                 return (target_accepted, target_rejected, "target")
+        if strict_target_scope:
+            return (0.0, 0.0, "global")
         if isinstance(language_counts, dict):
             language_accepted = max(0.0, float(language_counts.get("accepted", 0) or 0.0))
             language_rejected = max(0.0, float(language_counts.get("rejected", 0) or 0.0))
@@ -2735,6 +2770,8 @@ def parse_flag_bool(value: Any, default: bool = False) -> bool:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return value != 0
     return default
+
+
 def resolved_objective_from_trackb_payload(payload: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
     top_level = payload.get("objective")
     resolved = top_level if isinstance(top_level, dict) else None
@@ -2753,24 +2790,6 @@ def resolved_objective_from_trackb_payload(payload: dict[str, Any]) -> tuple[dic
     if not isinstance(resolved, dict):
         return (None, None)
     return (json.loads(json.dumps(resolved)), source_key)
-
-
-def resolved_objective_from_trackb_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
-    top_level = payload.get("objective")
-    resolved = top_level if isinstance(top_level, dict) else None
-
-    active_profile = payload.get("active_profile")
-    profiles = payload.get("challenge_profiles")
-    if isinstance(active_profile, str) and active_profile.strip() and isinstance(profiles, dict):
-        profile_payload = profiles.get(active_profile.strip())
-        if isinstance(profile_payload, dict):
-            profile_objective = profile_payload.get("objective")
-            if isinstance(profile_objective, dict):
-                resolved = profile_objective
-
-    if not isinstance(resolved, dict):
-        return None
-    return json.loads(json.dumps(resolved))
 
 
 def objective_sections_from_trackb_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -3307,6 +3326,10 @@ def run_loop(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             mutation_memory = None
+    memory_target_name, strict_mutation_memory_scope = resolve_mutation_memory_target_scope(
+        args.target,
+        target,
+    )
 
     max_iterations = args.iterations if args.iterations > 0 else None
     iterations_label = str(args.iterations) if max_iterations is not None else "infinite"
@@ -3498,8 +3521,9 @@ def run_loop(args: argparse.Namespace) -> int:
         if mutation_memory is not None:
             preferred_mutations = preferred_mutations_from_memory(
                 mutation_memory,
-                target_name=args.target,
+                target_name=memory_target_name,
                 language=language_norm,
+                strict_target_scope=strict_mutation_memory_scope,
             )
             if preferred_mutations:
                 diagnostics["preferred_mutations"] = preferred_mutations[:5]
@@ -3537,7 +3561,8 @@ def run_loop(args: argparse.Namespace) -> int:
                     target_config=target,
                     preferred_mutations=preferred_mutations,
                     mutation_memory=mutation_memory,
-                    target_name=args.target,
+                    target_name=memory_target_name,
+                    strict_target_scope=strict_mutation_memory_scope,
                 )
                 mutation = f"fallback_{mutation}"
             else:
@@ -3554,7 +3579,8 @@ def run_loop(args: argparse.Namespace) -> int:
                 target_config=target,
                 preferred_mutations=preferred_mutations,
                 mutation_memory=mutation_memory,
-                target_name=args.target,
+                target_name=memory_target_name,
+                strict_target_scope=strict_mutation_memory_scope,
             )
 
         if (
@@ -3583,7 +3609,8 @@ def run_loop(args: argparse.Namespace) -> int:
                     target_config=target,
                     preferred_mutations=preferred_mutations,
                     mutation_memory=mutation_memory,
-                    target_name=args.target,
+                    target_name=memory_target_name,
+                    strict_target_scope=strict_mutation_memory_scope,
                 )
 
         if not changed:
@@ -3867,7 +3894,7 @@ def run_loop(args: argparse.Namespace) -> int:
                     mutation_memory,
                     mutation=mutation_key,
                     accepted=improved,
-                    target_name=args.target,
+                    target_name=memory_target_name,
                     language=infer_mutation_language(mutation=mutation_key, target_language=language_norm),
                     timestamp=prepare.now_iso(),
                     metric_before=best_before if improved else None,

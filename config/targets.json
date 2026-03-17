@@ -70,7 +70,7 @@
     },
     "poseidon2_cryptanalysis_trackb_kernel_fast": {
       "type": "command",
-      "description": "Track B kernel-first lane mutating attack_harness kernels (research_fast, fast mode)",
+      "description": "Track B kernel-first lane mutating attack_harness kernels (research_fast, target-scoped replay, fast mode)",
       "project_dir": ".",
       "source_file": "attack_harness.py",
       "language": "Python",
@@ -83,6 +83,7 @@
       "blocked_mutation_ttl": 4,
       "mutation_schedule": "ucb",
       "mutation_ucb_explore": 0.6,
+      "mutation_memory_namespace": "kernel_fast_research",
       "required_snippets": [
         "def differential_kernel(",
         "def mitm_truncated_preimage_kernel(",
@@ -106,6 +107,46 @@
       "aggregate": "median",
       "metric_source": "json_stdout",
       "metric_json_path": "metrics.attack_score"
+    },
+    "poseidon2_cryptanalysis_trackb_kernel_signal_fast": {
+      "type": "command",
+      "description": "Track B kernel-first signal lane on poseidon64_bounty_shape (deterministic fast-mode evaluator, target-scoped replay, replaces the config-mutation default arm)",
+      "project_dir": ".",
+      "source_file": "attack_harness.py",
+      "language": "Python",
+      "metric_name": "attack_score_signal",
+      "higher_is_better": true,
+      "min_improvement_rel": 0.0,
+      "min_improvement_rel_mode": "fixed",
+      "confirm_repeats": 1,
+      "ab_repeats": 1,
+      "blocked_mutation_ttl": 4,
+      "mutation_schedule": "ucb",
+      "mutation_ucb_explore": 0.6,
+      "mutation_memory_namespace": "kernel_signal_poseidon64",
+      "required_snippets": [
+        "def differential_kernel(",
+        "def mitm_truncated_preimage_kernel(",
+        "def algebraic_elimination_kernel(",
+        "def score("
+      ],
+      "benchmark_command": [
+        "python3",
+        "attack_harness.py",
+        "--config",
+        "config/track_b_attack_config.json",
+        "--profile",
+        "poseidon64_bounty_shape",
+        "--mode",
+        "fast",
+        "--output-format",
+        "json"
+      ],
+      "warmup_runs": 0,
+      "runs": 1,
+      "aggregate": "median",
+      "metric_source": "json_stdout",
+      "metric_json_path": "metrics.attack_score_signal"
     },
     "poseidon2_cryptanalysis_trackb_full": {
       "type": "command",

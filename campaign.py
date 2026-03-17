@@ -89,10 +89,10 @@ def default_crypto_optimize_targets() -> str:
     return ",".join(
         [
             DEFAULT_CRYPTANALYSIS_LOOP_TARGET,
+            "poseidon2_cryptanalysis_trackb_kernel_signal_fast",
             LEGACY_CRYPTANALYSIS_LOOP_TARGET,
             "poseidon2_cryptanalysis_trackb_verified_fast",
             "poseidon2_cryptanalysis_algebraic_fast",
-            "poseidon2_cryptanalysis_poseidon64_signal_fast",
             "poseidon2_cryptanalysis_poseidon64_algebraic_fast",
         ]
     )
