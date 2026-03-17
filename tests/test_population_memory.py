@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 import tempfile
 import unittest
 from pathlib import Path
@@ -378,6 +379,7 @@ class PopulationMemoryTests(unittest.TestCase):
             target_config={},
             mutation_memory=None,
             max_candidates=6,
+            rng_seed="deadbeef01234567",
         )
         self.assertGreaterEqual(len(seeds), 3)
         mutations = [item["mutation"] for item in seeds]
@@ -404,9 +406,11 @@ class PopulationMemoryTests(unittest.TestCase):
             iteration: int,
             language: str,
             source_path: Path,
+            rng: random.Random | None = None,
             **_: object,
         ) -> tuple[str, str, bool]:
-            return f"{source}{train.random.random():.8f}\n", f"mutation_{iteration}", True
+            chooser = rng if rng is not None else train.random
+            return f"{source}{chooser.random():.8f}\n", f"mutation_{iteration}", True
 
         with patch("train.heuristic_candidate", side_effect=fake_heuristic):
             first = train.generate_population_seed_candidates(

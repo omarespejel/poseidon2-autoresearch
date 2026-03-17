@@ -1213,6 +1213,7 @@ def python_heuristic_candidate(
     operator_penalties: dict[str, float] | None = None,
     target_name: str = "",
     strict_target_scope: bool = False,
+    rng: random.Random | None = None,
 ) -> tuple[str, str, bool]:
     if not python_mutation_target_supported(source_path):
         return source, "python_target_unsupported", False
@@ -1410,6 +1411,7 @@ def json_heuristic_candidate(
     operator_penalties: dict[str, float] | None = None,
     target_name: str = "",
     strict_target_scope: bool = False,
+    rng: random.Random | None = None,
 ) -> tuple[str, str, bool]:
     path = str(source_path).replace("\\", "/").lower()
     if not path.endswith("config/track_b_attack_config.json"):
@@ -1708,6 +1710,7 @@ def rust_heuristic_candidate(
     operator_penalties: dict[str, float] | None = None,
     target_name: str = "",
     strict_target_scope: bool = False,
+    rng: random.Random | None = None,
 ) -> tuple[str, str, bool]:
     path = str(source_path).replace("\\", "/").lower()
 
@@ -1950,6 +1953,7 @@ def heuristic_candidate(
     operator_penalties: dict[str, float] | None = None,
     target_name: str = "",
     strict_target_scope: bool = False,
+    rng: random.Random | None = None,
 ) -> tuple[str, str, bool]:
     if language.lower() == "json":
         json_candidate, mutation, changed = json_heuristic_candidate(
@@ -1963,6 +1967,7 @@ def heuristic_candidate(
             mutation_memory=mutation_memory,
             operator_penalties=operator_penalties,
             target_name=target_name,
+            rng=rng,
             strict_target_scope=strict_target_scope,
         )
         if changed:
@@ -1979,6 +1984,7 @@ def heuristic_candidate(
             mutation_memory=mutation_memory,
             operator_penalties=operator_penalties,
             target_name=target_name,
+            rng=rng,
             strict_target_scope=strict_target_scope,
         )
         if changed:
@@ -1995,6 +2001,7 @@ def heuristic_candidate(
             mutation_memory=mutation_memory,
             operator_penalties=operator_penalties,
             target_name=target_name,
+            rng=rng,
             strict_target_scope=strict_target_scope,
         )
         if changed:
@@ -2891,36 +2898,29 @@ def generate_population_seed_candidates(
     mutation_attempts: dict[str, int] = {}
     out: list[dict[str, str]] = []
     max_trials = max_candidates * 5
-
-    prior_random_state: object | None = None
-    if rng_seed:
-        prior_random_state = random.getstate()
-        random.seed(int(rng_seed, 16))
-    try:
-        for iteration in range(1, max_trials + 1):
-            candidate, mutation, changed = heuristic_candidate(
-                source,
-                iteration,
-                language,
-                source_path,
-                blocked_mutations=blocked,
-                mutation_attempts=mutation_attempts,
-                target_config=cfg,
-                preferred_mutations=[],
-                mutation_memory=mutation_memory,
-                operator_penalties=None,
-                target_name=target_name,
-            )
-            mutation_key = normalize_mutation_label(mutation) or mutation
-            blocked.add(mutation_key)
-            if not changed or candidate == source:
-                continue
-            out.append({"mutation": mutation_key, "source_code": candidate})
-            if len(out) >= max_candidates:
-                break
-    finally:
-        if prior_random_state is not None:
-            random.setstate(prior_random_state)
+    seed_rng = random.Random(int(rng_seed, 16)) if rng_seed else None
+    for iteration in range(1, max_trials + 1):
+        candidate, mutation, changed = heuristic_candidate(
+            source,
+            iteration,
+            language,
+            source_path,
+            blocked_mutations=blocked,
+            mutation_attempts=mutation_attempts,
+            target_config=cfg,
+            preferred_mutations=[],
+            mutation_memory=mutation_memory,
+            operator_penalties=None,
+            target_name=target_name,
+            rng=seed_rng,
+        )
+        mutation_key = normalize_mutation_label(mutation) or mutation
+        blocked.add(mutation_key)
+        if not changed or candidate == source:
+            continue
+        out.append({"mutation": mutation_key, "source_code": candidate})
+        if len(out) >= max_candidates:
+            break
     return out
 
 
