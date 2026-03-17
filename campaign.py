@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import datetime as dt
 import json
 import os
 import platform
@@ -38,6 +39,9 @@ READINESS_REPORT = ROOT / "readiness_report.md"
 EVIDENCE_DIR = ROOT / "evidence"
 SUBMISSION_DIR = ROOT / "submission"
 MUTATION_MEMORY = ROOT / "work" / "mutation_memory.json"
+DEFAULT_LOOP_TARGET_SENTINEL = "cairo_poseidon_style_t8"
+DEFAULT_CRYPTANALYSIS_LOOP_TARGET = "poseidon2_cryptanalysis_trackb_kernel_fast"
+LEGACY_CRYPTANALYSIS_LOOP_TARGET = "poseidon2_cryptanalysis_trackb_fast"
 
 DEFAULT_INFORMATIONAL_READINESS_CHECKS: frozenset[str] = readiness_check.INFORMATIONAL_CHECKS
 
@@ -84,7 +88,8 @@ def default_real_optimize_targets() -> str:
 def default_crypto_optimize_targets() -> str:
     return ",".join(
         [
-            "poseidon2_cryptanalysis_trackb_fast",
+            DEFAULT_CRYPTANALYSIS_LOOP_TARGET,
+            LEGACY_CRYPTANALYSIS_LOOP_TARGET,
             "poseidon2_cryptanalysis_trackb_verified_fast",
             "poseidon2_cryptanalysis_algebraic_fast",
             "poseidon2_cryptanalysis_poseidon64_signal_fast",
@@ -108,6 +113,23 @@ class RunResult:
     code: int
     stdout: str
     stderr: str
+
+
+def campaign_log(args: argparse.Namespace, message: str) -> None:
+    try:
+        verbose = int(getattr(args, "verbose", 0) or 0)
+    except (TypeError, ValueError):
+        verbose = 0
+    if verbose <= 0:
+        return
+    stamp = dt.datetime.now(dt.timezone.utc).isoformat()
+    print(f"[campaign {stamp}] {message}", file=sys.stderr, flush=True)
+
+
+def resolve_loop_target(track: str, loop_target: str) -> str:
+    if track == "cryptanalysis" and loop_target == DEFAULT_LOOP_TARGET_SENTINEL:
+        return DEFAULT_CRYPTANALYSIS_LOOP_TARGET
+    return loop_target
 
 
 def run(argv: list[str], *, stream_stderr: bool = False) -> RunResult:
@@ -431,7 +453,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Real benchmark profile for Lean baseline targets",
     )
     parser.add_argument("--no-bootstrap", action="store_true", help="Skip bootstrap step for real targets")
-    parser.add_argument("--loop-target", default="cairo_poseidon_style_t8", help="Target for the optimization loop")
+    parser.add_argument(
+        "--loop-target",
+        default=DEFAULT_LOOP_TARGET_SENTINEL,
+        help=(
+            "Target for the optimization loop. With --track cryptanalysis, leaving the sentinel default "
+            f"switches to {DEFAULT_CRYPTANALYSIS_LOOP_TARGET}; pin --loop-target "
+            f"{LEGACY_CRYPTANALYSIS_LOOP_TARGET} to preserve the previous default."
+        ),
+    )
     parser.add_argument("--loop-iterations", type=int, default=25, help="Loop iteration budget (0 = infinite)")
     parser.add_argument("--max-accepted", type=int, default=5, help="Stop loop after N accepted improvements")
     parser.add_argument(
@@ -616,9 +646,7 @@ def main(argv: list[str] | None = None) -> int:
         if not args.build_readiness:
             args.build_readiness = True
 
-    if args.track == "cryptanalysis" and args.loop_target == "cairo_poseidon_style_t8":
-        # Track B defaults to cryptanalysis objective unless user explicitly overrides.
-        args.loop_target = "poseidon2_cryptanalysis_trackb_fast"
+    args.loop_target = resolve_loop_target(args.track, args.loop_target)
 
     start_row_count = 0 if args.fresh or not RESULTS.exists() else len(parse_results())
 
@@ -629,10 +657,18 @@ def main(argv: list[str] | None = None) -> int:
         reset_outputs(memory_path)
 
     # Baseline and loop target optimization.
+    campaign_log(args, f"baseline loop target={args.loop_target}")
     must_run(
         prepare_cmd(args, "baseline", "--target", args.loop_target, "--notes", "campaign_baseline"),
         label="baseline_loop_target",
         stream_stderr=args.verbose > 0,
+    )
+    campaign_log(
+        args,
+        (
+            f"start train loop target={args.loop_target} iterations={args.loop_iterations} "
+            f"max_accepted={args.max_accepted}"
+        ),
     )
     loop_payload = must_run_json(
         train_cmd(
@@ -660,6 +696,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if real_targets and not args.no_bootstrap:
         for target in real_targets:
+            campaign_log(args, f"bootstrap real target={target}")
             must_run(
                 prepare_cmd(args, "bootstrap", "--target", target),
                 label=f"bootstrap_{target}",
@@ -667,6 +704,7 @@ def main(argv: list[str] | None = None) -> int:
             )
 
     for target in real_targets:
+        campaign_log(args, f"baseline real target={target}")
         must_run(
             prepare_cmd(args, "baseline", "--target", target, "--notes", "campaign_real"),
             label=f"baseline_{target}",
@@ -675,6 +713,13 @@ def main(argv: list[str] | None = None) -> int:
 
     portfolio_payload: dict[str, Any] | None = None
     if args.track in {"performance", "hybrid"} and args.real_optimize_rounds > 0:
+        campaign_log(
+            args,
+            (
+                f"start performance portfolio rounds={args.real_optimize_rounds} "
+                f"targets={args.real_optimize_targets}"
+            ),
+        )
         portfolio_payload = must_run_json(
             portfolio_cmd(
                 args,
@@ -706,6 +751,7 @@ def main(argv: list[str] | None = None) -> int:
     for target in crypto_targets:
         if target == args.loop_target:
             continue
+        campaign_log(args, f"baseline cryptanalysis target={target}")
         must_run(
             prepare_cmd(args, "baseline", "--target", target, "--notes", "campaign_crypto"),
             label=f"baseline_{target}",
@@ -714,6 +760,13 @@ def main(argv: list[str] | None = None) -> int:
 
     crypto_payload: dict[str, Any] | None = None
     if args.track in {"cryptanalysis", "hybrid"} and args.crypto_optimize_rounds > 0:
+        campaign_log(
+            args,
+            (
+                f"start cryptanalysis portfolio rounds={args.crypto_optimize_rounds} "
+                f"targets={','.join(crypto_targets)}"
+            ),
+        )
         crypto_payload = must_run_json(
             portfolio_cmd(
                 args,
