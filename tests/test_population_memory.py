@@ -127,6 +127,51 @@ class PopulationMemoryTests(unittest.TestCase):
             entries = updated.get("entries", [])
             self.assertEqual(entries[0]["sampled_total"], 1)
 
+    def test_save_mutator_stats_creates_parent_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "nested" / "mutator_stats.json"
+            train.save_mutator_stats(path, {"version": 1, "targets": {}})
+            self.assertTrue(path.exists())
+            saved = path.read_text(encoding="utf-8")
+            self.assertIn('"version": 1', saved)
+
+    def test_population_metric_component_is_bounded_near_zero_baseline(self) -> None:
+        bounded = train.population_metric_component(
+            metric_value=0.5,
+            higher_is_better=True,
+            best_metric=0.0,
+        )
+        self.assertGreater(bounded, 0.0)
+        self.assertLessEqual(bounded, 1.0)
+
+        lower_is_better = train.population_metric_component(
+            metric_value=0.5,
+            higher_is_better=False,
+            best_metric=0.0,
+        )
+        self.assertLess(lower_is_better, 0.0)
+        self.assertGreaterEqual(lower_is_better, -1.0)
+
+    def test_population_rng_config_omits_budget_parameters(self) -> None:
+        config = train.population_rng_config(
+            language="python",
+            higher_is_better=True,
+            population_parent_sample_prob=0.35,
+            population_max_entries=24,
+        )
+        self.assertEqual(
+            config,
+            {
+                "language": "python",
+                "higher_is_better": True,
+                "population_parent_sample_prob": 0.35,
+                "population_max_entries": 24,
+            },
+        )
+        self.assertNotIn("max_iterations", config)
+        self.assertNotIn("max_accepted", config)
+        self.assertNotIn("max_runtime_seconds", config)
+
     def test_should_record_population_candidate(self) -> None:
         self.assertTrue(train.should_record_population_candidate(accepted=True, notes="accepted:x"))
         self.assertTrue(
