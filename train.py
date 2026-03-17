@@ -4173,6 +4173,7 @@ ATTACK_KERNEL_SIGNATURE_FUNCTIONS = (
     "algebraic_elimination_kernel",
     "score",
 )
+SIGNATURE_FINGERPRINT_SEPARATOR = "\x1f"
 
 
 def python_annotation_fingerprint(annotation: ast.expr | None) -> str:
@@ -4218,7 +4219,7 @@ def python_function_signature_fingerprint(node: ast.AST) -> str:
 
     parts.append(f"RET:{python_annotation_fingerprint(node.returns)}")
 
-    return "|".join(parts)
+    return SIGNATURE_FINGERPRINT_SEPARATOR.join(parts)
 
 
 def extract_python_function_signatures(
@@ -4267,6 +4268,7 @@ def function_signature_guard(
         expected = expected_signatures.get(name)
         actual = observed.get(name)
         if expected is None:
+            violations.append({"function": name, "status": "not_in_baseline"})
             continue
         if actual is None:
             violations.append({"function": name, "status": "missing"})

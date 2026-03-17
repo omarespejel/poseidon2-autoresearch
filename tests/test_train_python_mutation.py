@@ -929,6 +929,29 @@ def helper():
             names = set(train.signature_guard_functions_from_target(targets[target_name]))
             self.assertEqual(names, expected, target_name)
 
+    def test_python_function_signature_fingerprint_uses_non_pipe_separator(self) -> None:
+        source = "def demo(value: int | str) -> int | str:\n    return value\n"
+        tree = train.ast.parse(source)
+        fingerprint = train.python_function_signature_fingerprint(tree.body[0])
+        self.assertIn(train.SIGNATURE_FINGERPRINT_SEPARATOR, fingerprint)
+
+    def test_function_signature_guard_reports_missing_baseline_expectation(self) -> None:
+        ok, details = train.function_signature_guard(
+            candidate_source="def score():\n    return 1\n",
+            expected_signatures={},
+            required_names=["score"],
+        )
+        self.assertTrue(ok)
+        self.assertFalse(details["enabled"])
+
+        ok, details = train.function_signature_guard(
+            candidate_source="def score():\n    return 1\n",
+            expected_signatures={"differential_kernel": "baseline"},
+            required_names=["score"],
+        )
+        self.assertFalse(ok)
+        self.assertIn({"function": "score", "status": "not_in_baseline"}, details["violations"])
+
     def test_signature_guard_blocks_mutation_ttl_skips_parse_errors(self) -> None:
         self.assertFalse(
             train.signature_guard_blocks_mutation_ttl(
