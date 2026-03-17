@@ -206,14 +206,14 @@
   },
   "objective": {
     "attack_found_bonus": 1.0,
-    "attack_found_threshold_bits": 6.5,
+    "attack_found_threshold_bits": 6.75,
     "complexity_cap_bits": 28.0,
     "cost_penalty_scale": 0.06,
     "verified_found_bonus": 3.0,
     "weight_collision": 0.2,
     "weight_differential": 0.3,
     "weight_preimage": 0.35,
-    "weight_algebraic": 0.15
+    "weight_algebraic": 0.2
   },
   "poseidon2": {
     "constants_seed": "trackb-poseidon2-v2",
