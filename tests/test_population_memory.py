@@ -67,6 +67,7 @@ class PopulationMemoryTests(unittest.TestCase):
         self.assertEqual(len(entries), 1)
         entry = entries[0]
         self.assertEqual(entry["accepted_total"], 1)
+        self.assertEqual(entry["verified_total"], 1)
         self.assertEqual(entry["rejected_total"], 1)
         self.assertEqual(entry["metric_value"], 12.5)
 
@@ -89,6 +90,27 @@ class PopulationMemoryTests(unittest.TestCase):
         self.assertEqual(entry["accepted_total"], 0)
         self.assertEqual(entry["rejected_total"], 0)
         self.assertEqual(entry["seeded_total"], 1)
+
+    def test_upsert_population_entry_can_record_unverified_accept(self) -> None:
+        memory = {"version": 1, "entries": []}
+        source = "def f():\n    return 1\n"
+        train.upsert_population_entry(
+            memory,
+            target_name="poseidon2_cryptanalysis_trackb_kernel_fast",
+            language="python",
+            source_code=source,
+            metric_value=12.5,
+            higher_is_better=True,
+            accepted=True,
+            timestamp="2026-03-17T00:00:00+00:00",
+            notes="accepted_local_only",
+            max_entries=32,
+            promotion_status="accepted",
+        )
+        entry = memory["entries"][0]
+        self.assertEqual(entry["accepted_total"], 1)
+        self.assertEqual(entry["verified_total"], 0)
+        self.assertEqual(entry["last_promotion_status"], "accepted")
 
     def test_select_population_parent_uses_ranked_candidates(self) -> None:
         best_source = "def f():\n    return 0\n"
@@ -233,6 +255,39 @@ class PopulationMemoryTests(unittest.TestCase):
         )
         self.assertIsNone(selected)
 
+    def test_select_population_parent_skips_unverified_candidates(self) -> None:
+        best_source = "def f():\n    return 0\n"
+        pending_alt = "def f():\n    return 7\n"
+        memory = {
+            "version": 1,
+            "entries": [
+                {
+                    "target": "poseidon2_cryptanalysis_trackb_kernel_fast",
+                    "language": "python",
+                    "source_sha256": train.source_sha256(pending_alt),
+                    "source_code": pending_alt,
+                    "metric_value": 77.0,
+                    "higher_is_better": True,
+                    "accepted_total": 2,
+                    "verified_total": 0,
+                    "rejected_total": 0,
+                    "sampled_total": 0,
+                    "last_promotion_status": "accepted",
+                },
+            ],
+        }
+        selected = train.select_population_parent(
+            memory,
+            target_name="poseidon2_cryptanalysis_trackb_kernel_fast",
+            language="python",
+            higher_is_better=True,
+            best_metric=15.0,
+            best_source=best_source,
+            max_candidates=8,
+            rng=DeterministicRng(choices_result=0),
+        )
+        self.assertIsNone(selected)
+
     def test_mark_population_entry_sampled_updates_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "population.json"
@@ -361,6 +416,18 @@ class PopulationMemoryTests(unittest.TestCase):
             train.should_record_population_candidate(
                 accepted=False,
                 notes="rejected_validation_degraded:v_lane:python_trackb_x",
+            )
+        )
+        self.assertTrue(
+            train.should_record_population_candidate(
+                accepted=False,
+                notes="rejected_holdout_degraded:holdout_lane:python_trackb_x",
+            )
+        )
+        self.assertTrue(
+            train.should_record_population_candidate(
+                accepted=False,
+                notes="rejected_reward_audit_degraded:audit_lane:python_trackb_x",
             )
         )
         self.assertFalse(

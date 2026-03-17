@@ -208,6 +208,8 @@ Source-level command targets can additionally require distribution separation
 (`min_effect_sigma`, `ci_z`, `require_ci_separation`) before accepting a run.
 They can also enforce `require_metric_series_for_stats=true` so statistical gates cannot run with missing `debug.metric_values`.
 They can also run post-accept A/B replay (`ab_repeats`) to confirm patched vs original.
+Shared-source targets can add held-out verifier gates (`holdout_targets`) plus reward-audit lanes
+(`reward_audit_targets`) that must remain non-regressed before a candidate is accepted and promoted.
 Rejected mutations can be temporarily cooled down (`blocked_mutation_ttl`) to encourage broader exploration.
 If the search stalls with `no_change`, the loop can release the oldest blocked mutation and retry selection in-place (`recover_from_no_change`, default `true`).
 Mutation selection can use a UCB bandit scheduler (`mutation_schedule=ucb`) with configurable exploration strength (`mutation_ucb_explore`).
@@ -273,6 +275,13 @@ The harness runs reduced-round Poseidon2-style kernels over a prime field:
 - `poseidon2_cryptanalysis_poseidon64_algebraic_fast` (profile algebraic lane)
 - `poseidon2_cryptanalysis_poseidon256_signal_fast` (profile lane)
 - `poseidon2_cryptanalysis_koalabear16_signal_fast` (profile lane)
+
+Kernel-first Track B now uses a staged verifier stack:
+
+- primary metric on `poseidon2_cryptanalysis_trackb_kernel_fast` or `..._kernel_signal_fast`
+- same-source holdouts on verified-hit and algebraic lanes
+- reward-audit lanes on `poseidon256_bounty_shape` and `koalabear_w16_shape`
+- replay/population promotion only after the candidate survives all gates
 
 Quick start:
 
@@ -344,6 +353,9 @@ A candidate is accepted only when:
 - metric strictly improves relative to best-so-far
 - optional noise guards pass (`max_rel_stdev`, distribution/effect-size gate for command targets)
 - optional confirmation runs (`confirm_repeats`) still beat the current best
+- optional shared-source validation gates pass (`validation_targets`)
+- optional holdout verifier gates pass (`holdout_targets`)
+- optional reward-audit lanes pass (`reward_audit_targets`)
 
 Otherwise the file is reverted.
 

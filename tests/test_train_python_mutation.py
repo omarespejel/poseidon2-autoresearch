@@ -762,6 +762,49 @@ def helper():
         self.assertEqual(metrics["v_lane"], 9.0)
         self.assertEqual(details["v_lane"]["status"], "rejected")
 
+    def test_configured_stage_targets_skips_primary_and_duplicates(self) -> None:
+        stage_targets = train.configured_stage_targets(
+            {
+                "holdout_targets": [
+                    "poseidon2_cryptanalysis_trackb_kernel_fast",
+                    "poseidon2_cryptanalysis_trackb_kernel_verified_fast",
+                    "poseidon2_cryptanalysis_trackb_kernel_verified_fast",
+                    "  ",
+                ]
+            },
+            field_name="holdout_targets",
+            primary_target_name="poseidon2_cryptanalysis_trackb_kernel_fast",
+        )
+        self.assertEqual(stage_targets, ["poseidon2_cryptanalysis_trackb_kernel_verified_fast"])
+
+    def test_ensure_stage_targets_share_source_rejects_mismatch(self) -> None:
+        ok, message = train.ensure_stage_targets_share_source(
+            stage_name="holdout",
+            stage_targets=["holdout_lane"],
+            targets_catalog={"holdout_lane": {"source_file": "config/track_b_mutable_fast.json"}},
+            source_path=KERNEL_PATH,
+        )
+        self.assertFalse(ok)
+        self.assertIn("source_file mismatch", str(message))
+
+    def test_evaluate_stage_targets_marks_stage_name(self) -> None:
+        with patch(
+            "train.prepare.evaluate_target",
+            return_value={"status": "success", "metric_value": 10.0, "metric_name": "attack_score_verified"},
+        ):
+            ok, details, metrics, reason = train.evaluate_stage_targets(
+                stage_name="holdout",
+                stage_targets=["holdout_lane"],
+                stage_baselines={"holdout_lane": 10.0},
+                targets_catalog={"holdout_lane": {"higher_is_better": True}},
+                allow_drop_abs=0.0,
+                allow_drop_rel=0.0,
+            )
+        self.assertTrue(ok)
+        self.assertEqual(reason, "ok")
+        self.assertEqual(metrics["holdout_lane"], 10.0)
+        self.assertEqual(details["holdout_lane"]["stage"], "holdout")
+
     def test_algorithmic_mitm_key_mutator_applies(self) -> None:
         source = harness_source()
         candidate, mutation, changed = train.python_mutator_mitm_augmented_middle_key(source)
