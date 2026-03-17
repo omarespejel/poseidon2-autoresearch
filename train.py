@@ -2408,6 +2408,116 @@ def required_snippet_guard(candidate: str, profile: dict[str, int], *, language:
     return len(violations) == 0, {"required_snippets": len(profile), "violations": violations}
 
 
+def parse_flag_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        token = value.strip().lower()
+        if not token:
+            return default
+        if token in {"1", "true", "yes", "on"}:
+            return True
+        if token in {"0", "false", "no", "off"}:
+            return False
+        try:
+            return int(token) != 0
+        except ValueError:
+            return default
+    if isinstance(value, int):
+        return value != 0
+    return default
+
+
+def resolved_objective_from_trackb_payload(payload: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+    top_level = payload.get("objective")
+    resolved = top_level if isinstance(top_level, dict) else None
+    source_key = "objective" if isinstance(top_level, dict) else None
+
+    active_profile = payload.get("active_profile")
+    profiles = payload.get("challenge_profiles")
+    if isinstance(active_profile, str) and active_profile.strip() and isinstance(profiles, dict):
+        profile_payload = profiles.get(active_profile.strip())
+        if isinstance(profile_payload, dict):
+            profile_objective = profile_payload.get("objective")
+            if isinstance(profile_objective, dict):
+                resolved = profile_objective
+                source_key = f"challenge_profiles.{active_profile.strip()}.objective"
+
+    if not isinstance(resolved, dict):
+        return (None, None)
+    return (json.loads(json.dumps(resolved)), source_key)
+
+
+def objective_sections_from_trackb_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    sections: dict[str, Any] = {}
+    top_level = payload.get("objective")
+    if isinstance(top_level, dict):
+        sections["objective"] = json.loads(json.dumps(top_level))
+
+    profiles = payload.get("challenge_profiles")
+    if isinstance(profiles, dict):
+        for profile_name in sorted(profiles.keys()):
+            profile_payload = profiles.get(profile_name)
+            if not isinstance(profile_payload, dict):
+                continue
+            objective = profile_payload.get("objective")
+            if isinstance(objective, dict):
+                key = f"challenge_profiles.{profile_name}.objective"
+                sections[key] = json.loads(json.dumps(objective))
+    return sections
+
+
+def trackb_objective_guard(
+    *,
+    current_source: str,
+    candidate_source: str,
+    source_path: Path,
+    target_config: dict[str, Any] | None,
+) -> tuple[bool, dict[str, Any]]:
+    path = str(source_path).replace("\\", "/").lower()
+    if not path.endswith("config/track_b_attack_config.json"):
+        return True, {"enabled": False}
+
+    allow_mutation = parse_flag_bool((target_config or {}).get("json_allow_objective_mutations"), default=False)
+    if allow_mutation:
+        return True, {"enabled": True, "allow_objective_mutations": True}
+
+    try:
+        before_payload = json.loads(current_source)
+    except json.JSONDecodeError:
+        return False, {"enabled": True, "status": "baseline_parse_failed"}
+    try:
+        after_payload = json.loads(candidate_source)
+    except json.JSONDecodeError:
+        return False, {"enabled": True, "status": "candidate_parse_failed"}
+    if not isinstance(before_payload, dict) or not isinstance(after_payload, dict):
+        return False, {"enabled": True, "status": "invalid_root"}
+
+    before_sections = objective_sections_from_trackb_payload(before_payload)
+    after_sections = objective_sections_from_trackb_payload(after_payload)
+    changed_paths: list[str] = []
+    for key in sorted(set(before_sections.keys()) | set(after_sections.keys())):
+        if before_sections.get(key) != after_sections.get(key):
+            changed_paths.append(key)
+
+    before_resolved, before_resolved_source = resolved_objective_from_trackb_payload(before_payload)
+    after_resolved, after_resolved_source = resolved_objective_from_trackb_payload(after_payload)
+    resolved_sources = {
+        source_key
+        for source_key in (before_resolved_source, after_resolved_source)
+        if isinstance(source_key, str) and source_key
+    }
+    if before_resolved != after_resolved and not resolved_sources.intersection(changed_paths):
+        changed_paths.append("resolved_objective")
+
+    if changed_paths:
+        return False, {"enabled": True, "status": "objective_modified", "paths": changed_paths}
+
+    return True, {"enabled": True, "status": "ok"}
+
+
 def make_run_label() -> str:
     stamp = re.sub(r"[^0-9A-Za-z]+", "", prepare.now_iso())
     return f"run_{stamp}_{os.getpid()}"
@@ -3223,6 +3333,60 @@ def run_loop(args: argparse.Namespace) -> int:
             train_log(
                 args,
                 f"iter {iteration}: rejected mutation={mutation_key} reason=required_snippet_guardrail",
+                level=1,
+            )
+            continue
+
+        objective_guard_ok, objective_guard_details = trackb_objective_guard(
+            current_source=current_source,
+            candidate_source=candidate,
+            source_path=source_path,
+            target_config=target,
+        )
+        diagnostics["trackb_objective_guard"] = objective_guard_details
+        if not objective_guard_ok:
+            reason = str(objective_guard_details.get("status", "objective_guard_failed"))
+            changed_paths_raw = objective_guard_details.get("paths", [])
+            changed_paths = ",".join(str(item) for item in changed_paths_raw) if isinstance(changed_paths_raw, list) else ""
+            guard_notes = (
+                f"rejected_guardrail_trackb_objective:{mutation};"
+                f"reason={reason};paths={changed_paths or 'n/a'}"
+            )
+            prepare.append_result_row(
+                target=args.target,
+                iteration=iteration,
+                status="skipped",
+                metric_name=target["metric_name"],
+                metric_value=best_metric,
+                higher_is_better=bool(target["higher_is_better"]),
+                check_s=0.0,
+                info_or_bench_s=0.0,
+                execute_s=0.0,
+                notes=f"{guard_notes};run={run_label}",
+            )
+            prepare.append_log(
+                {
+                    "event": "loop_iteration",
+                    "timestamp": prepare.now_iso(),
+                    "target": args.target,
+                    "iteration": iteration,
+                    "mutation": mutation,
+                    "mutation_key": mutation_key,
+                    "accepted": False,
+                    "best_metric": best_metric,
+                    "effective_threshold": threshold_diag,
+                    "result": {
+                        "status": "guardrail_rejected",
+                        "metric_name": target["metric_name"],
+                        "metric_value": best_metric,
+                        "notes": guard_notes,
+                    },
+                    "diagnostics": diagnostics,
+                },
+            )
+            train_log(
+                args,
+                f"iter {iteration}: rejected mutation={mutation_key} reason=trackb_objective_guardrail",
                 level=1,
             )
             continue
