@@ -8,6 +8,24 @@ from unittest.mock import patch
 import train
 
 
+class DeterministicRng:
+    def __init__(self, *, choices_result: int = 0, choice_result: str = "a", randint_values: list[int] | None = None) -> None:
+        self._choices_result = choices_result
+        self._choice_result = choice_result
+        self._randint_values = list(randint_values or [])
+
+    def choices(self, population: range, weights: list[float], k: int) -> list[int]:
+        return [self._choices_result]
+
+    def choice(self, population: list[str]) -> str:
+        return self._choice_result
+
+    def randint(self, low: int, high: int) -> int:
+        if self._randint_values:
+            return self._randint_values.pop(0)
+        return low
+
+
 class PopulationMemoryTests(unittest.TestCase):
     def test_upsert_population_entry_tracks_accept_and_reject(self) -> None:
         memory = {"version": 1, "entries": []}
@@ -75,11 +93,7 @@ class PopulationMemoryTests(unittest.TestCase):
                 },
             ],
         }
-        rng = type(
-            "DeterministicRng",
-            (),
-            {"choices": staticmethod(lambda population, weights, k: [0])},
-        )()
+        rng = DeterministicRng(choices_result=0)
         with patch("train.random.choices", side_effect=AssertionError("global random should not be used")):
             selected = train.select_population_parent(
                 memory,
@@ -170,6 +184,8 @@ class PopulationMemoryTests(unittest.TestCase):
             language="python",
             higher_is_better=True,
             population_parent_sample_prob=0.35,
+            population_recombine_prob=0.15,
+            population_recombine_max_lines=12,
             population_max_entries=24,
         )
         self.assertEqual(
@@ -178,6 +194,8 @@ class PopulationMemoryTests(unittest.TestCase):
                 "language": "python",
                 "higher_is_better": True,
                 "population_parent_sample_prob": 0.35,
+                "population_recombine_prob": 0.15,
+                "population_recombine_max_lines": 12,
                 "population_max_entries": 24,
             },
         )
@@ -213,6 +231,115 @@ class PopulationMemoryTests(unittest.TestCase):
             with patch.object(Path, "read_text", side_effect=OSError("boom")):
                 stats = train.load_mutator_stats(path)
         self.assertEqual(stats, {"version": 1, "targets": {}})
+
+    def test_recombine_python_parent_block_swaps_selected_function(self) -> None:
+        best = (
+            "def a():\n"
+            "    return 1\n\n"
+            "def b():\n"
+            "    return 2\n"
+        )
+        parent = (
+            "def a():\n"
+            "    return 9\n\n"
+            "def b():\n"
+            "    return 2\n"
+        )
+        rng = DeterministicRng(choice_result="a")
+        with patch("train.random.choice", side_effect=AssertionError("global random should not be used")):
+            candidate, details = train.recombine_python_parent_block(best, parent, rng=rng)
+        self.assertIn("return 9", candidate)
+        self.assertIn("def b()", candidate)
+        self.assertEqual(details.get("status"), "ok")
+        self.assertEqual(details.get("function"), "a")
+
+    def test_recombine_python_parent_block_handles_syntax_error(self) -> None:
+        candidate, details = train.recombine_python_parent_block("def a(:\n", "def a():\n    return 1\n")
+        self.assertEqual(candidate, "def a(:\n")
+        self.assertEqual(details.get("status"), "parse_failed:SyntaxError")
+
+    def test_recombine_python_parent_block_handles_parser_exception(self) -> None:
+        with patch("train.ast.parse", side_effect=ValueError("boom")):
+            candidate, details = train.recombine_python_parent_block(
+                "def a():\n    return 1\n",
+                "def a():\n    return 2\n",
+            )
+        self.assertEqual(candidate, "def a():\n    return 1\n")
+        self.assertEqual(details.get("status"), "parse_failed:ValueError")
+
+    def test_recombine_python_parent_block_reports_no_differing_function(self) -> None:
+        source = "def a():\n    return 1\n"
+        candidate, details = train.recombine_python_parent_block(source, source)
+        self.assertEqual(candidate, source)
+        self.assertEqual(details.get("status"), "no_differing_function")
+
+    def test_recombine_line_window_too_short(self) -> None:
+        candidate, details = train.recombine_line_window("a\nb\nc\n", "a\nB\nC\n", max_lines=8)
+        self.assertEqual(candidate, "a\nb\nc\n")
+        self.assertEqual(details.get("status"), "too_short")
+
+    def test_recombine_with_population_parent_same_source(self) -> None:
+        source = "def a():\n    return 1\n"
+        candidate, details = train.recombine_with_population_parent(
+            best_source=source,
+            parent_source=source,
+            language="python",
+            max_lines=8,
+        )
+        self.assertEqual(candidate, source)
+        self.assertEqual(details.get("status"), "same_as_best")
+
+    def test_recombine_with_population_parent_python_async_path(self) -> None:
+        best = (
+            "async def a():\n"
+            "    return 1\n\n"
+            "def b():\n"
+            "    return 2\n"
+        )
+        parent = (
+            "async def a():\n"
+            "    return 9\n\n"
+            "def b():\n"
+            "    return 2\n"
+        )
+        candidate, details = train.recombine_with_population_parent(
+            best_source=best,
+            parent_source=parent,
+            language="python",
+            max_lines=8,
+            rng=DeterministicRng(choice_result="a"),
+        )
+        self.assertIn("return 9", candidate)
+        self.assertEqual(details.get("method"), "python_function_block")
+        self.assertEqual(details.get("function"), "a")
+
+    def test_recombine_with_population_parent_preserves_python_attempt_on_fallback(self) -> None:
+        best = "class A:\n    def a(self):\n        return 1\n\n    def b(self):\n        return 2\n"
+        parent = "class A:\n    def a(self):\n        return 9\n\n    def b(self):\n        return 2\n"
+        candidate, details = train.recombine_with_population_parent(
+            best_source=best,
+            parent_source=parent,
+            language="python",
+            max_lines=4,
+            rng=DeterministicRng(randint_values=[4, 0]),
+        )
+        self.assertNotEqual(candidate, best)
+        self.assertEqual(details.get("method"), "line_window")
+        self.assertEqual(details.get("python_attempt"), "no_shared_functions")
+
+    def test_recombine_with_population_parent_fallback_line_window(self) -> None:
+        best = "a\nb\nc\nd\ne\nf\n"
+        parent = "a\nB\nC\nD\ne\nf\n"
+        candidate, details = train.recombine_with_population_parent(
+            best_source=best,
+            parent_source=parent,
+            language="rust",
+            max_lines=4,
+            rng=DeterministicRng(randint_values=[4, 1]),
+        )
+        self.assertEqual(candidate, "a\nB\nC\nD\ne\nf\n")
+        self.assertEqual(details.get("method"), "line_window")
+        self.assertEqual(details.get("status"), "ok")
 
 
 if __name__ == "__main__":

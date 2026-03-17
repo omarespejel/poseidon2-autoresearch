@@ -68,6 +68,8 @@ ALLOWED_TARGET_OVERRIDE_KEYS = {
     "operator_validation_block_disable_streak",
     "population_parent_sample_prob",
     "population_max_entries",
+    "population_recombine_prob",
+    "population_recombine_max_lines",
     "validation_targets",
     "validation_allow_drop_abs",
     "validation_allow_drop_rel",
@@ -82,6 +84,8 @@ DEFAULT_MUTATION_MEMORY_SEED_VERSION = 2
 DEFAULT_POPULATION_MEMORY_FILE = ROOT / "work" / "population_memory.json"
 DEFAULT_POPULATION_MEMORY_MAX_ENTRIES = 48
 DEFAULT_POPULATION_PARENT_SAMPLE_PROB = 0.35
+DEFAULT_POPULATION_RECOMBINE_PROB = 0.55
+DEFAULT_POPULATION_RECOMBINE_MAX_LINES = 120
 DEFAULT_MUTATOR_STATS_FILE = ROOT / "work" / "mutator_stats.json"
 DEFAULT_OPERATOR_REWARD_EPSILON = 1e-12
 DEFAULT_OPERATOR_DEMOTE_STREAK = 6
@@ -2740,6 +2744,110 @@ def mark_population_entry_sampled(
     return current_memory
 
 
+def python_function_blocks(source_code: str) -> tuple[dict[str, tuple[int, int, str]] | None, str]:
+    try:
+        tree = ast.parse(source_code)
+    except SyntaxError:
+        return None, "parse_failed:SyntaxError"
+    except Exception as exc:  # noqa: BLE001
+        return None, f"parse_failed:{type(exc).__name__}"
+    lines = source_code.splitlines(keepends=True)
+    out: dict[str, tuple[int, int, str]] = {}
+    for node in tree.body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        start = max(0, int(node.lineno) - 1)
+        end = int(getattr(node, "end_lineno", node.lineno)) - 1
+        end = max(start, min(end, len(lines) - 1))
+        block = "".join(lines[start : end + 1])
+        out[str(node.name)] = (start, end, block)
+    return out, "ok"
+
+
+def recombine_python_parent_block(
+    best_source: str,
+    parent_source: str,
+    *,
+    rng: random.Random | None = None,
+) -> tuple[str, dict[str, Any]]:
+    best_blocks, best_status = python_function_blocks(best_source)
+    parent_blocks, parent_status = python_function_blocks(parent_source)
+    if best_blocks is None or parent_blocks is None:
+        status = best_status if best_blocks is None else parent_status
+        return best_source, {"method": "python_function_block", "status": status}
+    if not best_blocks or not parent_blocks:
+        return best_source, {"method": "python_function_block", "status": "no_shared_functions"}
+
+    shared = sorted(name for name in best_blocks.keys() & parent_blocks.keys())
+    differing = [name for name in shared if best_blocks[name][2] != parent_blocks[name][2]]
+    if not differing:
+        return best_source, {"method": "python_function_block", "status": "no_differing_function"}
+
+    chooser = rng if rng is not None else random
+    name = chooser.choice(differing)
+    start, end, _ = best_blocks[name]
+    _, _, parent_block = parent_blocks[name]
+    lines = best_source.splitlines(keepends=True)
+    candidate = "".join(lines[:start] + [parent_block] + lines[end + 1 :])
+    if candidate == best_source:
+        return best_source, {"method": "python_function_block", "status": "no_change"}
+    return candidate, {
+        "method": "python_function_block",
+        "status": "ok",
+        "function": name,
+        "candidate_functions": len(differing),
+    }
+
+
+def recombine_line_window(
+    best_source: str,
+    parent_source: str,
+    *,
+    max_lines: int,
+    rng: random.Random | None = None,
+) -> tuple[str, dict[str, Any]]:
+    best_lines = best_source.splitlines(keepends=True)
+    parent_lines = parent_source.splitlines(keepends=True)
+    shared = min(len(best_lines), len(parent_lines))
+    if shared < 4:
+        return best_source, {"method": "line_window", "status": "too_short"}
+
+    cap = max(4, min(shared, max(4, int(max_lines))))
+    chooser = rng if rng is not None else random
+    window = chooser.randint(4, cap)
+    start_max = max(0, shared - window)
+    start = chooser.randint(0, start_max)
+    candidate_lines = list(best_lines)
+    candidate_lines[start : start + window] = parent_lines[start : start + window]
+    candidate = "".join(candidate_lines)
+    if candidate == best_source:
+        return best_source, {"method": "line_window", "status": "no_change", "window": window}
+    return candidate, {"method": "line_window", "status": "ok", "window": window, "start": start}
+
+
+def recombine_with_population_parent(
+    *,
+    best_source: str,
+    parent_source: str,
+    language: str,
+    max_lines: int,
+    rng: random.Random | None = None,
+) -> tuple[str, dict[str, Any]]:
+    if parent_source == best_source:
+        return best_source, {"status": "same_as_best"}
+
+    language_norm = language.strip().lower()
+    if language_norm == "python":
+        candidate, python_details = recombine_python_parent_block(best_source, parent_source, rng=rng)
+        if candidate != best_source:
+            return candidate, python_details
+        candidate, line_details = recombine_line_window(best_source, parent_source, max_lines=max_lines, rng=rng)
+        line_details["python_attempt"] = python_details.get("status")
+        return candidate, line_details
+    candidate, details = recombine_line_window(best_source, parent_source, max_lines=max_lines, rng=rng)
+    return candidate, details
+
+
 def should_record_population_candidate(*, accepted: bool, notes: str) -> bool:
     if accepted:
         return True
@@ -3268,13 +3376,20 @@ def population_rng_config(
     higher_is_better: bool,
     population_parent_sample_prob: float,
     population_max_entries: int,
+    population_recombine_prob: float | None = None,
+    population_recombine_max_lines: int | None = None,
 ) -> dict[str, Any]:
-    return {
+    config = {
         "language": language,
         "higher_is_better": higher_is_better,
         "population_parent_sample_prob": population_parent_sample_prob,
         "population_max_entries": population_max_entries,
     }
+    if population_recombine_prob is not None:
+        config["population_recombine_prob"] = population_recombine_prob
+    if population_recombine_max_lines is not None:
+        config["population_recombine_max_lines"] = population_recombine_max_lines
+    return config
 
 
 def mutator_penalty_for_label(label: str, penalties: dict[str, float]) -> float:
@@ -4458,6 +4573,14 @@ def run_loop(args: argparse.Namespace) -> int:
         1.0,
         max(0.0, float(target.get("population_parent_sample_prob", args.population_parent_sample_prob))),
     )
+    population_recombine_prob = min(
+        1.0,
+        max(0.0, float(target.get("population_recombine_prob", args.population_recombine_prob))),
+    )
+    population_recombine_max_lines = max(
+        4,
+        int(target.get("population_recombine_max_lines", args.population_recombine_max_lines)),
+    )
     population_max_entries = max(0, int(target.get("population_max_entries", args.population_max_entries)))
     if (not population_memory_enabled) and (not args.disable_population_memory) and python_target_supported:
         warning = (
@@ -4611,6 +4734,8 @@ def run_loop(args: argparse.Namespace) -> int:
             language=language_norm,
             higher_is_better=bool(target["higher_is_better"]),
             population_parent_sample_prob=population_parent_sample_prob,
+            population_recombine_prob=population_recombine_prob,
+            population_recombine_max_lines=population_recombine_max_lines,
             population_max_entries=population_max_entries,
         ),
     )
@@ -4723,6 +4848,8 @@ def run_loop(args: argparse.Namespace) -> int:
                 "path": str(population_memory_path),
                 "parent_sample_prob": population_parent_sample_prob,
                 "rng_seed": population_rng_seed,
+                "recombine_prob": population_recombine_prob,
+                "recombine_max_lines": population_recombine_max_lines,
                 "max_entries": population_max_entries,
                 "known_entries": len((population_memory or {}).get("entries", []))
                 if isinstance((population_memory or {}).get("entries"), list)
@@ -4833,7 +4960,6 @@ def run_loop(args: argparse.Namespace) -> int:
             if isinstance(selected_parent, dict):
                 parent_source = selected_parent.get("source_code")
                 if isinstance(parent_source, str) and parent_source:
-                    current_source = parent_source
                     source_hash = str(selected_parent.get("source_sha256", ""))
                     diagnostics["population_parent"] = {
                         "source_sha256": source_hash[:12],
@@ -4842,6 +4968,24 @@ def run_loop(args: argparse.Namespace) -> int:
                         "rejected_total": int(selected_parent.get("rejected_total", 0)),
                         "sampled_total": int(selected_parent.get("sampled_total", 0)),
                     }
+                    use_recombine = (
+                        population_recombine_prob > 0.0 and population_rng.random() < population_recombine_prob
+                    )
+                    if use_recombine:
+                        recombined_source, recombine_details = recombine_with_population_parent(
+                            best_source=best_source,
+                            parent_source=parent_source,
+                            language=language_norm,
+                            max_lines=population_recombine_max_lines,
+                            rng=population_rng,
+                        )
+                        diagnostics["population_recombine"] = recombine_details
+                        if recombined_source != best_source:
+                            current_source = recombined_source
+                        else:
+                            current_source = parent_source
+                    else:
+                        current_source = parent_source
                     if source_hash:
                         try:
                             population_memory = mark_population_entry_sampled(
@@ -5573,6 +5717,8 @@ def run_loop(args: argparse.Namespace) -> int:
                 "enabled": population_memory is not None,
                 "path": str(population_memory_path),
                 "parent_sample_prob": population_parent_sample_prob,
+                "recombine_prob": population_recombine_prob,
+                "recombine_max_lines": population_recombine_max_lines,
                 "max_entries": population_max_entries,
                 "known_entries": len((population_memory or {}).get("entries", []))
                 if isinstance((population_memory or {}).get("entries"), list)
@@ -5636,6 +5782,9 @@ def run_loop(args: argparse.Namespace) -> int:
                 "operator_stats_file": str(operator_stats_path) if operator_stats is not None else None,
                 "operator_stats_artifact": str(operator_artifact_path) if operator_artifact_path is not None else None,
                 "population_memory_file": str(population_memory_path) if population_memory is not None else None,
+                "population_parent_sample_prob": population_parent_sample_prob,
+                "population_recombine_prob": population_recombine_prob,
+                "population_recombine_max_lines": population_recombine_max_lines,
                 "population_entries": len((population_memory or {}).get("entries", []))
                 if isinstance((population_memory or {}).get("entries"), list)
                 else 0,
@@ -5726,6 +5875,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Probability of mutating from a sampled population parent instead of current best source",
     )
     parser.add_argument(
+        "--population-recombine-prob",
+        type=float,
+        default=DEFAULT_POPULATION_RECOMBINE_PROB,
+        help="When parent sampling is used, probability of recombining parent + best source before mutation",
+    )
+    parser.add_argument(
+        "--population-recombine-max-lines",
+        type=int,
+        default=DEFAULT_POPULATION_RECOMBINE_MAX_LINES,
+        help="Max line window for fallback population recombination splices",
+    )
+    parser.add_argument(
         "--population-max-entries",
         type=int,
         default=DEFAULT_POPULATION_MEMORY_MAX_ENTRIES,
@@ -5786,6 +5947,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--operator-disable-streak must be >= 0")
     if args.population_parent_sample_prob < 0.0 or args.population_parent_sample_prob > 1.0:
         parser.error("--population-parent-sample-prob must be between 0 and 1")
+    if args.population_recombine_prob < 0.0 or args.population_recombine_prob > 1.0:
+        parser.error("--population-recombine-prob must be between 0 and 1")
+    if args.population_recombine_max_lines < 4:
+        parser.error("--population-recombine-max-lines must be >= 4")
     if args.population_max_entries < 0:
         parser.error("--population-max-entries must be >= 0")
     return run_loop(args)
