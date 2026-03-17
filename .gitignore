@@ -3,6 +3,13 @@ work/
 *.pyc
 results.tsv
 agent_log.jsonl
+agent_log.jsonl.lock
+results.tsv.lock
+provenance_chain.jsonl
+provenance_chain.jsonl.lock
+*.loop.lock
+work/provenance_state.json
+work/provenance_state.json.lock
 campaign_report.md
 examples/cairo_poseidon_style/target/
 examples/cairo_poseidon_style/.snfoundry_cache/
