@@ -2917,6 +2917,7 @@ def update_and_save_operator_stats(
     demote_streak: int,
     disable_streak: int,
     validation_blocked: bool = False,
+    preserve_validation_block_streak: bool = False,
 ) -> dict[str, Any]:
     lock_path = path.with_suffix(path.suffix + ".lock")
     with file_lock(lock_path):
@@ -2934,6 +2935,7 @@ def update_and_save_operator_stats(
             demote_streak=demote_streak,
             disable_streak=disable_streak,
             validation_blocked=validation_blocked,
+            preserve_validation_block_streak=preserve_validation_block_streak,
         )
         save_mutator_stats(path, latest)
 
@@ -3384,6 +3386,7 @@ def update_operator_stats(
     demote_streak: int,
     disable_streak: int,
     validation_blocked: bool = False,
+    preserve_validation_block_streak: bool = False,
 ) -> dict[str, Any]:
     entries = mutator_stats_target_entries(stats, target_name=target_name)
     entry = entries.setdefault(
@@ -3444,7 +3447,7 @@ def update_operator_stats(
     if validation_blocked:
         entry["validation_blocked"] = int(entry.get("validation_blocked", 0)) + 1
         entry["validation_block_streak"] = int(entry.get("validation_block_streak", 0)) + 1
-    else:
+    elif not preserve_validation_block_streak:
         entry["validation_block_streak"] = 0
     streak = int(entry.get("no_signal_streak", 0))
     entry["demoted"] = bool(demote_streak > 0 and streak >= demote_streak)
@@ -5079,6 +5082,7 @@ def run_loop(args: argparse.Namespace) -> int:
                         reward_epsilon=operator_reward_epsilon,
                         demote_streak=operator_demote_streak,
                         disable_streak=operator_disable_streak,
+                        preserve_validation_block_streak=True,
                     )
                 except Exception as exc:  # noqa: BLE001
                     disable_operator_stats_for_run(
@@ -5158,6 +5162,7 @@ def run_loop(args: argparse.Namespace) -> int:
                         reward_epsilon=operator_reward_epsilon,
                         demote_streak=operator_demote_streak,
                         disable_streak=operator_disable_streak,
+                        preserve_validation_block_streak=True,
                     )
                 except Exception as exc:  # noqa: BLE001
                     disable_operator_stats_for_run(
