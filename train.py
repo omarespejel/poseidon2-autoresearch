@@ -14,6 +14,7 @@ import ast
 import datetime as dt
 import difflib
 import hashlib
+import io
 import json
 import math
 import os
@@ -26,6 +27,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tokenize as py_tokenize
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -156,9 +158,76 @@ PROMPT_INJECTION_MARKERS = (
 )
 
 
-def looks_like_comment_line(line: str) -> bool:
+def comment_prefixes_for_language(language: str) -> tuple[str, ...]:
+    lang = language.strip().lower()
+    if lang == "python":
+        return ("#",)
+    prefixes = ["#", "//", "/*"]
+    if lang in {"cairo", "noir"}:
+        prefixes.append("--")
+    return tuple(prefixes)
+
+
+def inline_comment_markers_for_language(language: str) -> tuple[str, ...]:
+    lang = language.strip().lower()
+    if lang == "python":
+        return ("#",)
+    markers = ["#", "//"]
+    if lang in {"cairo", "noir"}:
+        markers.append("--")
+    return tuple(markers)
+
+
+def looks_like_comment_line(line: str, *, language: str = "") -> bool:
     stripped = line.lstrip()
-    return stripped.startswith(("#", "//", "/*", "*", "--"))
+    return stripped.startswith(comment_prefixes_for_language(language))
+
+
+def comment_span_in_line(line: str, *, language: str) -> tuple[int, str] | None:
+    stripped = line.lstrip()
+    offset = len(line) - len(stripped)
+    for prefix in comment_prefixes_for_language(language):
+        if stripped.startswith(prefix):
+            return offset, stripped
+    for marker in inline_comment_markers_for_language(language):
+        idx = line.find(marker)
+        if idx >= 0:
+            return idx, line[idx:]
+    return None
+
+
+def sanitize_python_source_for_prompt(source_code: str) -> tuple[str, int, int, bool]:
+    try:
+        tokens = list(py_tokenize.generate_tokens(io.StringIO(source_code).readline))
+    except (SyntaxError, IndentationError, py_tokenize.TokenError):
+        return source_code, 0, 0, False
+
+    removed_lines = 0
+    filtered_strings = 0
+    rewritten: list[py_tokenize.TokenInfo] = []
+    for token in tokens:
+        lowered = token.string.lower()
+        if token.type == py_tokenize.COMMENT and any(marker in lowered for marker in PROMPT_INJECTION_MARKERS):
+            removed_lines += 1
+            rewritten.append(token._replace(string="# [filtered_prompt_comment]"))
+            continue
+        if token.type == py_tokenize.STRING and any(marker in lowered for marker in PROMPT_INJECTION_MARKERS):
+            filtered_strings += 1
+            rewritten.append(token._replace(string=repr("[filtered_prompt_string]")))
+            continue
+        rewritten.append(token)
+
+    return py_tokenize.untokenize(rewritten), removed_lines, filtered_strings, True
+
+
+def resolve_prompt_max_chars(value: Any, *, default: int = 120000) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    if parsed <= 0:
+        return 0
+    return max(1024, parsed)
 
 
 def sanitize_source_for_prompt(
@@ -166,22 +235,31 @@ def sanitize_source_for_prompt(
     *,
     sanitize_comments: bool,
     max_chars: int,
+    language: str = "",
 ) -> tuple[str, dict[str, Any]]:
     text = source_code
     removed_lines = 0
+    filtered_strings = 0
     total_lines = len(source_code.splitlines())
+    language_norm = language.strip().lower()
+    used_python_tokenizer = False
 
     if sanitize_comments:
-        kept: list[str] = []
-        for line in source_code.splitlines():
-            lowered = line.lower()
-            if looks_like_comment_line(line) and any(marker in lowered for marker in PROMPT_INJECTION_MARKERS):
-                removed_lines += 1
-                continue
-            kept.append(line)
-        text = "\n".join(kept)
-        if source_code.endswith("\n"):
-            text += "\n"
+        if language_norm == "python":
+            text, removed_lines, filtered_strings, used_python_tokenizer = sanitize_python_source_for_prompt(source_code)
+        if not used_python_tokenizer:
+            kept: list[str] = []
+            for line in source_code.splitlines():
+                span = comment_span_in_line(line, language=language_norm)
+                if span is not None and any(marker in span[1].lower() for marker in PROMPT_INJECTION_MARKERS):
+                    removed_lines += 1
+                    if span[0] > 0:
+                        kept.append(line[: span[0]].rstrip())
+                    continue
+                kept.append(line)
+            text = "\n".join(kept)
+            if source_code.endswith("\n"):
+                text += "\n"
 
     truncated = False
     if max_chars > 0 and len(text) > max_chars:
@@ -191,7 +269,10 @@ def sanitize_source_for_prompt(
     diagnostics = {
         "sanitize_comments": sanitize_comments,
         "removed_lines": removed_lines,
+        "filtered_strings": filtered_strings,
         "total_lines": total_lines,
+        "language": language_norm,
+        "used_python_tokenizer": used_python_tokenizer,
         "max_chars": max_chars,
         "truncated": truncated,
         "chars_after": len(text),
@@ -4891,11 +4972,9 @@ def run_loop(args: argparse.Namespace) -> int:
         language = "Source"
     language_norm = language.strip().lower()
     require_metric_series_for_stats = bool(target.get("require_metric_series_for_stats", False))
-    try:
-        prompt_max_chars_raw = int(target.get("prompt_max_chars", os.getenv("AUTORESEARCH_PROMPT_MAX_CHARS", "120000")))
-    except (TypeError, ValueError):
-        prompt_max_chars_raw = 120000
-    prompt_max_chars = max(1024, prompt_max_chars_raw)
+    prompt_max_chars = resolve_prompt_max_chars(
+        target.get("prompt_max_chars", os.getenv("AUTORESEARCH_PROMPT_MAX_CHARS", "120000"))
+    )
     prompt_sanitize_comments = parse_flag_bool(
         target.get("prompt_sanitize_comments", True),
         default=True,
@@ -5522,6 +5601,7 @@ def run_loop(args: argparse.Namespace) -> int:
                 current_source,
                 sanitize_comments=prompt_sanitize_comments,
                 max_chars=prompt_max_chars,
+                language=language_norm,
             )
             diagnostics["prompt_source"] = prompt_source_diagnostics
             prompt = build_prompt(

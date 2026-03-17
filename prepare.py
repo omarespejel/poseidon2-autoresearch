@@ -80,13 +80,15 @@ def parse_sandbox_prefix(value: Any) -> list[str]:
     token = str(value).strip()
     if not token:
         return []
-    return [part for part in shlex.split(token) if part]
+    try:
+        return [part for part in shlex.split(token) if part]
+    except ValueError as exc:
+        raise ValueError(f"Invalid sandbox_prefix value {token!r}: {exc}") from exc
 
 
 def sandbox_settings_for_target(target: dict[str, Any]) -> tuple[list[str], bool]:
-    target_prefix = parse_sandbox_prefix(target.get("sandbox_prefix"))
-    if target_prefix:
-        prefix = target_prefix
+    if "sandbox_prefix" in target:
+        prefix = parse_sandbox_prefix(target.get("sandbox_prefix"))
     else:
         prefix = parse_sandbox_prefix(os.getenv("AUTORESEARCH_SANDBOX_PREFIX", ""))
     require = bool(target.get("require_sandbox", env_bool("AUTORESEARCH_REQUIRE_SANDBOX", False)))
@@ -132,27 +134,43 @@ def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(text, encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def load_provenance_state() -> dict[str, Any]:
+    if not PROVENANCE_STATE_FILE.exists():
+        return {}
+    try:
+        loaded = json.loads(PROVENANCE_STATE_FILE.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ToolError(f"Corrupt provenance state file: {PROVENANCE_STATE_FILE}") from exc
+    if not isinstance(loaded, dict):
+        raise ToolError(f"Invalid provenance state payload: {PROVENANCE_STATE_FILE}")
+    return loaded
+
+
 def append_provenance_event(event_type: str, payload: dict[str, Any]) -> None:
     PROVENANCE_FILE.parent.mkdir(parents=True, exist_ok=True)
     PROVENANCE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    state_lock_path = PROVENANCE_STATE_FILE.with_suffix(PROVENANCE_STATE_FILE.suffix + ".lock")
+    provenance_lock_path = PROVENANCE_FILE.with_suffix(PROVENANCE_FILE.suffix + ".lock")
 
-    with file_lock(state_lock_path):
-        state: dict[str, Any] = {}
-        if PROVENANCE_STATE_FILE.exists():
-            try:
-                loaded = json.loads(PROVENANCE_STATE_FILE.read_text(encoding="utf-8"))
-                if isinstance(loaded, dict):
-                    state = loaded
-            except json.JSONDecodeError:
-                state = {}
-
-        prev_hash = str(state.get("head", ""))
+    with file_lock(provenance_lock_path):
+        state = load_provenance_state()
+        prev_hash_raw = state.get("head")
+        if prev_hash_raw is not None and not isinstance(prev_hash_raw, str):
+            raise ToolError(f"Invalid provenance head in state file: {PROVENANCE_STATE_FILE}")
+        prev_hash = prev_hash_raw or None
         seq = int(state.get("seq", 0)) + 1
+        timestamp = now_iso()
         payload_hash = sha256_text(stable_json(payload))
         node_material = stable_json(
             {
                 "seq": seq,
+                "timestamp": timestamp,
                 "event_type": event_type,
                 "prev_hash": prev_hash,
                 "payload_hash": payload_hash,
@@ -161,26 +179,27 @@ def append_provenance_event(event_type: str, payload: dict[str, Any]) -> None:
         node_hash = sha256_text(node_material)
         record = {
             "seq": seq,
-            "timestamp": now_iso(),
+            "timestamp": timestamp,
             "event_type": event_type,
-            "prev_hash": prev_hash or None,
+            "prev_hash": prev_hash,
+            "payload": payload,
             "payload_hash": payload_hash,
             "node_hash": node_hash,
         }
         with PROVENANCE_FILE.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record, sort_keys=True) + "\n")
-        PROVENANCE_STATE_FILE.write_text(
+            f.write(stable_json(record) + "\n")
+        atomic_write_text(
+            PROVENANCE_STATE_FILE,
             json.dumps(
                 {
                     "seq": seq,
                     "head": node_hash,
-                    "updated_at": now_iso(),
+                    "updated_at": timestamp,
                 },
                 indent=2,
                 sort_keys=True,
             )
             + "\n",
-            encoding="utf-8",
         )
 
 
@@ -233,7 +252,11 @@ def run_cmd(
 ) -> CommandResult:
     cpu_affinity = os.getenv("AUTORESEARCH_CPU_AFFINITY", "").strip()
     nice_level = os.getenv("AUTORESEARCH_NICE", "").strip()
-    sandbox = list(sandbox_prefix or parse_sandbox_prefix(os.getenv("AUTORESEARCH_SANDBOX_PREFIX", "")))
+    sandbox = (
+        list(sandbox_prefix)
+        if sandbox_prefix is not None
+        else parse_sandbox_prefix(os.getenv("AUTORESEARCH_SANDBOX_PREFIX", ""))
+    )
     if require_sandbox is None:
         require_sandbox = env_bool("AUTORESEARCH_REQUIRE_SANDBOX", False)
 
@@ -302,14 +325,9 @@ def ensure_outputs() -> None:
     with file_lock(log_lock):
         if not LOG_FILE.exists():
             LOG_FILE.write_text("")
-    provenance_lock = PROVENANCE_FILE.with_suffix(PROVENANCE_FILE.suffix + ".lock")
-    with file_lock(provenance_lock):
-        if not PROVENANCE_FILE.exists():
-            PROVENANCE_FILE.write_text("")
 
 
 def append_log(payload: dict[str, Any]) -> None:
-    ensure_outputs()
     log_lock = LOG_FILE.with_suffix(LOG_FILE.suffix + ".lock")
     with file_lock(log_lock):
         with LOG_FILE.open("a", encoding="utf-8") as f:
@@ -356,9 +374,12 @@ def append_result_row(
     execute_s: float,
     notes: str,
 ) -> None:
-    ensure_outputs()
     results_lock = RESULTS_FILE.with_suffix(RESULTS_FILE.suffix + ".lock")
     with file_lock(results_lock):
+        if not RESULTS_FILE.exists():
+            RESULTS_FILE.write_text(
+                "timestamp\ttarget\titeration\tstatus\tmetric_name\tmetric_value\tbest_value\tdelta\tcheck_s\tinfo_or_bench_s\texecute_s\tnotes\n"
+            )
         prev_best = best_metric_for_target(target, higher_is_better=higher_is_better)
         value_s = ""
         best_s = ""
@@ -395,13 +416,15 @@ def append_result_row(
             f"{execute_s:.4f}",
             sanitize_notes(notes),
         ]
+        row_tsv = "\t".join(row)
 
         with RESULTS_FILE.open("a", encoding="utf-8") as f:
-            f.write("\t".join(row) + "\n")
+            f.write(row_tsv + "\n")
 
     append_provenance_event(
         "result_row",
         {
+            "row_tsv": row_tsv,
             "target": target,
             "iteration": iteration,
             "status": status,
