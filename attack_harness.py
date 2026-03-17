@@ -43,6 +43,43 @@ def clamp_float(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
 
 
+def is_prime(value: int) -> bool:
+    if value < 2:
+        return False
+
+    small_primes = (2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37)
+    for prime in small_primes:
+        if value == prime:
+            return True
+        if value % prime == 0:
+            return False
+
+    d = value - 1
+    s = 0
+    while d % 2 == 0:
+        s += 1
+        d //= 2
+
+    if value.bit_length() <= 64:
+        bases = (2, 325, 9375, 28178, 450775, 9780504, 1795265022)
+    else:
+        bases = small_primes
+
+    for base in bases:
+        if base % value == 0:
+            continue
+        x = pow(base, d, value)
+        if x in (1, value - 1):
+            continue
+        for _ in range(s - 1):
+            x = pow(x, 2, value)
+            if x == value - 1:
+                break
+        else:
+            return False
+    return True
+
+
 def deep_merge_dict(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in base.items():
@@ -218,6 +255,8 @@ def build_spec(config: dict[str, Any], *, mode: str) -> Poseidon2Spec:
         mode_scale = 2.0
 
     modulus = clamp_int(parse_int(poseidon2.get("field_modulus"), 2130706433), 1_000_003, (1 << 521) - 1)
+    if not is_prime(modulus):
+        raise ValueError(f"field_modulus must be prime (got {modulus})")
     width = clamp_int(parse_int(poseidon2.get("width"), 3), 2, 16)
     full_rounds = clamp_int(parse_int(poseidon2.get("full_rounds"), 8), 2, 32)
     if full_rounds % 2 != 0:
@@ -704,7 +743,7 @@ def score(
         "attack_score": attack_score_signal,
         "attack_score_signal": attack_score_signal,
         "attack_score_verified": attack_score_verified,
-        "attack_found": 1.0 if heuristic_found else 0.0,
+        "attack_found": 1.0 if verified_found else 0.0,
         "heuristic_found": 1.0 if heuristic_found else 0.0,
         "verified_found": 1.0 if verified_found else 0.0,
         "best_attack_complexity_bits": min(diff_bits, pre_bits, coll_bits),

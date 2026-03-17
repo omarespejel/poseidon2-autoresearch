@@ -85,6 +85,11 @@ class AttackHarnessTests(unittest.TestCase):
         self.assertEqual(default_spec.width, malformed_spec.width)
         self.assertEqual(default_spec.partial_rounds, malformed_spec.partial_rounds)
 
+        composite_modulus_cfg = tiny_config()
+        composite_modulus_cfg["poseidon2"]["field_modulus"] = 1_000_005
+        with self.assertRaises(ValueError):
+            attack_harness.build_spec(composite_modulus_cfg, mode="fast")
+
         cfg = tiny_config()
         cfg["search"]["scale_rounds_in_full_mode"] = 1
         fast_spec = attack_harness.build_spec(cfg, mode="fast")

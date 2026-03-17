@@ -878,6 +878,7 @@ def json_heuristic_candidate(
     source: str,
     iteration: int,
     source_path: Path,
+    target_config: dict[str, Any] | None = None,
 ) -> tuple[str, str, bool]:
     path = str(source_path).replace("\\", "/").lower()
     if not path.endswith("config/track_b_attack_config.json"):
@@ -890,12 +891,38 @@ def json_heuristic_candidate(
     if not isinstance(payload, dict):
         return source, "json_trackb_invalid_root", False
 
-    search = payload.get("search")
-    if not isinstance(search, dict):
-        return source, "json_trackb_missing_search", False
-
     def clone_obj() -> dict[str, Any]:
         return json.loads(json.dumps(payload))
+
+    def target_profile_name(obj: dict[str, Any]) -> str:
+        benchmark_command = None
+        if isinstance(target_config, dict):
+            benchmark_command = target_config.get("benchmark_command")
+            if isinstance(benchmark_command, list):
+                for idx, token in enumerate(benchmark_command[:-1]):
+                    if token == "--profile":
+                        candidate = benchmark_command[idx + 1]
+                        if isinstance(candidate, str) and candidate.strip():
+                            return candidate.strip()
+        active_profile = obj.get("active_profile")
+        if isinstance(active_profile, str) and active_profile.strip():
+            return active_profile.strip()
+        return ""
+
+    def resolve_section(obj: dict[str, Any], section_name: str) -> dict[str, Any] | None:
+        profile_name = target_profile_name(obj)
+        if profile_name:
+            profiles = obj.get("challenge_profiles")
+            if isinstance(profiles, dict):
+                profile_payload = profiles.get(profile_name)
+                if isinstance(profile_payload, dict):
+                    section = profile_payload.get(section_name)
+                    if isinstance(section, dict):
+                        return section
+        section = obj.get(section_name)
+        if isinstance(section, dict):
+            return section
+        return None
 
     def apply_delta(
         obj: dict[str, Any],
@@ -906,8 +933,8 @@ def json_heuristic_candidate(
         lo: int,
         hi: int,
     ) -> bool:
-        section = obj.get(section_name)
-        if not isinstance(section, dict):
+        section = resolve_section(obj, section_name)
+        if section is None:
             return False
         try:
             current = int(section.get(key))
@@ -920,8 +947,8 @@ def json_heuristic_candidate(
         return True
 
     def total_rounds(obj: dict[str, Any]) -> int:
-        poseidon_cfg = obj.get("poseidon2")
-        if not isinstance(poseidon_cfg, dict):
+        poseidon_cfg = resolve_section(obj, "poseidon2")
+        if poseidon_cfg is None:
             return 21
         full_rounds = max(2, int(poseidon_cfg.get("full_rounds", 8)))
         if full_rounds % 2 != 0:
@@ -930,8 +957,8 @@ def json_heuristic_candidate(
         return full_rounds + partial_rounds
 
     def apply_split_round(obj: dict[str, Any], delta: int) -> bool:
-        analysis = obj.get("analysis")
-        if not isinstance(analysis, dict):
+        analysis = resolve_section(obj, "analysis")
+        if analysis is None:
             return False
         try:
             current = int(analysis.get("split_round"))
@@ -942,28 +969,6 @@ def json_heuristic_candidate(
         if updated == current:
             return False
         analysis["split_round"] = updated
-        return True
-
-    def apply_float_delta(
-        obj: dict[str, Any],
-        *,
-        section_name: str,
-        key: str,
-        delta: float,
-        lo: float,
-        hi: float,
-    ) -> bool:
-        section = obj.get(section_name)
-        if not isinstance(section, dict):
-            return False
-        try:
-            current = float(section.get(key))
-        except (TypeError, ValueError):
-            return False
-        updated = max(lo, min(hi, current + delta))
-        if abs(updated - current) < 1e-12:
-            return False
-        section[key] = round(updated, 6)
         return True
 
     def op_search(key: str, delta: int, lo: int, hi: int) -> Any:
@@ -980,16 +985,6 @@ def json_heuristic_candidate(
         return lambda obj: apply_delta(
             obj,
             section_name="analysis",
-            key=key,
-            delta=delta,
-            lo=lo,
-            hi=hi,
-        )
-
-    def op_objective_float(key: str, delta: float, lo: float, hi: float) -> Any:
-        return lambda obj: apply_float_delta(
-            obj,
-            section_name="objective",
             key=key,
             delta=delta,
             lo=lo,
@@ -1019,10 +1014,6 @@ def json_heuristic_candidate(
         ("json_trackb_middle_key_bits_down", op_analysis("middle_key_bits", -1, 6, 40)),
         ("json_trackb_truncated_bits_up", op_analysis("truncated_bits", +1, 8, 40)),
         ("json_trackb_truncated_bits_down", op_analysis("truncated_bits", -1, 8, 40)),
-        ("json_trackb_verified_bonus_up", op_objective_float("verified_found_bonus", +0.25, 0.0, 20.0)),
-        ("json_trackb_verified_bonus_down", op_objective_float("verified_found_bonus", -0.25, 0.0, 20.0)),
-        ("json_trackb_threshold_up", op_objective_float("attack_found_threshold_bits", +0.25, 1.0, 64.0)),
-        ("json_trackb_threshold_down", op_objective_float("attack_found_threshold_bits", -0.25, 1.0, 64.0)),
         # Backward-compatible operators for earlier config schema.
         ("json_trackb_delta_candidates_up", op_search("delta_candidates", +8, 4, 4096)),
         ("json_trackb_delta_candidates_down", op_search("delta_candidates", -8, 4, 4096)),
@@ -1327,6 +1318,7 @@ def heuristic_candidate(
             source,
             iteration,
             source_path,
+            target_config=target_config,
         )
         if changed:
             return json_candidate, mutation, True
