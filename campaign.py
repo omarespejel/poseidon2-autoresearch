@@ -14,6 +14,7 @@ import datetime as dt
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -216,6 +217,62 @@ def count_accepts(rows: list[dict[str, str]], target: str) -> int:
     return n
 
 
+def extract_mutation_from_note_token(token: str) -> str:
+    text = str(token or "").strip()
+    if not text:
+        return "unknown"
+    prefixes = ["python_", "rust_", "json_", "openai_patch", "fallback_", "heuristic_"]
+    hits = [text.find(prefix) for prefix in prefixes if text.find(prefix) >= 0]
+    if hits:
+        start = min(hits)
+        text = text[start:]
+    elif ":" in text:
+        text = text.split(":")[-1].strip()
+    text = re.sub(r":no_change$", "", text).strip()
+    return text or "unknown"
+
+
+def summarize_validation_blocks(rows: list[dict[str, str]]) -> dict[str, Any]:
+    total = 0
+    by_mutation: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        notes = str(row.get("notes", "")).strip()
+        if not notes:
+            continue
+        token = notes.split(";", 1)[0].strip()
+        if not token.startswith("rejected_validation_"):
+            continue
+        total += 1
+        mutation = extract_mutation_from_note_token(token)
+        entry = by_mutation.setdefault(
+            mutation,
+            {
+                "mutation": mutation,
+                "count": 0,
+                "targets": set(),
+            },
+        )
+        entry["count"] = int(entry.get("count", 0)) + 1
+        target = str(row.get("target", "")).strip()
+        if target:
+            entry_targets = entry.get("targets")
+            if isinstance(entry_targets, set):
+                entry_targets.add(target)
+
+    rows_out: list[dict[str, Any]] = []
+    for item in by_mutation.values():
+        targets = sorted(str(v) for v in (item.get("targets") or set()))
+        rows_out.append(
+            {
+                "mutation": str(item.get("mutation", "unknown")),
+                "count": int(item.get("count", 0)),
+                "targets": targets,
+            }
+        )
+    rows_out.sort(key=lambda item: (-int(item["count"]), str(item["mutation"])))
+    return {"total": total, "rows": rows_out}
+
+
 def add_debug_flags(argv: list[str], args: argparse.Namespace) -> list[str]:
     out = list(argv)
     if args.verbose > 0:
@@ -279,6 +336,7 @@ def write_report(
     synthesis_cook: bool,
 ) -> None:
     latest = summarize(rows)
+    validation_blocks = summarize_validation_blocks(rows)
 
     lines: list[str] = []
     lines.append("# AutoPoseidon Campaign Report")
@@ -315,6 +373,27 @@ def write_report(
                 notes=row.get("notes", ""),
             )
         )
+
+    lines.append("")
+    lines.append("## Validation Blocks")
+    lines.append("")
+    lines.append(
+        f"- Total rejected after primary acceptance checks due to validation gate: `{validation_blocks['total']}`"
+    )
+    validation_rows = list(validation_blocks.get("rows", []))
+    if validation_rows:
+        lines.append("")
+        lines.append("| mutation | blocked_count | targets |")
+        lines.append("|---|---:|---|")
+        for item in validation_rows:
+            targets = ", ".join(item.get("targets", [])) or "n/a"
+            lines.append(
+                "| {mutation} | {count} | {targets} |".format(
+                    mutation=item.get("mutation", "unknown"),
+                    count=item.get("count", 0),
+                    targets=targets,
+                )
+            )
 
     lines.append("")
     lines.append("## Artifacts")
