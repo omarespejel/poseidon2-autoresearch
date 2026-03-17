@@ -72,9 +72,13 @@ ALLOWED_TARGET_OVERRIDE_KEYS = {
     "population_max_entries",
     "population_recombine_prob",
     "population_recombine_max_lines",
+    "population_cross_target_replay",
+    "population_cross_target_min_accepted",
+    "population_cross_target_score_scale",
     "population_seed_enable",
     "population_seed_min_entries",
     "population_seed_max_candidates",
+    "operator_ucb_explore",
     "validation_targets",
     "validation_allow_drop_abs",
     "validation_allow_drop_rel",
@@ -91,6 +95,9 @@ DEFAULT_POPULATION_MEMORY_MAX_ENTRIES = 48
 DEFAULT_POPULATION_PARENT_SAMPLE_PROB = 0.35
 DEFAULT_POPULATION_RECOMBINE_PROB = 0.55
 DEFAULT_POPULATION_RECOMBINE_MAX_LINES = 120
+DEFAULT_POPULATION_CROSS_TARGET_REPLAY = False
+DEFAULT_POPULATION_CROSS_TARGET_MIN_ACCEPTED = 2
+DEFAULT_POPULATION_CROSS_TARGET_SCORE_SCALE = 0.35
 DEFAULT_POPULATION_SEED_ENABLE = True
 DEFAULT_POPULATION_SEED_MIN_ENTRIES = 8
 DEFAULT_POPULATION_SEED_MAX_CANDIDATES = 16
@@ -102,6 +109,7 @@ DEFAULT_OPERATOR_VALIDATION_BLOCK_PENALTY_BASE = 0.04
 DEFAULT_OPERATOR_VALIDATION_BLOCK_PENALTY_STEP = 0.02
 DEFAULT_OPERATOR_VALIDATION_BLOCK_PENALTY_MAX = 0.25
 DEFAULT_OPERATOR_VALIDATION_BLOCK_DISABLE_STREAK = 0
+DEFAULT_OPERATOR_UCB_EXPLORE = 0.0
 
 
 def configure_debug_environment(args: argparse.Namespace) -> None:
@@ -1323,6 +1331,7 @@ def python_heuristic_candidate(
     preferred_mutations: list[str] | None = None,
     mutation_memory: dict[str, Any] | None = None,
     operator_penalties: dict[str, float] | None = None,
+    operator_bonuses: dict[str, float] | None = None,
     target_name: str = "",
     rng: random.Random | None = None,
 ) -> tuple[str, str, bool]:
@@ -1463,7 +1472,9 @@ def python_heuristic_candidate(
                     attempt_count=int(item["attempts"]),
                 )
                 penalty = mutator_penalty_for_label(str(item["mutation"]), operator_penalties or {})
-                item["ucb_score"] = base_score - penalty
+                bonus = mutator_bonus_for_label(str(item["mutation"]), operator_bonuses or {})
+                item["operator_bonus"] = bonus
+                item["ucb_score"] = base_score + bonus - penalty
             candidates.sort(
                 key=lambda item: (
                     -float(item.get("ucb_score", 0.0)),
@@ -1477,6 +1488,7 @@ def python_heuristic_candidate(
             candidates.sort(
                 key=lambda item: (
                     mutator_penalty_for_label(str(item["mutation"]), operator_penalties or {}),
+                    -mutator_bonus_for_label(str(item["mutation"]), operator_bonuses or {}),
                     int(item["tier"]),
                     int(item["pref_class"]),
                     int(item["pref_rank"]),
@@ -1503,6 +1515,7 @@ def json_heuristic_candidate(
     preferred_mutations: list[str] | None = None,
     mutation_memory: dict[str, Any] | None = None,
     operator_penalties: dict[str, float] | None = None,
+    operator_bonuses: dict[str, float] | None = None,
     target_name: str = "",
     rng: random.Random | None = None,
 ) -> tuple[str, str, bool]:
@@ -1731,7 +1744,9 @@ def json_heuristic_candidate(
                 attempt_count=int(candidate_entry["attempts"]),
             )
             penalty = mutator_penalty_for_label(str(label), operator_penalties or {})
-            candidate_entry["ucb_score"] = base_score - penalty
+            bonus = mutator_bonus_for_label(str(label), operator_bonuses or {})
+            candidate_entry["operator_bonus"] = bonus
+            candidate_entry["ucb_score"] = base_score + bonus - penalty
         candidates.append(candidate_entry)
 
     if candidates:
@@ -1749,6 +1764,7 @@ def json_heuristic_candidate(
             candidates.sort(
                 key=lambda item: (
                     mutator_penalty_for_label(str(item["mutation"]), operator_penalties or {}),
+                    -mutator_bonus_for_label(str(item["mutation"]), operator_bonuses or {}),
                     int(item["pref_class"]),
                     int(item["pref_rank"]),
                     int(item["attempts"]),
@@ -1799,6 +1815,7 @@ def rust_heuristic_candidate(
     preferred_mutations: list[str] | None = None,
     mutation_memory: dict[str, Any] | None = None,
     operator_penalties: dict[str, float] | None = None,
+    operator_bonuses: dict[str, float] | None = None,
     target_name: str = "",
     rng: random.Random | None = None,
 ) -> tuple[str, str, bool]:
@@ -2002,7 +2019,9 @@ def rust_heuristic_candidate(
                     attempt_count=int(item["attempts"]),
                 )
                 penalty = mutator_penalty_for_label(str(item["mutation"]), operator_penalties or {})
-                item["ucb_score"] = base_score - penalty
+                bonus = mutator_bonus_for_label(str(item["mutation"]), operator_bonuses or {})
+                item["operator_bonus"] = bonus
+                item["ucb_score"] = base_score + bonus - penalty
             candidates.sort(
                 key=lambda item: (
                     -float(item.get("ucb_score", 0.0)),
@@ -2016,6 +2035,7 @@ def rust_heuristic_candidate(
             candidates.sort(
                 key=lambda item: (
                     mutator_penalty_for_label(str(item["mutation"]), operator_penalties or {}),
+                    -mutator_bonus_for_label(str(item["mutation"]), operator_bonuses or {}),
                     int(item["tier"]),
                     int(item["pref_class"]),
                     int(item["pref_rank"]),
@@ -2039,6 +2059,7 @@ def heuristic_candidate(
     preferred_mutations: list[str] | None = None,
     mutation_memory: dict[str, Any] | None = None,
     operator_penalties: dict[str, float] | None = None,
+    operator_bonuses: dict[str, float] | None = None,
     target_name: str = "",
     rng: random.Random | None = None,
 ) -> tuple[str, str, bool]:
@@ -2053,6 +2074,7 @@ def heuristic_candidate(
             preferred_mutations=preferred_mutations,
             mutation_memory=mutation_memory,
             operator_penalties=operator_penalties,
+            operator_bonuses=operator_bonuses,
             target_name=target_name,
             rng=rng,
         )
@@ -2069,6 +2091,7 @@ def heuristic_candidate(
             preferred_mutations=preferred_mutations,
             mutation_memory=mutation_memory,
             operator_penalties=operator_penalties,
+            operator_bonuses=operator_bonuses,
             target_name=target_name,
             rng=rng,
         )
@@ -2085,6 +2108,7 @@ def heuristic_candidate(
             preferred_mutations=preferred_mutations,
             mutation_memory=mutation_memory,
             operator_penalties=operator_penalties,
+            operator_bonuses=operator_bonuses,
             target_name=target_name,
             rng=rng,
         )
@@ -2776,6 +2800,9 @@ def select_population_parent(
     best_source: str,
     max_candidates: int = 8,
     rng: random.Random | None = None,
+    allow_cross_target_replay: bool = DEFAULT_POPULATION_CROSS_TARGET_REPLAY,
+    cross_target_min_accepted: int = DEFAULT_POPULATION_CROSS_TARGET_MIN_ACCEPTED,
+    cross_target_score_scale: float = DEFAULT_POPULATION_CROSS_TARGET_SCORE_SCALE,
 ) -> dict[str, Any] | None:
     if rng is None:
         raise ValueError("select_population_parent requires an explicit rng for reproducibility")
@@ -2790,7 +2817,9 @@ def select_population_parent(
     for raw in entries:
         if not isinstance(raw, dict):
             continue
-        if str(raw.get("target", "")) != target_name:
+        entry_target = str(raw.get("target", ""))
+        same_target = entry_target == target_name
+        if not same_target and not allow_cross_target_replay:
             continue
         if str(raw.get("language", "")).strip().lower() != language.strip().lower():
             continue
@@ -2810,15 +2839,26 @@ def select_population_parent(
         accepted_total = max(0, int(raw.get("accepted_total", 0)))
         rejected_total = max(0, int(raw.get("rejected_total", 0)))
         sampled_total = max(0, int(raw.get("sampled_total", 0)))
+        if not same_target and accepted_total < max(0, int(cross_target_min_accepted)):
+            continue
+        entry_higher_is_better = bool(raw.get("higher_is_better", higher_is_better))
+        if not same_target and entry_higher_is_better != bool(higher_is_better):
+            continue
+
         total = accepted_total + rejected_total
         success_rate = accepted_total / total if total > 0 else 0.0
         novelty = 1.0 / math.sqrt(float(sampled_total) + 1.0)
-        metric_rel = population_metric_component(
-            metric_value=metric_f,
-            higher_is_better=higher_is_better,
-            best_metric=best_metric,
-        )
-        selection_score = metric_rel + (0.20 * success_rate) + (0.10 * novelty)
+        metric_component = 0.0
+        if same_target:
+            metric_component = population_metric_component(
+                metric_value=metric_f,
+                higher_is_better=higher_is_better,
+                best_metric=best_metric,
+            )
+        else:
+            metric_component = float(cross_target_score_scale) * success_rate
+        target_bonus = 0.15 if same_target else 0.0
+        selection_score = metric_component + target_bonus + (0.20 * success_rate) + (0.10 * novelty)
         candidates.append((selection_score, raw))
 
     if not candidates:
@@ -2839,7 +2879,9 @@ def mark_population_entry_sampled(
     language: str,
     source_hash: str,
     timestamp: str,
+    entry_target: str | None = None,
 ) -> dict[str, Any]:
+    target_filter = str(entry_target).strip() if entry_target is not None else target_name
     lock_path = path.with_suffix(path.suffix + ".lock")
     with file_lock(lock_path):
         latest = load_population_memory(path)
@@ -2851,7 +2893,7 @@ def mark_population_entry_sampled(
             if not isinstance(raw, dict):
                 continue
             if (
-                str(raw.get("target", "")) == target_name
+                str(raw.get("target", "")) == target_filter
                 and str(raw.get("language", "")).strip().lower() == language.strip().lower()
                 and str(raw.get("source_sha256", "")) == source_hash
             ):
@@ -3653,6 +3695,21 @@ def mutator_penalty_for_label(label: str, penalties: dict[str, float]) -> float:
     return max(values)
 
 
+def mutator_bonus_for_label(label: str, bonuses: dict[str, float]) -> float:
+    direct = float(bonuses.get(label, 0.0))
+    if direct > 0.0:
+        return direct
+    if "+" not in label:
+        return 0.0
+    parts = [part.strip() for part in label.split("+") if part.strip()]
+    if not parts:
+        return 0.0
+    values = [float(bonuses.get(part, 0.0)) for part in parts]
+    if not values:
+        return 0.0
+    return max(values)
+
+
 def compute_operator_state(
     stats: dict[str, Any],
     *,
@@ -3731,6 +3788,47 @@ def compute_operator_state(
 
     candidate_rows.sort(key=lambda row: (float(row["avg_reward"]), -int(row["attempts"]), str(row["label"])), reverse=True)
     return disabled, penalties, candidate_rows
+
+
+def compute_operator_ucb_bonuses(
+    rows: list[dict[str, Any]],
+    *,
+    explore: float,
+    max_bonus: float = 0.20,
+) -> dict[str, float]:
+    if explore <= 0.0 or max_bonus <= 0.0:
+        return {}
+    if not rows:
+        return {}
+
+    total_attempts = sum(max(0, int(row.get("attempts", 0))) for row in rows)
+    denominator_log = math.log(max(2.0, float(total_attempts) + 2.0))
+    raw_scores: dict[str, float] = {}
+    for row in rows:
+        label = str(row.get("label", ""))
+        if not label or bool(row.get("disabled", False)):
+            continue
+        accepted = max(0.0, float(row.get("accepted", 0) or 0.0))
+        rejected = max(0.0, float(row.get("rejected", 0) or 0.0))
+        observations = accepted + rejected
+        posterior_mean = (accepted + 1.0) / (observations + 2.0)
+        exploration = float(explore) * math.sqrt(denominator_log / (observations + 1.0))
+        raw_scores[label] = posterior_mean + exploration
+
+    if not raw_scores:
+        return {}
+
+    lo = min(raw_scores.values())
+    hi = max(raw_scores.values())
+    if hi <= lo:
+        # No meaningful separation signal this round.
+        return {}
+
+    out: dict[str, float] = {}
+    for label, score in raw_scores.items():
+        normalized = (score - lo) / (hi - lo)
+        out[label] = max(0.0, min(float(max_bonus), float(max_bonus) * normalized))
+    return out
 
 
 def update_operator_stats(
@@ -5064,6 +5162,18 @@ def run_loop(args: argparse.Namespace) -> int:
         4,
         int(target.get("population_recombine_max_lines", args.population_recombine_max_lines)),
     )
+    population_cross_target_replay = parse_flag_bool(
+        target.get("population_cross_target_replay", args.population_cross_target_replay),
+        default=args.population_cross_target_replay,
+    )
+    population_cross_target_min_accepted = max(
+        0,
+        int(target.get("population_cross_target_min_accepted", args.population_cross_target_min_accepted)),
+    )
+    population_cross_target_score_scale = min(
+        1.0,
+        max(0.0, float(target.get("population_cross_target_score_scale", args.population_cross_target_score_scale))),
+    )
     population_seed_enable = bool(
         target.get(
             "population_seed_enable",
@@ -5150,6 +5260,7 @@ def run_loop(args: argparse.Namespace) -> int:
         )
         print(f"[train] Warning: {warning}", file=sys.stderr)
         feature_warnings.append(warning)
+    operator_ucb_explore = max(0.0, float(target.get("operator_ucb_explore", args.operator_ucb_explore)))
     if operator_stats_enabled:
         lock_path = operator_stats_path.with_suffix(operator_stats_path.suffix + ".lock")
         try:
@@ -5175,7 +5286,9 @@ def run_loop(args: argparse.Namespace) -> int:
             f"artifacts={args.artifacts} "
             f"git_checkpoint={git_checkpoint_mode} "
             f"population_memory={'on' if population_memory is not None else 'off'} "
-            f"operator_stats={'on' if operator_stats is not None else 'off'}"
+            f"operator_stats={'on' if operator_stats is not None else 'off'} "
+            f"cross_target_replay={'on' if population_cross_target_replay else 'off'} "
+            f"operator_ucb_explore={operator_ucb_explore:.2f}"
         ),
         level=1,
     )
@@ -5414,6 +5527,9 @@ def run_loop(args: argparse.Namespace) -> int:
                 "rng_seed": population_rng_seed,
                 "recombine_prob": population_recombine_prob,
                 "recombine_max_lines": population_recombine_max_lines,
+                "cross_target_replay": population_cross_target_replay,
+                "cross_target_min_accepted": population_cross_target_min_accepted,
+                "cross_target_score_scale": population_cross_target_score_scale,
                 "seed_enable": population_seed_enable,
                 "seed_min_entries": population_seed_min_entries,
                 "seed_max_candidates": population_seed_max_candidates,
@@ -5433,6 +5549,7 @@ def run_loop(args: argparse.Namespace) -> int:
                 "validation_block_penalty_step": operator_validation_block_penalty_step,
                 "validation_block_penalty_max": operator_validation_block_penalty_max,
                 "validation_block_disable_streak": operator_validation_block_disable_streak,
+                "ucb_explore": operator_ucb_explore,
             },
             "compute_budget": {
                 "max_iterations": max_iterations,
@@ -5454,6 +5571,7 @@ def run_loop(args: argparse.Namespace) -> int:
             "mutation_strategy": {
                 "schedule": str(target.get("mutation_schedule", "priority")),
                 "ucb_explore": float(target.get("mutation_ucb_explore", 0.75)),
+                "operator_ucb_explore": operator_ucb_explore,
             },
             "validation_gate": {
                 "targets": validation_targets,
@@ -5524,12 +5642,18 @@ def run_loop(args: argparse.Namespace) -> int:
                 best_metric=best_metric,
                 best_source=best_source,
                 rng=population_rng,
+                allow_cross_target_replay=population_cross_target_replay,
+                cross_target_min_accepted=population_cross_target_min_accepted,
+                cross_target_score_scale=population_cross_target_score_scale,
             )
             if isinstance(selected_parent, dict):
                 parent_source = selected_parent.get("source_code")
                 if isinstance(parent_source, str) and parent_source:
                     source_hash = str(selected_parent.get("source_sha256", ""))
+                    parent_target = str(selected_parent.get("target", args.target))
                     diagnostics["population_parent"] = {
+                        "target": parent_target,
+                        "cross_target": parent_target != args.target,
                         "source_sha256": source_hash[:12],
                         "metric_value": selected_parent.get("metric_value"),
                         "accepted_total": int(selected_parent.get("accepted_total", 0)),
@@ -5563,12 +5687,14 @@ def run_loop(args: argparse.Namespace) -> int:
                                 language=language_norm,
                                 source_hash=source_hash,
                                 timestamp=prepare.now_iso(),
+                                entry_target=parent_target,
                             )
                         except Exception as exc:  # noqa: BLE001
                             diagnostics["population_parent_mark_failed"] = str(exc)
         timed_blocked = {name for name, until in blocked_mutations_until.items() if until >= iteration}
         operator_disabled: set[str] = set()
         operator_penalties: dict[str, float] = {}
+        operator_bonuses: dict[str, float] = {}
         operator_rows: list[dict[str, Any]] = []
         if operator_stats is not None:
             operator_disabled, operator_penalties, operator_rows = compute_operator_state(
@@ -5600,6 +5726,14 @@ def run_loop(args: argparse.Namespace) -> int:
             if operator_penalties:
                 diagnostics["operator_penalties"] = {
                     key: round(float(value), 6) for key, value in list(operator_penalties.items())[:12]
+                }
+            operator_bonuses = compute_operator_ucb_bonuses(
+                operator_rows,
+                explore=operator_ucb_explore,
+            )
+            if operator_bonuses:
+                diagnostics["operator_ucb_bonuses"] = {
+                    key: round(float(value), 6) for key, value in list(operator_bonuses.items())[:12]
                 }
         active_blocked = set(timed_blocked) | set(operator_disabled)
         if active_blocked:
@@ -5659,6 +5793,7 @@ def run_loop(args: argparse.Namespace) -> int:
                     preferred_mutations=preferred_mutations,
                     mutation_memory=mutation_memory,
                     operator_penalties=operator_penalties,
+                    operator_bonuses=operator_bonuses,
                     target_name=args.target,
                 )
                 mutation = f"fallback_{mutation}"
@@ -5677,6 +5812,7 @@ def run_loop(args: argparse.Namespace) -> int:
                 preferred_mutations=preferred_mutations,
                 mutation_memory=mutation_memory,
                 operator_penalties=operator_penalties,
+                operator_bonuses=operator_bonuses,
                 target_name=args.target,
             )
 
@@ -5708,6 +5844,7 @@ def run_loop(args: argparse.Namespace) -> int:
                     preferred_mutations=preferred_mutations,
                     mutation_memory=mutation_memory,
                     operator_penalties=operator_penalties,
+                    operator_bonuses=operator_bonuses,
                     target_name=args.target,
                 )
 
@@ -5733,6 +5870,34 @@ def run_loop(args: argparse.Namespace) -> int:
 
         mutation_key = normalize_mutation_label(mutation) or mutation
         mutation_attempts[mutation_key] = mutation_attempts.get(mutation_key, 0) + 1
+        if mutation_memory is not None:
+            hist_accepted, hist_rejected, hist_scope = mutation_memory_counts(
+                mutation_memory,
+                mutation_key,
+                target_name=args.target,
+                language=language_norm,
+            )
+            scope_totals = mutation_memory_scope_totals(
+                mutation_memory,
+                target_name=args.target,
+                language=language_norm,
+            )
+            diagnostics["mutation_selection"] = {
+                "mutation": mutation_key,
+                "history_scope": hist_scope,
+                "history_accepted": hist_accepted,
+                "history_rejected": hist_rejected,
+                "history_total_observations": scope_totals.get(hist_scope, scope_totals.get("global", 0.0)),
+                "attempts_this_run": mutation_attempts.get(mutation_key, 0),
+                "operator_penalty": round(
+                    mutator_penalty_for_label(mutation_key, operator_penalties or {}),
+                    6,
+                ),
+                "operator_bonus": round(
+                    mutator_bonus_for_label(mutation_key, operator_bonuses or {}),
+                    6,
+                ),
+            }
         train_log(args, f"iter {iteration}: evaluating mutation={mutation_key}", level=2)
 
         signature_guard_ok, signature_guard_details = function_signature_guard(
@@ -6372,6 +6537,9 @@ def run_loop(args: argparse.Namespace) -> int:
                 "parent_sample_prob": population_parent_sample_prob,
                 "recombine_prob": population_recombine_prob,
                 "recombine_max_lines": population_recombine_max_lines,
+                "cross_target_replay": population_cross_target_replay,
+                "cross_target_min_accepted": population_cross_target_min_accepted,
+                "cross_target_score_scale": population_cross_target_score_scale,
                 "seed_enable": population_seed_enable,
                 "seed_min_entries": population_seed_min_entries,
                 "seed_max_candidates": population_seed_max_candidates,
@@ -6443,6 +6611,9 @@ def run_loop(args: argparse.Namespace) -> int:
                 "population_parent_sample_prob": population_parent_sample_prob,
                 "population_recombine_prob": population_recombine_prob,
                 "population_recombine_max_lines": population_recombine_max_lines,
+                "population_cross_target_replay": population_cross_target_replay,
+                "population_cross_target_min_accepted": population_cross_target_min_accepted,
+                "population_cross_target_score_scale": population_cross_target_score_scale,
                 "population_seed_enable": population_seed_enable,
                 "population_seed_min_entries": population_seed_min_entries,
                 "population_seed_max_candidates": population_seed_max_candidates,
@@ -6450,6 +6621,7 @@ def run_loop(args: argparse.Namespace) -> int:
                 "population_entries": len((population_memory or {}).get("entries", []))
                 if isinstance((population_memory or {}).get("entries"), list)
                 else 0,
+                "operator_ucb_explore": operator_ucb_explore,
                 "validation_targets": validation_targets,
                 "validation_baselines": validation_baselines,
                 "elapsed_seconds": elapsed_seconds,
@@ -6554,6 +6726,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Max line window for fallback population recombination splices",
     )
     parser.add_argument(
+        "--population-cross-target-replay",
+        action="store_true",
+        default=DEFAULT_POPULATION_CROSS_TARGET_REPLAY,
+        help="Allow parent sampling to replay high-signal candidates from other targets in the same language",
+    )
+    parser.add_argument(
+        "--population-cross-target-min-accepted",
+        type=int,
+        default=DEFAULT_POPULATION_CROSS_TARGET_MIN_ACCEPTED,
+        help="Minimum accepted count required before a cross-target parent can be replayed",
+    )
+    parser.add_argument(
+        "--population-cross-target-score-scale",
+        type=float,
+        default=DEFAULT_POPULATION_CROSS_TARGET_SCORE_SCALE,
+        help="How strongly cross-target success-rate contributes to parent ranking (0..1)",
+    )
+    parser.add_argument(
         "--population-seed-min-entries",
         type=int,
         default=DEFAULT_POPULATION_SEED_MIN_ENTRIES,
@@ -6605,6 +6795,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="No-signal streak before mutator is auto-disabled",
     )
     parser.add_argument(
+        "--operator-ucb-explore",
+        type=float,
+        default=DEFAULT_OPERATOR_UCB_EXPLORE,
+        help="Exploration strength for operator-level UCB bonus during mutation selection",
+    )
+    parser.add_argument(
         "--git-checkpoint-mode",
         choices=["off", "accepted", "all"],
         default="off",
@@ -6635,12 +6831,18 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--population-recombine-prob must be between 0 and 1")
     if args.population_recombine_max_lines < 4:
         parser.error("--population-recombine-max-lines must be >= 4")
+    if args.population_cross_target_min_accepted < 0:
+        parser.error("--population-cross-target-min-accepted must be >= 0")
+    if args.population_cross_target_score_scale < 0.0 or args.population_cross_target_score_scale > 1.0:
+        parser.error("--population-cross-target-score-scale must be between 0 and 1")
     if args.population_seed_min_entries < 1:
         parser.error("--population-seed-min-entries must be >= 1")
     if args.population_seed_max_candidates < 1:
         parser.error("--population-seed-max-candidates must be >= 1")
     if args.population_max_entries < 0:
         parser.error("--population-max-entries must be >= 0")
+    if args.operator_ucb_explore < 0.0:
+        parser.error("--operator-ucb-explore must be >= 0")
     return run_loop(args)
 
 

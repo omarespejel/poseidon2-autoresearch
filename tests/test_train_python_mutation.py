@@ -250,6 +250,49 @@ class PythonMutationSelectionTests(unittest.TestCase):
         score = train.mutator_penalty_for_label("python_trackb_a+python_trackb_b", penalties)
         self.assertAlmostEqual(score, 0.11, places=6)
 
+    def test_mutator_bonus_for_compound_uses_part_bonus(self) -> None:
+        bonuses = {"python_trackb_a": 0.02, "python_trackb_b": 0.09}
+        score = train.mutator_bonus_for_label("python_trackb_a+python_trackb_b", bonuses)
+        self.assertAlmostEqual(score, 0.09, places=6)
+
+    def test_compute_operator_ucb_bonuses_prefers_higher_signal_mutator(self) -> None:
+        rows = [
+            {
+                "label": "python_trackb_diff_multi_delta_prob_up",
+                "accepted": 6,
+                "rejected": 1,
+                "attempts": 7,
+                "disabled": False,
+            },
+            {
+                "label": "python_trackb_diff_multi_delta_prob_down",
+                "accepted": 0,
+                "rejected": 5,
+                "attempts": 5,
+                "disabled": False,
+            },
+        ]
+        bonuses = train.compute_operator_ucb_bonuses(rows, explore=0.25, max_bonus=0.2)
+        self.assertIn("python_trackb_diff_multi_delta_prob_up", bonuses)
+        self.assertIn("python_trackb_diff_multi_delta_prob_down", bonuses)
+        self.assertGreater(
+            bonuses["python_trackb_diff_multi_delta_prob_up"],
+            bonuses["python_trackb_diff_multi_delta_prob_down"],
+        )
+
+    def test_operator_bonus_can_prioritize_nonfirst_python_mutation(self) -> None:
+        source = harness_source()
+        candidate, mutation, changed = train.python_heuristic_candidate(
+            source,
+            1,
+            KERNEL_PATH,
+            target_config={"mutation_schedule": "priority"},
+            operator_bonuses={"python_trackb_diff_multi_delta_prob_down": 0.2},
+        )
+        self.assertTrue(changed)
+        self.assertNotEqual(candidate, source)
+        self.assertEqual(mutation, "python_trackb_diff_multi_delta_prob_down")
+
     def test_validation_block_streak_adds_operator_penalty(self) -> None:
         stats = {"version": 1, "targets": {}}
         for _ in range(2):
