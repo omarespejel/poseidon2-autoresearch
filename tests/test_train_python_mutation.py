@@ -333,6 +333,29 @@ def helper():
         self.assertEqual(mutation, "python_trackb_collision_lane_mix_tag")
         self.assertIn("& ((1 << bits) - 1)", candidate)
 
+    def test_priority_can_force_algorithmic_mutator_when_simple_ones_blocked(self) -> None:
+        source = harness_source()
+        blocked = {
+            "python_trackb_diff_multi_delta_prob_up",
+            "python_trackb_diff_multi_delta_prob_down",
+            "python_trackb_diff_cross_lane_prob_up",
+            "python_trackb_diff_cross_lane_prob_down",
+            "python_trackb_mitm_bucket_cap_up",
+            "python_trackb_mitm_bucket_cap_down",
+            "python_trackb_algebraic_fit_gain_up",
+            "python_trackb_algebraic_fit_gain_down",
+        }
+        candidate, mutation, changed = train.python_heuristic_candidate(
+            source,
+            1,
+            HARNESS_PATH,
+            blocked_mutations=blocked,
+            target_config={"mutation_schedule": "priority"},
+        )
+        self.assertTrue(changed)
+        self.assertNotEqual(candidate, source)
+        self.assertEqual(mutation, "python_trackb_diff_secondary_lane_structure")
+
     def test_mutation_language_inference_supports_python_prefix(self) -> None:
         language = train.infer_mutation_language(mutation="python_trackb_mitm_bucket_cap_up")
         self.assertEqual(language, "python")
