@@ -70,6 +70,9 @@ ALLOWED_TARGET_OVERRIDE_KEYS = {
     "population_max_entries",
     "population_recombine_prob",
     "population_recombine_max_lines",
+    "population_seed_enable",
+    "population_seed_min_entries",
+    "population_seed_max_candidates",
     "validation_targets",
     "validation_allow_drop_abs",
     "validation_allow_drop_rel",
@@ -86,6 +89,9 @@ DEFAULT_POPULATION_MEMORY_MAX_ENTRIES = 48
 DEFAULT_POPULATION_PARENT_SAMPLE_PROB = 0.35
 DEFAULT_POPULATION_RECOMBINE_PROB = 0.55
 DEFAULT_POPULATION_RECOMBINE_MAX_LINES = 120
+DEFAULT_POPULATION_SEED_ENABLE = True
+DEFAULT_POPULATION_SEED_MIN_ENTRIES = 8
+DEFAULT_POPULATION_SEED_MAX_CANDIDATES = 16
 DEFAULT_MUTATOR_STATS_FILE = ROOT / "work" / "mutator_stats.json"
 DEFAULT_OPERATOR_REWARD_EPSILON = 1e-12
 DEFAULT_OPERATOR_DEMOTE_STREAK = 6
@@ -2787,6 +2793,141 @@ def recombine_with_population_parent(
     return candidate, details
 
 
+def population_entries_count(memory: dict[str, Any] | None) -> int:
+    if not isinstance(memory, dict):
+        return 0
+    entries = memory.get("entries")
+    if not isinstance(entries, list):
+        return 0
+    return len(entries)
+
+
+def generate_population_seed_candidates(
+    *,
+    source: str,
+    source_path: Path,
+    language: str,
+    target_name: str,
+    target_config: dict[str, Any],
+    mutation_memory: dict[str, Any] | None,
+    max_candidates: int,
+) -> list[dict[str, str]]:
+    if max_candidates <= 0:
+        return []
+
+    cfg = dict(target_config)
+    # Bootstrap diversity from single-step operators first.
+    cfg["mutation_schedule"] = "priority"
+    cfg["compound_every"] = 0
+    cfg["compound_limit"] = 0
+
+    blocked: set[str] = set()
+    mutation_attempts: dict[str, int] = {}
+    out: list[dict[str, str]] = []
+    max_trials = max_candidates * 5
+
+    for iteration in range(1, max_trials + 1):
+        candidate, mutation, changed = heuristic_candidate(
+            source,
+            iteration,
+            language,
+            source_path,
+            blocked_mutations=blocked,
+            mutation_attempts=mutation_attempts,
+            target_config=cfg,
+            preferred_mutations=[],
+            mutation_memory=mutation_memory,
+            operator_penalties=None,
+            target_name=target_name,
+        )
+        mutation_key = normalize_mutation_label(mutation) or mutation
+        blocked.add(mutation_key)
+        if not changed or candidate == source:
+            continue
+        out.append({"mutation": mutation_key, "source_code": candidate})
+        if len(out) >= max_candidates:
+            break
+    return out
+
+
+def seed_population_memory_from_heuristics(
+    *,
+    population_memory_path: Path,
+    population_memory: dict[str, Any],
+    target_name: str,
+    language: str,
+    source_path: Path,
+    baseline_source: str,
+    baseline_metric: float,
+    higher_is_better: bool,
+    target_config: dict[str, Any],
+    mutation_memory: dict[str, Any] | None,
+    min_entries: int,
+    max_candidates: int,
+    max_entries: int,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    initial_count = population_entries_count(population_memory)
+    if initial_count >= max(1, min_entries):
+        return population_memory, {
+            "status": "skipped",
+            "reason": "already_sufficient",
+            "initial_entries": initial_count,
+            "final_entries": initial_count,
+            "seeded": 0,
+            "attempted": 0,
+            "mutations": [],
+        }
+
+    candidates = generate_population_seed_candidates(
+        source=baseline_source,
+        source_path=source_path,
+        language=language,
+        target_name=target_name,
+        target_config=target_config,
+        mutation_memory=mutation_memory,
+        max_candidates=max_candidates,
+    )
+
+    seeded = 0
+    seeded_mutations: list[str] = []
+    for item in candidates:
+        mutation_label = str(item.get("mutation", "population_seed"))
+        candidate_source = str(item.get("source_code", ""))
+        if not candidate_source or candidate_source == baseline_source:
+            continue
+        before = population_entries_count(population_memory)
+        population_memory, _ = update_and_save_population_memory(
+            population_memory_path,
+            population_memory,
+            target_name=target_name,
+            language=language,
+            source_code=candidate_source,
+            metric_value=baseline_metric,
+            higher_is_better=higher_is_better,
+            accepted=False,
+            timestamp=prepare.now_iso(),
+            notes=f"population_seed:{mutation_label}",
+            max_entries=max_entries,
+        )
+        after = population_entries_count(population_memory)
+        if after > before:
+            seeded += 1
+            seeded_mutations.append(mutation_label)
+        if after >= max(1, min_entries):
+            break
+
+    final_count = population_entries_count(population_memory)
+    status = "seeded" if seeded > 0 else "unchanged"
+    return population_memory, {
+        "status": status,
+        "initial_entries": initial_count,
+        "final_entries": final_count,
+        "seeded": seeded,
+        "attempted": len(candidates),
+        "mutations": seeded_mutations[:12],
+    }
+
+
 def should_record_population_candidate(*, accepted: bool, notes: str) -> bool:
     if accepted:
         return True
@@ -4435,6 +4576,20 @@ def run_loop(args: argparse.Namespace) -> int:
         4,
         int(target.get("population_recombine_max_lines", args.population_recombine_max_lines)),
     )
+    population_seed_enable = bool(
+        target.get(
+            "population_seed_enable",
+            (not args.disable_population_seed) and DEFAULT_POPULATION_SEED_ENABLE,
+        )
+    ) and (not args.disable_population_seed)
+    population_seed_min_entries = max(
+        1,
+        int(target.get("population_seed_min_entries", args.population_seed_min_entries)),
+    )
+    population_seed_max_candidates = max(
+        1,
+        int(target.get("population_seed_max_candidates", args.population_seed_max_candidates)),
+    )
     population_max_entries = max(0, int(target.get("population_max_entries", args.population_max_entries)))
     if (not population_memory_enabled) and (not args.disable_population_memory) and python_target_supported:
         warning = (
@@ -4657,6 +4812,13 @@ def run_loop(args: argparse.Namespace) -> int:
         )
         return 1
 
+    population_seed_report: dict[str, Any] = {
+        "enabled": False,
+        "status": "disabled",
+        "initial_entries": population_entries_count(population_memory),
+        "final_entries": population_entries_count(population_memory),
+        "seeded": 0,
+    }
     if population_memory is not None:
         try:
             population_memory, _ = update_and_save_population_memory(
@@ -4672,12 +4834,49 @@ def run_loop(args: argparse.Namespace) -> int:
                 notes="baseline_seed",
                 max_entries=population_max_entries,
             )
+            population_seed_report["initial_entries"] = population_entries_count(population_memory)
+            if population_seed_enable:
+                population_memory, population_seed_report = seed_population_memory_from_heuristics(
+                    population_memory_path=population_memory_path,
+                    population_memory=population_memory,
+                    target_name=args.target,
+                    language=language_norm,
+                    source_path=source_path,
+                    baseline_source=best_source,
+                    baseline_metric=best_metric,
+                    higher_is_better=bool(target["higher_is_better"]),
+                    target_config=target,
+                    mutation_memory=mutation_memory,
+                    min_entries=population_seed_min_entries,
+                    max_candidates=population_seed_max_candidates,
+                    max_entries=population_max_entries,
+                )
+                population_seed_report["enabled"] = True
+                train_log(
+                    args,
+                    (
+                        "population seeding "
+                        f"status={population_seed_report.get('status')} "
+                        f"seeded={population_seed_report.get('seeded', 0)} "
+                        f"entries={population_seed_report.get('initial_entries', 0)}"
+                        f"->{population_seed_report.get('final_entries', 0)}"
+                    ),
+                    level=1,
+                )
         except Exception as exc:  # noqa: BLE001
             print(
                 f"[train] Warning: population baseline seed failed ({exc}); continuing without population memory",
                 file=sys.stderr,
             )
             population_memory = None
+            population_seed_report = {
+                "enabled": population_seed_enable,
+                "status": "failed",
+                "reason": str(exc),
+                "initial_entries": 0,
+                "final_entries": 0,
+                "seeded": 0,
+            }
 
     prepare.append_log(
         {
@@ -4704,6 +4903,10 @@ def run_loop(args: argparse.Namespace) -> int:
                 "rng_seed": population_rng_seed,
                 "recombine_prob": population_recombine_prob,
                 "recombine_max_lines": population_recombine_max_lines,
+                "seed_enable": population_seed_enable,
+                "seed_min_entries": population_seed_min_entries,
+                "seed_max_candidates": population_seed_max_candidates,
+                "seed_report": population_seed_report,
                 "max_entries": population_max_entries,
                 "known_entries": len((population_memory or {}).get("entries", []))
                 if isinstance((population_memory or {}).get("entries"), list)
@@ -5568,6 +5771,10 @@ def run_loop(args: argparse.Namespace) -> int:
                 "parent_sample_prob": population_parent_sample_prob,
                 "recombine_prob": population_recombine_prob,
                 "recombine_max_lines": population_recombine_max_lines,
+                "seed_enable": population_seed_enable,
+                "seed_min_entries": population_seed_min_entries,
+                "seed_max_candidates": population_seed_max_candidates,
+                "seed_report": population_seed_report,
                 "max_entries": population_max_entries,
                 "known_entries": len((population_memory or {}).get("entries", []))
                 if isinstance((population_memory or {}).get("entries"), list)
@@ -5634,6 +5841,10 @@ def run_loop(args: argparse.Namespace) -> int:
                 "population_parent_sample_prob": population_parent_sample_prob,
                 "population_recombine_prob": population_recombine_prob,
                 "population_recombine_max_lines": population_recombine_max_lines,
+                "population_seed_enable": population_seed_enable,
+                "population_seed_min_entries": population_seed_min_entries,
+                "population_seed_max_candidates": population_seed_max_candidates,
+                "population_seed_report": population_seed_report,
                 "population_entries": len((population_memory or {}).get("entries", []))
                 if isinstance((population_memory or {}).get("entries"), list)
                 else 0,
@@ -5736,6 +5947,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Max line window for fallback population recombination splices",
     )
     parser.add_argument(
+        "--population-seed-min-entries",
+        type=int,
+        default=DEFAULT_POPULATION_SEED_MIN_ENTRIES,
+        help="If population has fewer entries at start, seed additional heuristic parents up to this minimum",
+    )
+    parser.add_argument(
+        "--population-seed-max-candidates",
+        type=int,
+        default=DEFAULT_POPULATION_SEED_MAX_CANDIDATES,
+        help="Max heuristic parent candidates generated for startup population seeding",
+    )
+    parser.add_argument(
+        "--disable-population-seed",
+        action="store_true",
+        help="Disable startup heuristic seeding of population parents",
+    )
+    parser.add_argument(
         "--population-max-entries",
         type=int,
         default=DEFAULT_POPULATION_MEMORY_MAX_ENTRIES,
@@ -5800,6 +6028,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--population-recombine-prob must be between 0 and 1")
     if args.population_recombine_max_lines < 4:
         parser.error("--population-recombine-max-lines must be >= 4")
+    if args.population_seed_min_entries < 1:
+        parser.error("--population-seed-min-entries must be >= 1")
+    if args.population_seed_max_candidates < 1:
+        parser.error("--population-seed-max-candidates must be >= 1")
     if args.population_max_entries < 0:
         parser.error("--population-max-entries must be >= 0")
     return run_loop(args)
