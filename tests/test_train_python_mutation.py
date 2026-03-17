@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -89,6 +90,17 @@ class PythonMutationSelectionTests(unittest.TestCase):
     def test_mutation_language_inference_supports_python_prefix(self) -> None:
         language = train.infer_mutation_language(mutation="python_trackb_mitm_bucket_cap_up")
         self.assertEqual(language, "python")
+
+    def test_python_heuristic_candidate_reports_unsupported_source(self) -> None:
+        source = "def keep():\n    return 1\n"
+        candidate, mutation, changed = train.python_heuristic_candidate(
+            source,
+            1,
+            ROOT / "other_target.py",
+        )
+        self.assertEqual(candidate, source)
+        self.assertEqual(mutation, "python_target_unsupported")
+        self.assertFalse(changed)
 
     def test_algorithmic_diff_structure_mutator_applies(self) -> None:
         source = harness_source()
@@ -366,6 +378,31 @@ class PythonMutationSelectionTests(unittest.TestCase):
         self.assertTrue(changed)
         self.assertNotEqual(candidate, source)
         self.assertEqual(mutation, "python_trackb_diff_secondary_lane_structure")
+
+    def test_save_operator_stats_artifact_uses_atomic_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            stats_path = Path(tmpdir) / "stats.json"
+            artifact_root = Path(tmpdir) / "artifacts"
+            with patch.object(train, "ARTIFACTS_DIR", artifact_root):
+                with patch("train.atomic_write_text") as atomic_write:
+                    out_path = train.save_operator_stats_artifact(
+                        target_name="target",
+                        run_label="run-1",
+                        language="python",
+                        stats_path=stats_path,
+                        reward_epsilon=0.01,
+                        demote_streak=2,
+                        disable_streak=3,
+                        validation_block_penalty_base=0.1,
+                        validation_block_penalty_step=0.05,
+                        validation_block_penalty_max=0.3,
+                        validation_block_disable_streak=4,
+                        rows=[],
+                    )
+
+        atomic_write.assert_called_once()
+        self.assertEqual(atomic_write.call_args.args[0], out_path)
+        self.assertTrue(str(atomic_write.call_args.args[1]).endswith("\n"))
 
 
 if __name__ == "__main__":
