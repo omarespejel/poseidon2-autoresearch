@@ -7,6 +7,13 @@ from unittest.mock import patch
 
 import train
 
+ROOT = Path(__file__).resolve().parents[1]
+HARNESS_PATH = ROOT / "attack_harness.py"
+
+
+def harness_source() -> str:
+    return HARNESS_PATH.read_text(encoding="utf-8")
+
 
 class DeterministicRng:
     def __init__(self, *, choices_result: int = 0, choice_result: str = "a", randint_values: list[int] | None = None) -> None:
@@ -340,6 +347,61 @@ class PopulationMemoryTests(unittest.TestCase):
         self.assertEqual(candidate, "a\nB\nC\nD\ne\nf\n")
         self.assertEqual(details.get("method"), "line_window")
         self.assertEqual(details.get("status"), "ok")
+
+    def test_generate_population_seed_candidates_returns_diverse_mutations(self) -> None:
+        source = harness_source()
+        seeds = train.generate_population_seed_candidates(
+            source=source,
+            source_path=HARNESS_PATH,
+            language="python",
+            target_name="poseidon2_cryptanalysis_trackb_kernel_fast",
+            target_config={},
+            mutation_memory=None,
+            max_candidates=6,
+        )
+        self.assertGreaterEqual(len(seeds), 3)
+        mutations = [item["mutation"] for item in seeds]
+        self.assertEqual(len(mutations), len(set(mutations)))
+        self.assertTrue(all(item["source_code"] != source for item in seeds))
+
+    def test_seed_population_memory_from_heuristics_hits_min_entries(self) -> None:
+        source = harness_source()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pop_path = Path(tmpdir) / "population.json"
+            base_memory = {"version": 1, "entries": []}
+            train.save_population_memory(pop_path, base_memory)
+            loaded = train.load_population_memory(pop_path)
+            loaded, _ = train.update_and_save_population_memory(
+                pop_path,
+                loaded,
+                target_name="poseidon2_cryptanalysis_trackb_kernel_fast",
+                language="python",
+                source_code=source,
+                metric_value=15.35,
+                higher_is_better=True,
+                accepted=True,
+                timestamp="2026-03-17T00:00:00+00:00",
+                notes="baseline_seed",
+                max_entries=48,
+            )
+            seeded_memory, report = train.seed_population_memory_from_heuristics(
+                population_memory_path=pop_path,
+                population_memory=loaded,
+                target_name="poseidon2_cryptanalysis_trackb_kernel_fast",
+                language="python",
+                source_path=HARNESS_PATH,
+                baseline_source=source,
+                baseline_metric=15.35,
+                higher_is_better=True,
+                target_config={},
+                mutation_memory=None,
+                min_entries=4,
+                max_candidates=8,
+                max_entries=48,
+            )
+            self.assertGreaterEqual(report.get("final_entries", 0), 4)
+            self.assertGreater(report.get("seeded", 0), 0)
+            self.assertEqual(train.population_entries_count(seeded_memory), report.get("final_entries", 0))
 
 
 if __name__ == "__main__":
