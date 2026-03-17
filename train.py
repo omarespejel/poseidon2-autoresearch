@@ -1188,8 +1188,7 @@ PYTHON_MUTATOR_SOURCE_SUFFIXES = ("attack_harness.py", "attack_kernels.py")
 
 
 def python_mutation_target_supported(source_path: Path | str) -> bool:
-    path = str(source_path).replace("\\", "/").lower()
-    return any(path.endswith(suffix) for suffix in PYTHON_MUTATOR_SOURCE_SUFFIXES)
+    return Path(str(source_path)).name.lower() in PYTHON_MUTATOR_SOURCE_SUFFIXES
 
 
 def python_heuristic_candidate(

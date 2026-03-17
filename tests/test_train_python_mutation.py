@@ -82,7 +82,7 @@ def helper():
             Path("/tmp/some_other_file.py"),
         )
         self.assertFalse(changed)
-        self.assertEqual(mutation, "python_no_change")
+        self.assertEqual(mutation, "python_target_unsupported")
         self.assertEqual(candidate, source)
 
     def test_returns_no_change_for_lookalike_harness_path(self) -> None:
@@ -93,7 +93,7 @@ def helper():
             Path("/tmp/my_attack_harness.py"),
         )
         self.assertFalse(changed)
-        self.assertEqual(mutation, "python_no_change")
+        self.assertEqual(mutation, "python_target_unsupported")
         self.assertEqual(candidate, source)
 
     def test_returns_no_change_when_no_patterns_match(self) -> None:
