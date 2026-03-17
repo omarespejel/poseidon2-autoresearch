@@ -104,6 +104,13 @@
       ],
       "validation_allow_drop_abs": 0.0,
       "validation_allow_drop_rel": 0.0,
+      "signature_guard_functions": [
+        "differential_kernel",
+        "mitm_truncated_preimage_kernel",
+        "birthday_collision_kernel",
+        "algebraic_elimination_kernel",
+        "score"
+      ],
       "required_snippets": [
         "def differential_kernel(",
         "def mitm_truncated_preimage_kernel(",
@@ -166,6 +173,13 @@
       ],
       "validation_allow_drop_abs": 0.0,
       "validation_allow_drop_rel": 0.0,
+      "signature_guard_functions": [
+        "differential_kernel",
+        "mitm_truncated_preimage_kernel",
+        "birthday_collision_kernel",
+        "algebraic_elimination_kernel",
+        "score"
+      ],
       "required_snippets": [
         "def differential_kernel(",
         "def mitm_truncated_preimage_kernel(",

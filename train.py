@@ -3881,6 +3881,23 @@ def required_snippets_from_target(target_config: dict[str, Any]) -> list[str]:
     return out
 
 
+def signature_guard_functions_from_target(target_config: dict[str, Any]) -> list[str]:
+    raw = target_config.get("signature_guard_functions")
+    if not isinstance(raw, list):
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        token = item.strip()
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        out.append(token)
+    return out
+
+
 def strip_rust_comments_and_literals(source: str) -> str:
     """Remove Rust comments and string/char literals for guardrail substring checks."""
     out: list[str] = []
@@ -4054,11 +4071,20 @@ ATTACK_KERNEL_SIGNATURE_FUNCTIONS = (
 )
 
 
+def python_annotation_fingerprint(annotation: ast.expr | None) -> str:
+    if annotation is None:
+        return ""
+    try:
+        return ast.unparse(annotation)
+    except Exception:
+        return "?"
+
+
 def python_function_signature_fingerprint(node: ast.AST) -> str:
     if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
         return ""
     args = node.args
-    parts: list[str] = []
+    parts: list[str] = [f"KIND:{'ASYNC' if isinstance(node, ast.AsyncFunctionDef) else 'SYNC'}"]
 
     posonly = list(args.posonlyargs)
     positional = list(args.args)
@@ -4070,17 +4096,23 @@ def python_function_signature_fingerprint(node: ast.AST) -> str:
     for idx, arg in enumerate(combined):
         has_default = idx >= default_start
         kind = "PO" if idx < len(posonly) else "P"
-        parts.append(f"{kind}:{arg.arg}:{1 if has_default else 0}")
+        parts.append(
+            f"{kind}:{arg.arg}:{1 if has_default else 0}:{python_annotation_fingerprint(arg.annotation)}"
+        )
 
     if args.vararg is not None:
-        parts.append(f"VAR:{args.vararg.arg}")
+        parts.append(f"VAR:{args.vararg.arg}:{python_annotation_fingerprint(args.vararg.annotation)}")
 
     for idx, arg in enumerate(args.kwonlyargs):
         default_value = args.kw_defaults[idx] if idx < len(args.kw_defaults) else None
-        parts.append(f"KW:{arg.arg}:{1 if default_value is not None else 0}")
+        parts.append(
+            f"KW:{arg.arg}:{1 if default_value is not None else 0}:{python_annotation_fingerprint(arg.annotation)}"
+        )
 
     if args.kwarg is not None:
-        parts.append(f"KVAR:{args.kwarg.arg}")
+        parts.append(f"KVAR:{args.kwarg.arg}:{python_annotation_fingerprint(args.kwarg.annotation)}")
+
+    parts.append(f"RET:{python_annotation_fingerprint(node.returns)}")
 
     return "|".join(parts)
 
@@ -4097,6 +4129,8 @@ def extract_python_function_signatures(
 
     required = set(required_names)
     signatures: dict[str, str] = {}
+    # NOTE: The Track B kernel entrypoints are module-level defs; nested/class methods are
+    # intentionally ignored here and would be treated as missing by the guard.
     for node in tree.body:
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
@@ -4149,6 +4183,13 @@ def function_signature_guard(
             "violations": violations,
         },
     )
+
+
+def signature_guard_blocks_mutation_ttl(details: dict[str, Any]) -> bool:
+    if not details.get("enabled"):
+        return False
+    status = str(details.get("status", ""))
+    return not status.startswith("parse_error:")
 
 
 def parse_flag_bool(value: Any, default: bool = False) -> bool:
@@ -4865,18 +4906,16 @@ def run_loop(args: argparse.Namespace) -> int:
             )
             return 2
     initial_source = source_path.read_text()
-    signature_guard_names: list[str] = []
+    signature_guard_names = signature_guard_functions_from_target(target)
     expected_function_signatures: dict[str, str] = {}
-    source_path_norm = str(source_path).replace("\\", "/").lower()
-    if source_path_norm.endswith("attack_kernels.py"):
-        signature_guard_names = list(ATTACK_KERNEL_SIGNATURE_FUNCTIONS)
+    if signature_guard_names:
         expected_function_signatures, parse_error = extract_python_function_signatures(
             initial_source,
             required_names=signature_guard_names,
         )
         if parse_error is not None:
             print(
-                f"Failed to parse baseline attack_kernels.py for signature guard: {parse_error}",
+                f"Failed to parse baseline signature-guard source {source_path.name}: {parse_error}",
                 file=sys.stderr,
             )
             return 2
@@ -4884,7 +4923,7 @@ def run_loop(args: argparse.Namespace) -> int:
         if missing_in_baseline:
             print(
                 (
-                    "Signature guard misconfigured: baseline attack_kernels.py is missing required functions: "
+                    "Signature guard misconfigured: baseline source is missing required functions: "
                     + ", ".join(missing_in_baseline)
                 ),
                 file=sys.stderr,
@@ -5702,7 +5741,9 @@ def run_loop(args: argparse.Namespace) -> int:
         if signature_guard_details.get("enabled"):
             diagnostics["function_signatures"] = signature_guard_details
         if not signature_guard_ok:
-            blocked_mutations_until[mutation_key] = iteration + blocked_mutation_ttl
+            guard_status = str(signature_guard_details.get("status", ""))
+            if signature_guard_blocks_mutation_ttl(signature_guard_details):
+                blocked_mutations_until[mutation_key] = iteration + blocked_mutation_ttl
             violations = signature_guard_details.get("violations", [])
             violation_labels: list[str] = []
             if isinstance(violations, list):
@@ -5713,7 +5754,7 @@ def run_loop(args: argparse.Namespace) -> int:
                         violation_labels.append(f"{function}:{status}")
             guard_notes = (
                 f"rejected_guardrail_function_signature:{mutation};"
-                f"violations={','.join(violation_labels) or 'unknown'}"
+                f"{'status=' + guard_status if guard_status else 'violations=' + (','.join(violation_labels) or 'unknown')}"
             )
             prepare.append_result_row(
                 target=args.target,
@@ -5749,7 +5790,9 @@ def run_loop(args: argparse.Namespace) -> int:
             )
             train_log(
                 args,
-                f"iter {iteration}: rejected mutation={mutation_key} reason=function_signature_guardrail",
+                "iter "
+                f"{iteration}: rejected mutation={mutation_key} "
+                f"reason={'candidate_parse_error' if guard_status.startswith('parse_error:') else 'function_signature_guardrail'}",
                 level=1,
             )
             if operator_stats is not None:
