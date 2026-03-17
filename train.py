@@ -2449,6 +2449,17 @@ def compact_population_entries(
     del entries[max_entries:]
 
 
+def population_metric_component(
+    *,
+    metric_value: float,
+    higher_is_better: bool,
+    best_metric: float,
+) -> float:
+    oriented_metric = metric_value if higher_is_better else -metric_value
+    scale = max(1.0, abs(best_metric))
+    return math.tanh(oriented_metric / scale)
+
+
 def upsert_population_entry(
     memory: dict[str, Any],
     *,
@@ -2607,9 +2618,11 @@ def select_population_parent(
         total = accepted_total + rejected_total
         success_rate = accepted_total / total if total > 0 else 0.0
         novelty = 1.0 / math.sqrt(float(sampled_total) + 1.0)
-        metric_rel = metric_f / max(1e-6, abs(best_metric))
-        if not higher_is_better:
-            metric_rel = -metric_rel
+        metric_rel = population_metric_component(
+            metric_value=metric_f,
+            higher_is_better=higher_is_better,
+            best_metric=best_metric,
+        )
         selection_score = metric_rel + (0.20 * success_rate) + (0.10 * novelty)
         candidates.append((selection_score, raw))
 
@@ -3105,6 +3118,7 @@ def load_mutator_stats(path: Path) -> dict[str, Any]:
 
 
 def save_mutator_stats(path: Path, stats: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(path, json.dumps(stats, indent=2, sort_keys=True) + "\n")
 
 
@@ -3152,6 +3166,21 @@ def make_feature_rng(*, target_name: str, feature: str, source_code: str, config
     digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
     seed = int(digest[:16], 16)
     return random.Random(seed), digest[:16]
+
+
+def population_rng_config(
+    *,
+    language: str,
+    higher_is_better: bool,
+    population_parent_sample_prob: float,
+    population_max_entries: int,
+) -> dict[str, Any]:
+    return {
+        "language": language,
+        "higher_is_better": higher_is_better,
+        "population_parent_sample_prob": population_parent_sample_prob,
+        "population_max_entries": population_max_entries,
+    }
 
 
 def mutator_penalty_for_label(label: str, penalties: dict[str, float]) -> float:
@@ -4414,15 +4443,12 @@ def run_loop(args: argparse.Namespace) -> int:
         target_name=args.target,
         feature="population_parent_sampling",
         source_code=best_source,
-        config={
-            "language": language_norm,
-            "higher_is_better": bool(target["higher_is_better"]),
-            "population_parent_sample_prob": population_parent_sample_prob,
-            "population_max_entries": population_max_entries,
-            "max_iterations": max_iterations,
-            "max_accepted": args.max_accepted,
-            "max_runtime_seconds": args.max_runtime_seconds,
-        },
+        config=population_rng_config(
+            language=language_norm,
+            higher_is_better=bool(target["higher_is_better"]),
+            population_parent_sample_prob=population_parent_sample_prob,
+            population_max_entries=population_max_entries,
+        ),
     )
 
     if validation_targets:
