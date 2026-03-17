@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import math
 import os
@@ -14,7 +15,9 @@ import shutil
 import statistics
 import subprocess
 import sys
+import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -25,6 +28,8 @@ ROOT = Path(__file__).resolve().parent
 TARGETS_FILE = ROOT / "config" / "targets.json"
 RESULTS_FILE = ROOT / "results.tsv"
 LOG_FILE = ROOT / "agent_log.jsonl"
+PROVENANCE_FILE = ROOT / "provenance_chain.jsonl"
+PROVENANCE_STATE_FILE = ROOT / "work" / "provenance_state.json"
 
 
 @dataclass
@@ -44,6 +49,8 @@ class ToolError(RuntimeError):
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 GIT_OID_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
 VALID_PROFILE_AGGREGATES = {"weighted_geomean", "weighted_mean"}
+_THREAD_FILE_LOCKS: dict[str, threading.Lock] = {}
+_THREAD_FILE_LOCKS_GUARD = threading.Lock()
 
 
 def env_int(name: str, default: int) -> int:
@@ -54,6 +61,153 @@ def env_int(name: str, default: int) -> int:
         return int(raw)
     except ValueError:
         return default
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return default
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def parse_sandbox_prefix(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        out = [str(token).strip() for token in value if str(token).strip()]
+        return out
+    token = str(value).strip()
+    if not token:
+        return []
+    try:
+        return [part for part in shlex.split(token) if part]
+    except ValueError as exc:
+        raise ValueError(f"Invalid sandbox_prefix value {token!r}: {exc}") from exc
+
+
+def sandbox_settings_for_target(target: dict[str, Any]) -> tuple[list[str], bool]:
+    if "sandbox_prefix" in target:
+        prefix = parse_sandbox_prefix(target.get("sandbox_prefix"))
+    else:
+        prefix = parse_sandbox_prefix(os.getenv("AUTORESEARCH_SANDBOX_PREFIX", ""))
+    require = bool(target.get("require_sandbox", env_bool("AUTORESEARCH_REQUIRE_SANDBOX", False)))
+    return prefix, require
+
+
+@contextmanager
+def file_lock(lock_path: Path) -> Any:
+    resolved_key = str(lock_path.resolve())
+    with _THREAD_FILE_LOCKS_GUARD:
+        thread_lock = _THREAD_FILE_LOCKS.setdefault(resolved_key, threading.Lock())
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_file = lock_path.open("a+", encoding="utf-8")
+    try:
+        with thread_lock:
+            if os.name == "nt":
+                import msvcrt  # type: ignore
+
+                lock_file.seek(0, os.SEEK_END)
+                if lock_file.tell() == 0:
+                    lock_file.write("\0")
+                    lock_file.flush()
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+                try:
+                    yield
+                finally:
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+                return
+
+            import fcntl  # type: ignore
+
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    finally:
+        lock_file.close()
+
+
+def stable_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(text, encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def load_provenance_state() -> dict[str, Any]:
+    if not PROVENANCE_STATE_FILE.exists():
+        return {}
+    try:
+        loaded = json.loads(PROVENANCE_STATE_FILE.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ToolError(f"Corrupt provenance state file: {PROVENANCE_STATE_FILE}") from exc
+    if not isinstance(loaded, dict):
+        raise ToolError(f"Invalid provenance state payload: {PROVENANCE_STATE_FILE}")
+    return loaded
+
+
+def append_provenance_event(event_type: str, payload: dict[str, Any]) -> None:
+    PROVENANCE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    PROVENANCE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    provenance_lock_path = PROVENANCE_FILE.with_suffix(PROVENANCE_FILE.suffix + ".lock")
+
+    with file_lock(provenance_lock_path):
+        state = load_provenance_state()
+        prev_hash_raw = state.get("head")
+        if prev_hash_raw is not None and not isinstance(prev_hash_raw, str):
+            raise ToolError(f"Invalid provenance head in state file: {PROVENANCE_STATE_FILE}")
+        prev_hash = prev_hash_raw or None
+        seq = int(state.get("seq", 0)) + 1
+        timestamp = now_iso()
+        payload_hash = sha256_text(stable_json(payload))
+        node_material = stable_json(
+            {
+                "seq": seq,
+                "timestamp": timestamp,
+                "event_type": event_type,
+                "prev_hash": prev_hash,
+                "payload_hash": payload_hash,
+            }
+        )
+        node_hash = sha256_text(node_material)
+        record = {
+            "seq": seq,
+            "timestamp": timestamp,
+            "event_type": event_type,
+            "prev_hash": prev_hash,
+            "payload": payload,
+            "payload_hash": payload_hash,
+            "node_hash": node_hash,
+        }
+        with PROVENANCE_FILE.open("a", encoding="utf-8") as f:
+            f.write(stable_json(record) + "\n")
+        atomic_write_text(
+            PROVENANCE_STATE_FILE,
+            json.dumps(
+                {
+                    "seq": seq,
+                    "head": node_hash,
+                    "updated_at": timestamp,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+        )
 
 
 def is_verbose(level: int = 1) -> bool:
@@ -96,15 +250,39 @@ def now_iso() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat()
 
 
-def run_cmd(argv: list[str], cwd: Path) -> CommandResult:
+def run_cmd(
+    argv: list[str],
+    cwd: Path,
+    *,
+    sandbox_prefix: list[str] | None = None,
+    require_sandbox: bool | None = None,
+) -> CommandResult:
     cpu_affinity = os.getenv("AUTORESEARCH_CPU_AFFINITY", "").strip()
     nice_level = os.getenv("AUTORESEARCH_NICE", "").strip()
+    sandbox = (
+        list(sandbox_prefix)
+        if sandbox_prefix is not None
+        else parse_sandbox_prefix(os.getenv("AUTORESEARCH_SANDBOX_PREFIX", ""))
+    )
+    if require_sandbox is None:
+        require_sandbox = env_bool("AUTORESEARCH_REQUIRE_SANDBOX", False)
 
     final_argv = list(argv)
     if cpu_affinity and shutil.which("taskset"):
         final_argv = ["taskset", "-c", cpu_affinity, *final_argv]
     if nice_level:
         final_argv = ["nice", "-n", nice_level, *final_argv]
+    if require_sandbox and not sandbox:
+        return CommandResult(
+            argv=final_argv,
+            cwd=cwd,
+            code=126,
+            stdout="",
+            stderr="Sandbox required but no sandbox prefix configured (set AUTORESEARCH_SANDBOX_PREFIX).",
+            seconds=0.0,
+        )
+    if sandbox:
+        final_argv = [*sandbox, *final_argv]
 
     pretty = " ".join(shlex.quote(arg) for arg in final_argv)
     debug_log(f"run: (cd {cwd} && {pretty})", level=1)
@@ -144,17 +322,24 @@ def load_targets() -> dict[str, dict[str, Any]]:
 
 
 def ensure_outputs() -> None:
-    if not RESULTS_FILE.exists():
-        RESULTS_FILE.write_text(
-            "timestamp\ttarget\titeration\tstatus\tmetric_name\tmetric_value\tbest_value\tdelta\tcheck_s\tinfo_or_bench_s\texecute_s\tnotes\n"
-        )
-    if not LOG_FILE.exists():
-        LOG_FILE.write_text("")
+    results_lock = RESULTS_FILE.with_suffix(RESULTS_FILE.suffix + ".lock")
+    with file_lock(results_lock):
+        if not RESULTS_FILE.exists():
+            RESULTS_FILE.write_text(
+                "timestamp\ttarget\titeration\tstatus\tmetric_name\tmetric_value\tbest_value\tdelta\tcheck_s\tinfo_or_bench_s\texecute_s\tnotes\n"
+            )
+    log_lock = LOG_FILE.with_suffix(LOG_FILE.suffix + ".lock")
+    with file_lock(log_lock):
+        if not LOG_FILE.exists():
+            LOG_FILE.write_text("")
 
 
 def append_log(payload: dict[str, Any]) -> None:
-    with LOG_FILE.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(payload, sort_keys=True) + "\n")
+    log_lock = LOG_FILE.with_suffix(LOG_FILE.suffix + ".lock")
+    with file_lock(log_lock):
+        with LOG_FILE.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, sort_keys=True) + "\n")
+    append_provenance_event("log", {"payload": payload})
 
 
 def sanitize_notes(notes: str) -> str:
@@ -196,47 +381,69 @@ def append_result_row(
     execute_s: float,
     notes: str,
 ) -> None:
-    ensure_outputs()
+    results_lock = RESULTS_FILE.with_suffix(RESULTS_FILE.suffix + ".lock")
+    with file_lock(results_lock):
+        if not RESULTS_FILE.exists():
+            RESULTS_FILE.write_text(
+                "timestamp\ttarget\titeration\tstatus\tmetric_name\tmetric_value\tbest_value\tdelta\tcheck_s\tinfo_or_bench_s\texecute_s\tnotes\n"
+            )
+        prev_best = best_metric_for_target(target, higher_is_better=higher_is_better)
+        value_s = ""
+        best_s = ""
+        delta_s = ""
+        best_value = prev_best
 
-    prev_best = best_metric_for_target(target, higher_is_better=higher_is_better)
-    value_s = ""
-    best_s = ""
-    delta_s = ""
-    best_value = prev_best
+        if metric_value is not None:
+            value_s = f"{metric_value:.6f}"
 
-    if metric_value is not None:
-        value_s = f"{metric_value:.6f}"
+            if status == "success":
+                if prev_best is None:
+                    best_value = metric_value
+                elif higher_is_better:
+                    best_value = max(prev_best, metric_value)
+                else:
+                    best_value = min(prev_best, metric_value)
 
-        if status == "success":
-            if prev_best is None:
-                best_value = metric_value
-            elif higher_is_better:
-                best_value = max(prev_best, metric_value)
-            else:
-                best_value = min(prev_best, metric_value)
+            if best_value is not None:
+                best_s = f"{best_value:.6f}"
+            if prev_best is not None:
+                delta_s = f"{(metric_value - prev_best):.6f}"
 
-        if best_value is not None:
-            best_s = f"{best_value:.6f}"
-        if prev_best is not None:
-            delta_s = f"{(metric_value - prev_best):.6f}"
+        row = [
+            now_iso(),
+            target,
+            str(iteration),
+            status,
+            metric_name,
+            value_s,
+            best_s,
+            delta_s,
+            f"{check_s:.4f}",
+            f"{info_or_bench_s:.4f}",
+            f"{execute_s:.4f}",
+            sanitize_notes(notes),
+        ]
+        row_tsv = "\t".join(row)
 
-    row = [
-        now_iso(),
-        target,
-        str(iteration),
-        status,
-        metric_name,
-        value_s,
-        best_s,
-        delta_s,
-        f"{check_s:.4f}",
-        f"{info_or_bench_s:.4f}",
-        f"{execute_s:.4f}",
-        sanitize_notes(notes),
-    ]
+        with RESULTS_FILE.open("a", encoding="utf-8") as f:
+            f.write(row_tsv + "\n")
 
-    with RESULTS_FILE.open("a", encoding="utf-8") as f:
-        f.write("\t".join(row) + "\n")
+    append_provenance_event(
+        "result_row",
+        {
+            "row_tsv": row_tsv,
+            "target": target,
+            "iteration": iteration,
+            "status": status,
+            "metric_name": metric_name,
+            "metric_value": metric_value,
+            "higher_is_better": higher_is_better,
+            "check_s": check_s,
+            "info_or_bench_s": info_or_bench_s,
+            "execute_s": execute_s,
+            "notes": sanitize_notes(notes),
+        },
+    )
 
 
 def parse_nargo_info_acir(text: str, function_name: str = "main") -> int:
@@ -478,6 +685,7 @@ def bootstrap_target(target_name: str, target: dict[str, Any]) -> None:
     repo_rel = bootstrap["path"]
     ref = bootstrap.get("ref", "main")
     repo_dir = ROOT / repo_rel
+    sandbox_prefix, require_sandbox = sandbox_settings_for_target(target)
 
     repo_dir.parent.mkdir(parents=True, exist_ok=True)
     ensure_tool_exists("git")
@@ -489,26 +697,51 @@ def bootstrap_target(target_name: str, target: dict[str, Any]) -> None:
         clone_argv = ["git", "clone", "--depth", "1", git_url, str(repo_dir)]
         if not is_git_oid(ref):
             clone_argv = ["git", "clone", "--depth", "1", "--branch", ref, git_url, str(repo_dir)]
-        clone = run_cmd(clone_argv, ROOT)
+        clone = run_cmd(clone_argv, ROOT, sandbox_prefix=sandbox_prefix, require_sandbox=require_sandbox)
         if clone.code != 0:
             raise ToolError(f"Failed to clone {git_url}: {clone.stderr or clone.stdout}")
 
     if is_git_oid(ref):
-        fetch = run_cmd(["git", "fetch", "--depth", "1", "origin", ref], repo_dir)
+        fetch = run_cmd(
+            ["git", "fetch", "--depth", "1", "origin", ref],
+            repo_dir,
+            sandbox_prefix=sandbox_prefix,
+            require_sandbox=require_sandbox,
+        )
         if fetch.code != 0:
             raise ToolError(f"Failed to fetch pinned ref {ref}: {fetch.stderr or fetch.stdout}")
-        checkout = run_cmd(["git", "checkout", "--detach", "FETCH_HEAD"], repo_dir)
+        checkout = run_cmd(
+            ["git", "checkout", "--detach", "FETCH_HEAD"],
+            repo_dir,
+            sandbox_prefix=sandbox_prefix,
+            require_sandbox=require_sandbox,
+        )
         if checkout.code != 0:
             raise ToolError(f"Failed to checkout pinned ref {ref}: {checkout.stderr or checkout.stdout}")
         return
 
-    fetch = run_cmd(["git", "fetch", "--all", "--tags", "--prune"], repo_dir)
+    fetch = run_cmd(
+        ["git", "fetch", "--all", "--tags", "--prune"],
+        repo_dir,
+        sandbox_prefix=sandbox_prefix,
+        require_sandbox=require_sandbox,
+    )
     if fetch.code != 0:
         raise ToolError(f"Failed to fetch {repo_dir}: {fetch.stderr or fetch.stdout}")
-    checkout = run_cmd(["git", "checkout", ref], repo_dir)
+    checkout = run_cmd(
+        ["git", "checkout", ref],
+        repo_dir,
+        sandbox_prefix=sandbox_prefix,
+        require_sandbox=require_sandbox,
+    )
     if checkout.code != 0:
         raise ToolError(f"Failed to checkout {ref}: {checkout.stderr or checkout.stdout}")
-    pull = run_cmd(["git", "pull", "--ff-only"], repo_dir)
+    pull = run_cmd(
+        ["git", "pull", "--ff-only"],
+        repo_dir,
+        sandbox_prefix=sandbox_prefix,
+        require_sandbox=require_sandbox,
+    )
     if pull.code != 0:
         raise ToolError(f"Failed to pull {ref}: {pull.stderr or pull.stdout}")
 
@@ -518,8 +751,14 @@ def evaluate_noir(target_name: str, target: dict[str, Any]) -> dict[str, Any]:
     project_dir = ROOT / target["project_dir"]
     if not project_dir.exists():
         raise ToolError(f"Noir project not found for target '{target_name}': {project_dir}")
+    sandbox_prefix, require_sandbox = sandbox_settings_for_target(target)
 
-    check = run_cmd(["nargo", "check"], project_dir)
+    check = run_cmd(
+        ["nargo", "check"],
+        project_dir,
+        sandbox_prefix=sandbox_prefix,
+        require_sandbox=require_sandbox,
+    )
     if check.code != 0:
         return {
             "status": "failed",
@@ -532,7 +771,12 @@ def evaluate_noir(target_name: str, target: dict[str, Any]) -> dict[str, Any]:
             "debug": {"check": command_result_to_json(check)},
         }
 
-    info = run_cmd(["nargo", "info"], project_dir)
+    info = run_cmd(
+        ["nargo", "info"],
+        project_dir,
+        sandbox_prefix=sandbox_prefix,
+        require_sandbox=require_sandbox,
+    )
     if info.code != 0:
         return {
             "status": "failed",
@@ -565,7 +809,12 @@ def evaluate_noir(target_name: str, target: dict[str, Any]) -> dict[str, Any]:
             },
         }
 
-    execute = run_cmd(["nargo", "execute"], project_dir)
+    execute = run_cmd(
+        ["nargo", "execute"],
+        project_dir,
+        sandbox_prefix=sandbox_prefix,
+        require_sandbox=require_sandbox,
+    )
     if execute.code != 0:
         return {
             "status": "failed",
@@ -603,11 +852,17 @@ def evaluate_cairo(target_name: str, target: dict[str, Any]) -> dict[str, Any]:
     project_dir = ROOT / target["project_dir"]
     if not project_dir.exists():
         raise ToolError(f"Cairo project not found for target '{target_name}': {project_dir}")
+    sandbox_prefix, require_sandbox = sandbox_settings_for_target(target)
 
     build_cmd = target.get("build_command", ["scarb", "build"])
     test_cmd = target.get("test_command", ["scarb", "test"])
 
-    build = run_cmd(build_cmd, project_dir)
+    build = run_cmd(
+        build_cmd,
+        project_dir,
+        sandbox_prefix=sandbox_prefix,
+        require_sandbox=require_sandbox,
+    )
     if build.code != 0:
         return {
             "status": "failed",
@@ -634,7 +889,12 @@ def evaluate_cairo(target_name: str, target: dict[str, Any]) -> dict[str, Any]:
             "debug": {"build": command_result_to_json(build)},
         }
 
-    tests = run_cmd(test_cmd, project_dir)
+    tests = run_cmd(
+        test_cmd,
+        project_dir,
+        sandbox_prefix=sandbox_prefix,
+        require_sandbox=require_sandbox,
+    )
     if tests.code != 0:
         return {
             "status": "failed",
@@ -681,6 +941,8 @@ def evaluate_command_profile(
     trim_extremes: int,
     sleep_between_runs_s: float,
     sleep_after_warmup_s: float,
+    sandbox_prefix: list[str] | None = None,
+    require_sandbox: bool = False,
 ) -> dict[str, Any]:
     if runs < 1:
         return {
@@ -724,7 +986,12 @@ def evaluate_command_profile(
 
     for invocation in range(total_invocations):
         invocation_start_ns = time.time_ns()
-        bench = run_cmd(benchmark_command, project_dir)
+        bench = run_cmd(
+            benchmark_command,
+            project_dir,
+            sandbox_prefix=sandbox_prefix,
+            require_sandbox=require_sandbox,
+        )
         total_seconds += bench.seconds
         bench_runs.append(command_result_to_json(bench))
 
@@ -928,6 +1195,7 @@ def evaluate_command(target_name: str, target: dict[str, Any]) -> dict[str, Any]
             "notes": f"project dir not found: {project_dir}",
             "debug": {},
         }
+    sandbox_prefix, require_sandbox = sandbox_settings_for_target(target)
 
     default_command = target.get("benchmark_command")
     if isinstance(default_command, list):
@@ -1027,6 +1295,8 @@ def evaluate_command(target_name: str, target: dict[str, Any]) -> dict[str, Any]
             trim_extremes=default_trim,
             sleep_between_runs_s=default_sleep_between,
             sleep_after_warmup_s=default_sleep_after_warmup,
+            sandbox_prefix=sandbox_prefix,
+            require_sandbox=require_sandbox,
         )
 
     profile_values: list[float] = []
@@ -1189,6 +1459,8 @@ def evaluate_command(target_name: str, target: dict[str, Any]) -> dict[str, Any]
             trim_extremes=trim_extremes,
             sleep_between_runs_s=sleep_between_runs_s,
             sleep_after_warmup_s=sleep_after_warmup_s,
+            sandbox_prefix=sandbox_prefix,
+            require_sandbox=require_sandbox,
         )
         total_seconds += float(report.get("info_or_bench_s", 0.0))
 
