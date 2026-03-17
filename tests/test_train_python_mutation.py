@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import train
 
@@ -128,6 +129,90 @@ class PythonMutationSelectionTests(unittest.TestCase):
         penalties = {"python_trackb_a": 0.05, "python_trackb_b": 0.11}
         score = train.mutator_penalty_for_label("python_trackb_a+python_trackb_b", penalties)
         self.assertAlmostEqual(score, 0.11, places=6)
+
+    def test_validation_metric_passes_allows_equal_for_higher(self) -> None:
+        ok, details = train.validation_metric_passes(
+            candidate_value=10.0,
+            baseline_value=10.0,
+            higher_is_better=True,
+            allow_drop_abs=0.0,
+            allow_drop_rel=0.0,
+        )
+        self.assertTrue(ok)
+        self.assertTrue(details["abs_ok"])
+        self.assertTrue(details["rel_ok"])
+
+    def test_validation_metric_passes_blocks_drop_without_tolerance(self) -> None:
+        ok, _ = train.validation_metric_passes(
+            candidate_value=9.9,
+            baseline_value=10.0,
+            higher_is_better=True,
+            allow_drop_abs=0.0,
+            allow_drop_rel=0.0,
+        )
+        self.assertFalse(ok)
+
+    def test_validation_metric_passes_allows_drop_with_abs_tolerance(self) -> None:
+        ok, _ = train.validation_metric_passes(
+            candidate_value=9.95,
+            baseline_value=10.0,
+            higher_is_better=True,
+            allow_drop_abs=0.1,
+            allow_drop_rel=0.0,
+        )
+        self.assertTrue(ok)
+
+    def test_validation_metric_passes_lower_is_better(self) -> None:
+        ok, _ = train.validation_metric_passes(
+            candidate_value=5.0,
+            baseline_value=5.0,
+            higher_is_better=False,
+            allow_drop_abs=0.0,
+            allow_drop_rel=0.0,
+        )
+        self.assertTrue(ok)
+        ok2, _ = train.validation_metric_passes(
+            candidate_value=5.2,
+            baseline_value=5.0,
+            higher_is_better=False,
+            allow_drop_abs=0.05,
+            allow_drop_rel=0.0,
+        )
+        self.assertFalse(ok2)
+
+    def test_evaluate_validation_targets_success(self) -> None:
+        with patch(
+            "train.prepare.evaluate_target",
+            return_value={"status": "success", "metric_value": 10.0, "metric_name": "attack_score"},
+        ):
+            ok, details, metrics, reason = train.evaluate_validation_targets(
+                validation_targets=["v_lane"],
+                validation_baselines={"v_lane": 10.0},
+                targets_catalog={"v_lane": {"higher_is_better": True}},
+                allow_drop_abs=0.0,
+                allow_drop_rel=0.0,
+            )
+        self.assertTrue(ok)
+        self.assertEqual(reason, "ok")
+        self.assertEqual(metrics["v_lane"], 10.0)
+        self.assertEqual(details["v_lane"]["status"], "ok")
+
+    def test_evaluate_validation_targets_rejects_degradation(self) -> None:
+        with patch(
+            "train.prepare.evaluate_target",
+            return_value={"status": "success", "metric_value": 9.0, "metric_name": "attack_score"},
+        ):
+            ok, details, metrics, reason = train.evaluate_validation_targets(
+                validation_targets=["v_lane"],
+                validation_baselines={"v_lane": 10.0},
+                targets_catalog={"v_lane": {"higher_is_better": True}},
+                allow_drop_abs=0.0,
+                allow_drop_rel=0.0,
+            )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "degraded:v_lane")
+        self.assertEqual(metrics["v_lane"], 9.0)
+        self.assertEqual(details["v_lane"]["status"], "rejected")
 
     def test_algorithmic_mitm_key_mutator_applies(self) -> None:
         source = harness_source()

@@ -88,6 +88,11 @@
       "compound_second_window": 10,
       "operator_demote_streak": 5,
       "operator_disable_streak": 10,
+      "validation_targets": [
+        "poseidon2_cryptanalysis_trackb_kernel_signal_fast"
+      ],
+      "validation_allow_drop_abs": 0.0,
+      "validation_allow_drop_rel": 0.0,
       "required_snippets": [
         "def differential_kernel(",
         "def mitm_truncated_preimage_kernel(",
@@ -132,6 +137,11 @@
       "compound_second_window": 10,
       "operator_demote_streak": 5,
       "operator_disable_streak": 10,
+      "validation_targets": [
+        "poseidon2_cryptanalysis_trackb_kernel_fast"
+      ],
+      "validation_allow_drop_abs": 0.0,
+      "validation_allow_drop_rel": 0.0,
       "required_snippets": [
         "def differential_kernel(",
         "def mitm_truncated_preimage_kernel(",
