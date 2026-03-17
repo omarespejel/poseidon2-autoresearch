@@ -110,6 +110,29 @@ class PythonMutationSelectionTests(unittest.TestCase):
         self.assertNotEqual(candidate, source)
         self.assertEqual(mutation, "python_trackb_algebraic_structured_unknown_samples")
 
+    def test_priority_can_force_algorithmic_mutator_when_simple_ones_blocked(self) -> None:
+        source = harness_source()
+        blocked = {
+            "python_trackb_diff_multi_delta_prob_up",
+            "python_trackb_diff_multi_delta_prob_down",
+            "python_trackb_diff_cross_lane_prob_up",
+            "python_trackb_diff_cross_lane_prob_down",
+            "python_trackb_mitm_bucket_cap_up",
+            "python_trackb_mitm_bucket_cap_down",
+            "python_trackb_algebraic_fit_gain_up",
+            "python_trackb_algebraic_fit_gain_down",
+        }
+        candidate, mutation, changed = train.python_heuristic_candidate(
+            source,
+            1,
+            HARNESS_PATH,
+            blocked_mutations=blocked,
+            target_config={"mutation_schedule": "priority"},
+        )
+        self.assertTrue(changed)
+        self.assertNotEqual(candidate, source)
+        self.assertEqual(mutation, "python_trackb_diff_secondary_lane_structure")
+
 
 if __name__ == "__main__":
     unittest.main()
