@@ -15,6 +15,7 @@ import shutil
 import statistics
 import subprocess
 import sys
+import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -48,6 +49,8 @@ class ToolError(RuntimeError):
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 GIT_OID_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
 VALID_PROFILE_AGGREGATES = {"weighted_geomean", "weighted_mean"}
+_THREAD_FILE_LOCKS: dict[str, threading.Lock] = {}
+_THREAD_FILE_LOCKS_GUARD = threading.Lock()
 
 
 def env_int(name: str, default: int) -> int:
@@ -97,31 +100,35 @@ def sandbox_settings_for_target(target: dict[str, Any]) -> tuple[list[str], bool
 
 @contextmanager
 def file_lock(lock_path: Path) -> Any:
+    resolved_key = str(lock_path.resolve())
+    with _THREAD_FILE_LOCKS_GUARD:
+        thread_lock = _THREAD_FILE_LOCKS.setdefault(resolved_key, threading.Lock())
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_file = lock_path.open("a+", encoding="utf-8")
     try:
-        if os.name == "nt":
-            import msvcrt  # type: ignore
+        with thread_lock:
+            if os.name == "nt":
+                import msvcrt  # type: ignore
 
-            lock_file.seek(0, os.SEEK_END)
-            if lock_file.tell() == 0:
-                lock_file.write("\0")
-                lock_file.flush()
-            lock_file.seek(0)
-            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+                lock_file.seek(0, os.SEEK_END)
+                if lock_file.tell() == 0:
+                    lock_file.write("\0")
+                    lock_file.flush()
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+                try:
+                    yield
+                finally:
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+                return
+
+            import fcntl  # type: ignore
+
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
             try:
                 yield
             finally:
-                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
-            return
-
-        import fcntl  # type: ignore
-
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
     finally:
         lock_file.close()
 

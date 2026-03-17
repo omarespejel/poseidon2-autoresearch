@@ -26,6 +26,25 @@ def node_hash_for(record: dict[str, object]) -> str:
 
 
 class PrepareHardeningTests(unittest.TestCase):
+    def test_file_lock_reuses_in_process_mutex_for_same_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock_a = root / "shared.lock"
+            lock_b = root / "other.lock"
+            key_a = str(lock_a.resolve())
+            key_b = str(lock_b.resolve())
+            prepare._THREAD_FILE_LOCKS.clear()
+
+            with prepare.file_lock(lock_a):
+                first = prepare._THREAD_FILE_LOCKS[key_a]
+            with prepare.file_lock(lock_a):
+                second = prepare._THREAD_FILE_LOCKS[key_a]
+            with prepare.file_lock(lock_b):
+                third = prepare._THREAD_FILE_LOCKS[key_b]
+
+        self.assertIs(first, second)
+        self.assertIsNot(first, third)
+
     def test_parse_sandbox_prefix_supports_string_list_none_and_empty(self) -> None:
         self.assertEqual(prepare.parse_sandbox_prefix("docker run --rm"), ["docker", "run", "--rm"])
         self.assertEqual(prepare.parse_sandbox_prefix(["bwrap", "--ro-bind", "/", "/"]), ["bwrap", "--ro-bind", "/", "/"])
