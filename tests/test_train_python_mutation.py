@@ -15,6 +15,30 @@ def harness_source() -> str:
 
 
 class PythonMutationSelectionTests(unittest.TestCase):
+    def test_required_snippet_profile_counts_python_class_methods(self) -> None:
+        snippets = [
+            "def differential_kernel(",
+            "def mitm_truncated_preimage_kernel(",
+            "def algebraic_elimination_kernel(",
+            "def score(",
+        ]
+        source = """
+class AttackKernels:
+    def differential_kernel(self):
+        return 1
+
+    def mitm_truncated_preimage_kernel(self):
+        return 2
+
+    def algebraic_elimination_kernel(self):
+        return 3
+
+    async def score(self):
+        return 4
+"""
+        profile = train.required_snippet_profile(source, snippets, language="Python")
+        self.assertEqual(profile, {snippet: 1 for snippet in snippets})
+
     def test_required_snippet_guard_uses_python_ast(self) -> None:
         profile = {
             "def differential_kernel(": 1,
@@ -41,6 +65,17 @@ def helper():
             source,
             1,
             Path("/tmp/some_other_file.py"),
+        )
+        self.assertFalse(changed)
+        self.assertEqual(mutation, "python_no_change")
+        self.assertEqual(candidate, source)
+
+    def test_returns_no_change_for_lookalike_harness_path(self) -> None:
+        source = harness_source()
+        candidate, mutation, changed = train.python_heuristic_candidate(
+            source,
+            1,
+            Path("/tmp/my_attack_harness.py"),
         )
         self.assertFalse(changed)
         self.assertEqual(mutation, "python_no_change")
@@ -138,6 +173,37 @@ def helper():
         restored, _, down_changed = train.python_mutator_mitm_bucket_cap_down(up_candidate)
         self.assertTrue(down_changed)
         self.assertEqual(restored, source)
+
+    def test_mitm_bucket_cap_mutations_ignore_unrelated_bucket_checks(self) -> None:
+        source = (
+            "def helper(bucket):\n"
+            "    if len(bucket) < 2:\n"
+            "        return None\n\n"
+            "        bucket = table.setdefault(key, [])\n"
+            "        if len(bucket) < 4:\n"
+            "            bucket.append(x)\n"
+        )
+        up_candidate, _, up_changed = train.python_mutator_mitm_bucket_cap_up(source)
+        self.assertTrue(up_changed)
+        self.assertIn("    if len(bucket) < 2:\n", up_candidate)
+        self.assertIn("        if len(bucket) < 6:\n", up_candidate)
+        restored, _, down_changed = train.python_mutator_mitm_bucket_cap_down(up_candidate)
+        self.assertTrue(down_changed)
+        self.assertEqual(restored, source)
+
+    def test_algebraic_fit_gain_mutations_are_reversible(self) -> None:
+        source = harness_source()
+        up_candidate, _, up_changed = train.python_mutator_algebraic_fit_gain_up(source)
+        self.assertTrue(up_changed)
+        restored, _, down_changed = train.python_mutator_algebraic_fit_gain_down(up_candidate)
+        self.assertTrue(down_changed)
+        self.assertEqual(restored, source)
+
+        down_candidate, _, first_down_changed = train.python_mutator_algebraic_fit_gain_down(source)
+        self.assertTrue(first_down_changed)
+        reraised, _, low_up_changed = train.python_mutator_algebraic_fit_gain_up(down_candidate)
+        self.assertTrue(low_up_changed)
+        self.assertEqual(reraised, source)
 
     def test_mutation_language_inference_supports_python_prefix(self) -> None:
         language = train.infer_mutation_language(mutation="python_trackb_mitm_bucket_cap_up")

@@ -110,6 +110,8 @@ class TrackBObjectiveGuardTests(unittest.TestCase):
         self.assertFalse(train.parse_flag_bool([False], default=False))
         self.assertFalse(train.parse_flag_bool("disabled", default=False))
         self.assertTrue(train.parse_flag_bool("disabled", default=True))
+        self.assertTrue(train.parse_flag_bool(1.0, default=False))
+        self.assertFalse(train.parse_flag_bool(0.0, default=True))
 
     def test_guard_allows_search_only_change(self) -> None:
         source = stable_trackb_source()

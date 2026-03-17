@@ -951,8 +951,9 @@ def python_mutator_diff_cross_lane_prob_down(source: str) -> tuple[str, str, boo
 
 
 def python_mutator_mitm_bucket_cap_up(source: str) -> tuple[str, str, bool]:
-    return python_replace_first(
+    return python_replace_first_with_prefix(
         source,
+        "        bucket = table.setdefault(key, [])\n        ",
         [
             ("if len(bucket) < 2:", "if len(bucket) < 4:"),
             ("if len(bucket) < 3:", "if len(bucket) < 5:"),
@@ -964,8 +965,9 @@ def python_mutator_mitm_bucket_cap_up(source: str) -> tuple[str, str, bool]:
 
 
 def python_mutator_mitm_bucket_cap_down(source: str) -> tuple[str, str, bool]:
-    return python_replace_first(
+    return python_replace_first_with_prefix(
         source,
+        "        bucket = table.setdefault(key, [])\n        ",
         [
             ("if len(bucket) < 7:", "if len(bucket) < 5:"),
             ("if len(bucket) < 6:", "if len(bucket) < 4:"),
@@ -988,6 +990,10 @@ def python_mutator_algebraic_fit_gain_up(source: str) -> tuple[str, str, bool]:
                 "        fit_gain = (2.0 * val_exact_rate) + (1.25 * train_exact_rate)",
                 "        fit_gain = (2.5 * val_exact_rate) + (1.5 * train_exact_rate)",
             ),
+            (
+                "        fit_gain = (1.5 * val_exact_rate) + (1.0 * train_exact_rate)",
+                "        fit_gain = (2.0 * val_exact_rate) + (1.25 * train_exact_rate)",
+            ),
         ],
         mutation="python_trackb_algebraic_fit_gain_up",
     )
@@ -997,6 +1003,10 @@ def python_mutator_algebraic_fit_gain_down(source: str) -> tuple[str, str, bool]
     return python_replace_first(
         source,
         [
+            (
+                "        fit_gain = (3.0 * val_exact_rate) + (1.75 * train_exact_rate)",
+                "        fit_gain = (2.5 * val_exact_rate) + (1.5 * train_exact_rate)",
+            ),
             (
                 "        fit_gain = (2.5 * val_exact_rate) + (1.5 * train_exact_rate)",
                 "        fit_gain = (2.0 * val_exact_rate) + (1.25 * train_exact_rate)",
@@ -1021,8 +1031,7 @@ def python_heuristic_candidate(
     mutation_memory: dict[str, Any] | None = None,
     target_name: str = "",
 ) -> tuple[str, str, bool]:
-    path = str(source_path).replace("\\", "/").lower()
-    if not path.endswith("attack_harness.py"):
+    if source_path.name.lower() != "attack_harness.py":
         return source, "python_no_change", False
 
     operators: list[Any] = [
@@ -2652,7 +2661,7 @@ def normalized_source_for_required_snippets(source: str, *, language: str) -> st
             return ""
         defs = [
             f"def {node.name}("
-            for node in tree.body
+            for node in ast.walk(tree)
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         ]
         return "\n".join(defs)
@@ -2713,7 +2722,7 @@ def parse_flag_bool(value: Any, default: bool = False) -> bool:
             return int(token) != 0
         except ValueError:
             return default
-    if isinstance(value, int):
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
         return value != 0
     return default
 def resolved_objective_from_trackb_payload(payload: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
