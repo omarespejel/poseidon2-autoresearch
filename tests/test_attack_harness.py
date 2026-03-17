@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import io
 import json
 import math
 import random
+import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 import attack_harness
@@ -104,6 +107,10 @@ class AttackHarnessTests(unittest.TestCase):
     def test_load_kernel_module_defaults_to_immutable_copy(self) -> None:
         module = attack_harness.load_kernel_module("")
         self.assertEqual(module.__name__, "attack_kernels_immutable")
+
+    def test_load_kernel_module_rejects_unapproved_modules(self) -> None:
+        with self.assertRaises(ValueError):
+            attack_harness.load_kernel_module("os")
 
     def test_kernels_are_deterministic_with_fixed_seed(self) -> None:
         cfg = tiny_config()
@@ -232,6 +239,30 @@ class AttackHarnessTests(unittest.TestCase):
         self.assertEqual(algebraic["train_samples"], 0)
         self.assertEqual(algebraic["validation_samples"], 0)
         self.assertTrue(math_is_finite(float(metrics["attack_score"])))
+
+    def test_main_repro_command_uses_selected_kernel_module(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "track_b.json"
+            config_path.write_text(json.dumps(tiny_config()), encoding="utf-8")
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                exit_code = attack_harness.main(
+                    [
+                        "--config",
+                        str(config_path),
+                        "--kernel-module",
+                        "attack_kernels",
+                        "--mode",
+                        "fast",
+                        "--output-format",
+                        "json",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["kernel_module"], "attack_kernels")
+        self.assertIn("--kernel-module attack_kernels", payload["repro"]["command"])
 
 
 def math_is_finite(value: float) -> bool:

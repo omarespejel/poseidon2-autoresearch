@@ -22,6 +22,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_KERNEL_MODULE = "attack_kernels_immutable"
+ALLOWED_KERNEL_MODULES = frozenset({"attack_kernels", "attack_kernels_immutable"})
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -1019,6 +1020,9 @@ def load_config(path: Path) -> dict[str, Any]:
 
 def load_kernel_module(module_name: str):
     selected = module_name.strip() or DEFAULT_KERNEL_MODULE
+    if selected not in ALLOWED_KERNEL_MODULES:
+        allowed = ", ".join(sorted(ALLOWED_KERNEL_MODULES))
+        raise ValueError(f"kernel module {selected!r} must be one of: {allowed}")
     return importlib.import_module(selected)
 
 
@@ -1106,12 +1110,20 @@ def main(argv: list[str] | None = None) -> int:
         parse_float_fn=parse_float,
     )
 
+    kernel_module_name = getattr(kernels, "__name__", args.kernel_module)
+    repro_parts = [f"python3 attack_harness.py --config {config_path}"]
+    if kernel_module_name:
+        repro_parts.append(f"--kernel-module {kernel_module_name}")
+    if selected_profile:
+        repro_parts.append(f"--profile {selected_profile}")
+    repro_parts.append(f"--mode {args.mode} --output-format json")
+
     payload = {
         "ok": True,
         "mode": args.mode,
         "config_path": str(config_path),
         "challenge_profile": selected_profile,
-        "kernel_module": getattr(kernels, "__name__", args.kernel_module),
+        "kernel_module": kernel_module_name,
         "spec": {
             "field_modulus": spec.modulus,
             "width": spec.width,
@@ -1150,12 +1162,7 @@ def main(argv: list[str] | None = None) -> int:
             },
         },
         "repro": {
-            "command": (
-                f"python3 attack_harness.py --config {config_path} "
-                f"{f'--kernel-module {getattr(kernels, '__name__', args.kernel_module)} ' if getattr(kernels, '__name__', '') else ''}"
-                f"{f'--profile {selected_profile} ' if selected_profile else ''}"
-                f"--mode {args.mode} --output-format json"
-            )
+            "command": " ".join(repro_parts)
         },
     }
 
