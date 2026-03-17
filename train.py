@@ -3967,6 +3967,23 @@ def required_snippets_from_target(target_config: dict[str, Any]) -> list[str]:
     return out
 
 
+def signature_guard_functions_from_target(target_config: dict[str, Any]) -> list[str]:
+    raw = target_config.get("signature_guard_functions")
+    if not isinstance(raw, list):
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        token = item.strip()
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        out.append(token)
+    return out
+
+
 def strip_rust_comments_and_literals(source: str) -> str:
     """Remove Rust comments and string/char literals for guardrail substring checks."""
     out: list[str] = []
@@ -4147,6 +4164,140 @@ def required_snippet_guard(candidate: str, profile: dict[str, int], *, language:
         )
 
     return len(violations) == 0, {"required_snippets": len(profile), "violations": violations}
+
+
+ATTACK_KERNEL_SIGNATURE_FUNCTIONS = (
+    "differential_kernel",
+    "mitm_truncated_preimage_kernel",
+    "birthday_collision_kernel",
+    "algebraic_elimination_kernel",
+    "score",
+)
+SIGNATURE_FINGERPRINT_SEPARATOR = "\x1f"
+
+
+def python_annotation_fingerprint(annotation: ast.expr | None) -> str:
+    if annotation is None:
+        return ""
+    try:
+        return ast.unparse(annotation)
+    except Exception:
+        return "?"
+
+
+def python_function_signature_fingerprint(node: ast.AST) -> str:
+    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return ""
+    args = node.args
+    parts: list[str] = [f"KIND:{'ASYNC' if isinstance(node, ast.AsyncFunctionDef) else 'SYNC'}"]
+
+    posonly = list(args.posonlyargs)
+    positional = list(args.args)
+    defaults = list(args.defaults)
+    total_positional = len(posonly) + len(positional)
+    default_start = total_positional - len(defaults)
+
+    combined = posonly + positional
+    for idx, arg in enumerate(combined):
+        has_default = idx >= default_start
+        kind = "PO" if idx < len(posonly) else "P"
+        parts.append(
+            f"{kind}:{arg.arg}:{1 if has_default else 0}:{python_annotation_fingerprint(arg.annotation)}"
+        )
+
+    if args.vararg is not None:
+        parts.append(f"VAR:{args.vararg.arg}:{python_annotation_fingerprint(args.vararg.annotation)}")
+
+    for idx, arg in enumerate(args.kwonlyargs):
+        default_value = args.kw_defaults[idx] if idx < len(args.kw_defaults) else None
+        parts.append(
+            f"KW:{arg.arg}:{1 if default_value is not None else 0}:{python_annotation_fingerprint(arg.annotation)}"
+        )
+
+    if args.kwarg is not None:
+        parts.append(f"KVAR:{args.kwarg.arg}:{python_annotation_fingerprint(args.kwarg.annotation)}")
+
+    parts.append(f"RET:{python_annotation_fingerprint(node.returns)}")
+
+    return SIGNATURE_FINGERPRINT_SEPARATOR.join(parts)
+
+
+def extract_python_function_signatures(
+    source_code: str,
+    *,
+    required_names: list[str],
+) -> tuple[dict[str, str], str | None]:
+    try:
+        tree = ast.parse(source_code)
+    except SyntaxError as exc:
+        return {}, f"parse_error:{exc.msg}:line={exc.lineno}"
+    except ValueError as exc:
+        return {}, f"parse_error:{exc}:line=None"
+
+    required = set(required_names)
+    signatures: dict[str, str] = {}
+    # NOTE: The Track B kernel entrypoints are module-level defs; nested/class methods are
+    # intentionally ignored here and would be treated as missing by the guard.
+    for node in tree.body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if required and node.name not in required:
+            continue
+        signatures[node.name] = python_function_signature_fingerprint(node)
+    return signatures, None
+
+
+def function_signature_guard(
+    *,
+    candidate_source: str,
+    expected_signatures: dict[str, str],
+    required_names: list[str],
+) -> tuple[bool, dict[str, Any]]:
+    if not expected_signatures:
+        return True, {"enabled": False, "required_functions": 0, "violations": []}
+
+    observed, parse_error = extract_python_function_signatures(
+        candidate_source,
+        required_names=required_names,
+    )
+    if parse_error is not None:
+        return False, {"enabled": True, "status": parse_error, "violations": []}
+
+    violations: list[dict[str, Any]] = []
+    for name in required_names:
+        expected = expected_signatures.get(name)
+        actual = observed.get(name)
+        if expected is None:
+            violations.append({"function": name, "status": "not_in_baseline"})
+            continue
+        if actual is None:
+            violations.append({"function": name, "status": "missing"})
+            continue
+        if actual != expected:
+            violations.append(
+                {
+                    "function": name,
+                    "status": "signature_changed",
+                    "expected": expected,
+                    "observed": actual,
+                }
+            )
+
+    return (
+        len(violations) == 0,
+        {
+            "enabled": True,
+            "required_functions": len(required_names),
+            "violations": violations,
+        },
+    )
+
+
+def signature_guard_blocks_mutation_ttl(details: dict[str, Any]) -> bool:
+    if not details.get("enabled"):
+        return False
+    status = str(details.get("status", ""))
+    return not status.startswith("parse_error:")
 
 
 def parse_flag_bool(value: Any, default: bool = False) -> bool:
@@ -4901,6 +5052,29 @@ def run_loop(args: argparse.Namespace) -> int:
             )
             return 2
     initial_source = source_path.read_text()
+    signature_guard_names = signature_guard_functions_from_target(target)
+    expected_function_signatures: dict[str, str] = {}
+    if signature_guard_names:
+        expected_function_signatures, parse_error = extract_python_function_signatures(
+            initial_source,
+            required_names=signature_guard_names,
+        )
+        if parse_error is not None:
+            print(
+                f"Failed to parse baseline signature-guard source {source_path.name}: {parse_error}",
+                file=sys.stderr,
+            )
+            return 2
+        missing_in_baseline = [name for name in signature_guard_names if name not in expected_function_signatures]
+        if missing_in_baseline:
+            print(
+                (
+                    "Signature guard misconfigured: baseline source is missing required functions: "
+                    + ", ".join(missing_in_baseline)
+                ),
+                file=sys.stderr,
+            )
+            return 2
 
     if str(target.get("type", "")).strip().lower() == "command" and source_file_is_executable_code(
         str(target["source_file"])
@@ -5712,6 +5886,85 @@ def run_loop(args: argparse.Namespace) -> int:
         mutation_key = normalize_mutation_label(mutation) or mutation
         mutation_attempts[mutation_key] = mutation_attempts.get(mutation_key, 0) + 1
         train_log(args, f"iter {iteration}: evaluating mutation={mutation_key}", level=2)
+
+        signature_guard_ok, signature_guard_details = function_signature_guard(
+            candidate_source=candidate,
+            expected_signatures=expected_function_signatures,
+            required_names=signature_guard_names,
+        )
+        if signature_guard_details.get("enabled"):
+            diagnostics["function_signatures"] = signature_guard_details
+        if not signature_guard_ok:
+            guard_status = str(signature_guard_details.get("status", ""))
+            if signature_guard_blocks_mutation_ttl(signature_guard_details):
+                blocked_mutations_until[mutation_key] = iteration + blocked_mutation_ttl
+            violations = signature_guard_details.get("violations", [])
+            violation_labels: list[str] = []
+            if isinstance(violations, list):
+                for item in violations:
+                    if isinstance(item, dict):
+                        function = str(item.get("function", "unknown"))
+                        status = str(item.get("status", "unknown"))
+                        violation_labels.append(f"{function}:{status}")
+            guard_notes = (
+                f"rejected_guardrail_function_signature:{mutation};"
+                f"{'status=' + guard_status if guard_status else 'violations=' + (','.join(violation_labels) or 'unknown')}"
+            )
+            prepare.append_result_row(
+                target=args.target,
+                iteration=iteration,
+                status="skipped",
+                metric_name=target["metric_name"],
+                metric_value=best_metric,
+                higher_is_better=bool(target["higher_is_better"]),
+                check_s=0.0,
+                info_or_bench_s=0.0,
+                execute_s=0.0,
+                notes=f"{guard_notes};run={run_label}",
+            )
+            prepare.append_log(
+                {
+                    "event": "loop_iteration",
+                    "timestamp": prepare.now_iso(),
+                    "target": args.target,
+                    "iteration": iteration,
+                    "mutation": mutation,
+                    "mutation_key": mutation_key,
+                    "accepted": False,
+                    "best_metric": best_metric,
+                    "effective_threshold": threshold_diag,
+                    "result": {
+                        "status": "guardrail_rejected",
+                        "metric_name": target["metric_name"],
+                        "metric_value": best_metric,
+                        "notes": guard_notes,
+                    },
+                    "diagnostics": diagnostics,
+                },
+            )
+            train_log(
+                args,
+                "iter "
+                f"{iteration}: rejected mutation={mutation_key} "
+                f"reason={'candidate_parse_error' if guard_status.startswith('parse_error:') else 'function_signature_guardrail'}",
+                level=1,
+            )
+            if operator_stats is not None:
+                operator_stats = update_and_save_operator_stats(
+                    operator_stats_path,
+                    operator_stats,
+                    target_name=args.target,
+                    mutation=mutation_key,
+                    language=infer_mutation_language(mutation=mutation_key, target_language=language_norm),
+                    accepted=False,
+                    reward=0.0,
+                    runtime_s=0.0,
+                    timestamp=prepare.now_iso(),
+                    reward_epsilon=operator_reward_epsilon,
+                    demote_streak=operator_demote_streak,
+                    disable_streak=operator_disable_streak,
+                )
+            continue
 
         guard_ok, guard_details = required_snippet_guard(
             candidate,
