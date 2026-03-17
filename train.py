@@ -10,6 +10,7 @@ This is the canonical loop entrypoint in compatibility mode:
 from __future__ import annotations
 
 import argparse
+import ast
 import datetime as dt
 import difflib
 import hashlib
@@ -871,6 +872,269 @@ def rust_mutator_hoist_log_num_cols(source: str) -> tuple[str, str, bool]:
     return candidate, "rust_hoist_log_num_cols", True
 
 
+def python_replace_first(
+    source: str,
+    replacements: list[tuple[str, str]],
+    *,
+    mutation: str,
+) -> tuple[str, str, bool]:
+    for old, new in replacements:
+        if old in source:
+            return source.replace(old, new, 1), mutation, True
+    return source, f"{mutation}:pattern_missing", False
+
+
+def python_replace_first_with_prefix(
+    source: str,
+    prefix: str,
+    replacements: list[tuple[str, str]],
+    *,
+    mutation: str,
+) -> tuple[str, str, bool]:
+    return python_replace_first(
+        source,
+        [(f"{prefix}{old}", f"{prefix}{new}") for old, new in replacements],
+        mutation=mutation,
+    )
+
+
+def python_mutator_diff_multi_delta_prob_up(source: str) -> tuple[str, str, bool]:
+    return python_replace_first_with_prefix(
+        source,
+        "        delta[lane_idx] = rng.randrange(1, spec.modulus)\n        ",
+        [
+            ("if rng.random() < 0.35:", "if rng.random() < 0.50:"),
+            ("if rng.random() < 0.30:", "if rng.random() < 0.45:"),
+            ("if rng.random() < 0.25:", "if rng.random() < 0.35:"),
+        ],
+        mutation="python_trackb_diff_multi_delta_prob_up",
+    )
+
+
+def python_mutator_diff_multi_delta_prob_down(source: str) -> tuple[str, str, bool]:
+    return python_replace_first_with_prefix(
+        source,
+        "        delta[lane_idx] = rng.randrange(1, spec.modulus)\n        ",
+        [
+            ("if rng.random() < 0.50:", "if rng.random() < 0.35:"),
+            ("if rng.random() < 0.45:", "if rng.random() < 0.30:"),
+            ("if rng.random() < 0.35:", "if rng.random() < 0.25:"),
+        ],
+        mutation="python_trackb_diff_multi_delta_prob_down",
+    )
+
+
+def python_mutator_diff_cross_lane_prob_up(source: str) -> tuple[str, str, bool]:
+    return python_replace_first_with_prefix(
+        source,
+        "                if i == lane_idx:\n                    continue\n                ",
+        [
+            ("if rng.random() < 0.2:", "if rng.random() < 0.30:"),
+            ("if rng.random() < 0.25:", "if rng.random() < 0.35:"),
+            ("if rng.random() < 0.15:", "if rng.random() < 0.25:"),
+        ],
+        mutation="python_trackb_diff_cross_lane_prob_up",
+    )
+
+
+def python_mutator_diff_cross_lane_prob_down(source: str) -> tuple[str, str, bool]:
+    return python_replace_first_with_prefix(
+        source,
+        "                if i == lane_idx:\n                    continue\n                ",
+        [
+            ("if rng.random() < 0.30:", "if rng.random() < 0.2:"),
+            ("if rng.random() < 0.35:", "if rng.random() < 0.25:"),
+            ("if rng.random() < 0.25:", "if rng.random() < 0.15:"),
+        ],
+        mutation="python_trackb_diff_cross_lane_prob_down",
+    )
+
+
+def python_mutator_mitm_bucket_cap_up(source: str) -> tuple[str, str, bool]:
+    return python_replace_first_with_prefix(
+        source,
+        "        bucket = table.setdefault(key, [])\n        ",
+        [
+            ("if len(bucket) < 2:", "if len(bucket) < 4:"),
+            ("if len(bucket) < 3:", "if len(bucket) < 5:"),
+            ("if len(bucket) < 4:", "if len(bucket) < 6:"),
+            ("if len(bucket) < 5:", "if len(bucket) < 7:"),
+        ],
+        mutation="python_trackb_mitm_bucket_cap_up",
+    )
+
+
+def python_mutator_mitm_bucket_cap_down(source: str) -> tuple[str, str, bool]:
+    return python_replace_first_with_prefix(
+        source,
+        "        bucket = table.setdefault(key, [])\n        ",
+        [
+            ("if len(bucket) < 7:", "if len(bucket) < 5:"),
+            ("if len(bucket) < 6:", "if len(bucket) < 4:"),
+            ("if len(bucket) < 5:", "if len(bucket) < 3:"),
+            ("if len(bucket) < 4:", "if len(bucket) < 2:"),
+        ],
+        mutation="python_trackb_mitm_bucket_cap_down",
+    )
+
+
+def python_mutator_algebraic_fit_gain_up(source: str) -> tuple[str, str, bool]:
+    return python_replace_first(
+        source,
+        [
+            (
+                "        fit_gain = (2.5 * val_exact_rate) + (1.5 * train_exact_rate)",
+                "        fit_gain = (3.0 * val_exact_rate) + (1.75 * train_exact_rate)",
+            ),
+            (
+                "        fit_gain = (2.0 * val_exact_rate) + (1.25 * train_exact_rate)",
+                "        fit_gain = (2.5 * val_exact_rate) + (1.5 * train_exact_rate)",
+            ),
+            (
+                "        fit_gain = (1.5 * val_exact_rate) + (1.0 * train_exact_rate)",
+                "        fit_gain = (2.0 * val_exact_rate) + (1.25 * train_exact_rate)",
+            ),
+        ],
+        mutation="python_trackb_algebraic_fit_gain_up",
+    )
+
+
+def python_mutator_algebraic_fit_gain_down(source: str) -> tuple[str, str, bool]:
+    return python_replace_first(
+        source,
+        [
+            (
+                "        fit_gain = (3.0 * val_exact_rate) + (1.75 * train_exact_rate)",
+                "        fit_gain = (2.5 * val_exact_rate) + (1.5 * train_exact_rate)",
+            ),
+            (
+                "        fit_gain = (2.5 * val_exact_rate) + (1.5 * train_exact_rate)",
+                "        fit_gain = (2.0 * val_exact_rate) + (1.25 * train_exact_rate)",
+            ),
+            (
+                "        fit_gain = (2.0 * val_exact_rate) + (1.25 * train_exact_rate)",
+                "        fit_gain = (1.5 * val_exact_rate) + (1.0 * train_exact_rate)",
+            ),
+        ],
+        mutation="python_trackb_algebraic_fit_gain_down",
+    )
+
+
+def python_heuristic_candidate(
+    source: str,
+    iteration: int,
+    source_path: Path,
+    blocked_mutations: set[str] | None = None,
+    mutation_attempts: dict[str, int] | None = None,
+    target_config: dict[str, Any] | None = None,
+    preferred_mutations: list[str] | None = None,
+    mutation_memory: dict[str, Any] | None = None,
+    target_name: str = "",
+) -> tuple[str, str, bool]:
+    if source_path.name.lower() != "attack_harness.py":
+        return source, "python_no_change", False
+
+    operators: list[Any] = [
+        python_mutator_diff_multi_delta_prob_up,
+        python_mutator_diff_multi_delta_prob_down,
+        python_mutator_diff_cross_lane_prob_up,
+        python_mutator_diff_cross_lane_prob_down,
+        python_mutator_mitm_bucket_cap_up,
+        python_mutator_mitm_bucket_cap_down,
+        python_mutator_algebraic_fit_gain_up,
+        python_mutator_algebraic_fit_gain_down,
+    ]
+
+    shift = (iteration - 1) % len(operators)
+    ordered = operators[shift:] + operators[:shift]
+    preferred_rank = {name: idx for idx, name in enumerate(preferred_mutations or [])}
+
+    def preference_for_label(label: str) -> tuple[int, int]:
+        if label in preferred_rank:
+            return (0, preferred_rank[label])
+        if "+" in label:
+            parts = [part.strip() for part in label.split("+") if part.strip()]
+            part_ranks = [preferred_rank[part] for part in parts if part in preferred_rank]
+            if part_ranks:
+                return (1, min(part_ranks))
+        return (2, 1_000_000)
+
+    attempts = mutation_attempts or {}
+    mutation_schedule = str((target_config or {}).get("mutation_schedule", "priority")).strip().lower()
+    use_ucb_schedule = mutation_schedule == "ucb"
+    mutation_ucb_explore = float((target_config or {}).get("mutation_ucb_explore", 0.75))
+    scope_totals = mutation_memory_scope_totals(
+        mutation_memory,
+        target_name=target_name,
+        language="python",
+    )
+
+    candidates: list[dict[str, Any]] = []
+    seen_candidates: set[str] = set()
+    for idx, operator in enumerate(ordered):
+        candidate, mutation, changed = operator(source)
+        if blocked_mutations and mutation in blocked_mutations:
+            continue
+        if not changed:
+            continue
+        if candidate in seen_candidates:
+            continue
+        seen_candidates.add(candidate)
+        pref_class, pref_rank_value = preference_for_label(mutation)
+        candidate_entry: dict[str, Any] = {
+            "candidate": candidate,
+            "mutation": mutation,
+            "pref_class": pref_class,
+            "pref_rank": pref_rank_value,
+            "attempts": attempts.get(mutation, 0),
+            "index": idx,
+        }
+        if use_ucb_schedule:
+            accepted_hist, rejected_hist, history_scope = mutation_memory_counts(
+                mutation_memory,
+                mutation,
+                target_name=target_name,
+                language="python",
+            )
+            total_memory_observations = float(
+                scope_totals.get(history_scope, scope_totals.get("global", 0.0))
+            )
+            candidate_entry["ucb_score"] = mutation_ucb_score(
+                accepted=accepted_hist,
+                rejected=rejected_hist,
+                total_observations=total_memory_observations,
+                explore=mutation_ucb_explore,
+                preference_class=int(pref_class),
+                schedule_tier=0,
+                attempt_count=int(candidate_entry["attempts"]),
+            )
+        candidates.append(candidate_entry)
+
+    if candidates:
+        if use_ucb_schedule:
+            candidates.sort(
+                key=lambda item: (
+                    -float(item.get("ucb_score", 0.0)),
+                    int(item["pref_class"]),
+                    int(item["pref_rank"]),
+                    int(item["attempts"]),
+                    int(item["index"]),
+                )
+            )
+        else:
+            candidates.sort(
+                key=lambda item: (
+                    int(item["pref_class"]),
+                    int(item["pref_rank"]),
+                    int(item["attempts"]),
+                    int(item["index"]),
+                )
+            )
+        chosen = candidates[0]
+        return str(chosen["candidate"]), str(chosen["mutation"]), True
+    return source, "python_no_change", False
+
+
 def json_dump_stable(payload: dict[str, Any]) -> str:
     return json.dumps(payload, indent=2, sort_keys=True) + "\n"
 
@@ -1440,6 +1704,20 @@ def heuristic_candidate(
         )
         if changed:
             return rust_candidate, mutation, True
+    if language.lower() == "python":
+        python_candidate, mutation, changed = python_heuristic_candidate(
+            source,
+            iteration,
+            source_path,
+            blocked_mutations=blocked_mutations,
+            mutation_attempts=mutation_attempts,
+            target_config=target_config,
+            preferred_mutations=preferred_mutations,
+            mutation_memory=mutation_memory,
+            target_name=target_name,
+        )
+        if changed:
+            return python_candidate, mutation, True
     return generic_heuristic_candidate(source, iteration)
 
 
@@ -1662,9 +1940,16 @@ def normalize_mutation_label(token: str) -> str | None:
 
     if not token:
         return None
-    if token in {"no_change", "n/a", "rust_no_change", "heuristic_no_change"}:
+    if token in {"no_change", "n/a", "rust_no_change", "python_no_change", "heuristic_no_change"}:
         return None
     return token
+
+
+def is_retryable_no_change_mutation(mutation: str) -> bool:
+    token = mutation.strip()
+    while token.startswith("fallback_"):
+        token = token[len("fallback_") :].strip()
+    return token in {"json_trackb_no_change", "rust_no_change", "python_no_change", "heuristic_no_change"}
 
 
 def extract_mutation_label_from_notes(notes: str) -> str | None:
@@ -1713,6 +1998,8 @@ def infer_mutation_language(*, mutation: str, target_language: str | None = None
         return "rust"
     if mutation.startswith("json_"):
         return "json"
+    if mutation.startswith("python_"):
+        return "python"
     if mutation.startswith("heuristic_"):
         return "generic"
     return "unknown"
@@ -2074,6 +2361,8 @@ def preferred_mutations_from_memory(
             language_ok = True
         if not language_ok and language == "json" and mutation.startswith("json_"):
             language_ok = True
+        if not language_ok and language == "python" and mutation.startswith("python_"):
+            language_ok = True
         if not language_ok:
             continue
 
@@ -2368,6 +2657,24 @@ def strip_rust_comments_and_literals(source: str) -> str:
 
 
 def normalized_source_for_required_snippets(source: str, *, language: str) -> str:
+    if language.lower() == "python":
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            return ""
+        defs: list[str] = []
+
+        def collect_defs(body: list[ast.stmt], *, prefix: str = "") -> None:
+            for node in body:
+                if isinstance(node, ast.ClassDef):
+                    collect_defs(node.body, prefix=f"{prefix}class {node.name}: ")
+                elif isinstance(node, ast.AsyncFunctionDef):
+                    defs.append(f"{prefix}async def {node.name}(")
+                elif isinstance(node, ast.FunctionDef):
+                    defs.append(f"{prefix}def {node.name}(")
+
+        collect_defs(tree.body)
+        return "\n".join(defs)
     if language.lower() == "rust":
         return strip_rust_comments_and_literals(source)
     return source
@@ -2425,11 +2732,9 @@ def parse_flag_bool(value: Any, default: bool = False) -> bool:
             return int(token) != 0
         except ValueError:
             return default
-    if isinstance(value, int):
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
         return value != 0
     return default
-
-
 def resolved_objective_from_trackb_payload(payload: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
     top_level = payload.get("objective")
     resolved = top_level if isinstance(top_level, dict) else None
@@ -2450,6 +2755,24 @@ def resolved_objective_from_trackb_payload(payload: dict[str, Any]) -> tuple[dic
     return (json.loads(json.dumps(resolved)), source_key)
 
 
+def resolved_objective_from_trackb_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
+    top_level = payload.get("objective")
+    resolved = top_level if isinstance(top_level, dict) else None
+
+    active_profile = payload.get("active_profile")
+    profiles = payload.get("challenge_profiles")
+    if isinstance(active_profile, str) and active_profile.strip() and isinstance(profiles, dict):
+        profile_payload = profiles.get(active_profile.strip())
+        if isinstance(profile_payload, dict):
+            profile_objective = profile_payload.get("objective")
+            if isinstance(profile_objective, dict):
+                resolved = profile_objective
+
+    if not isinstance(resolved, dict):
+        return None
+    return json.loads(json.dumps(resolved))
+
+
 def objective_sections_from_trackb_payload(payload: dict[str, Any]) -> dict[str, Any]:
     sections: dict[str, Any] = {}
     top_level = payload.get("objective")
@@ -2466,6 +2789,9 @@ def objective_sections_from_trackb_payload(payload: dict[str, Any]) -> dict[str,
             if isinstance(objective, dict):
                 key = f"challenge_profiles.{profile_name}.objective"
                 sections[key] = json.loads(json.dumps(objective))
+    resolved = resolved_objective_from_trackb_payload(payload)
+    if isinstance(resolved, dict) and resolved != sections.get("objective"):
+        sections["resolved_objective"] = resolved
     return sections
 
 
@@ -2965,7 +3291,7 @@ def run_loop(args: argparse.Namespace) -> int:
     if not mutation_memory_path.is_absolute():
         mutation_memory_path = ROOT / mutation_memory_path
     mutation_memory: dict[str, Any] | None = None
-    mutation_memory_enabled = (not args.disable_mutation_memory) and language_norm in {"rust", "json"}
+    mutation_memory_enabled = (not args.disable_mutation_memory) and language_norm in {"rust", "json", "python"}
     if mutation_memory_enabled:
         # Persist seeded history to disk before iterations start so per-iteration
         # read/modify/write updates do not discard in-process seeded state.
@@ -3233,7 +3559,7 @@ def run_loop(args: argparse.Namespace) -> int:
 
         if (
             not changed
-            and mutation in {"json_trackb_no_change", "rust_no_change", "heuristic_no_change"}
+            and is_retryable_no_change_mutation(mutation)
             and bool(target.get("recover_from_no_change", True))
             and active_blocked
         ):
