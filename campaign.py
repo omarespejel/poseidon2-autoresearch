@@ -39,6 +39,9 @@ READINESS_REPORT = ROOT / "readiness_report.md"
 EVIDENCE_DIR = ROOT / "evidence"
 SUBMISSION_DIR = ROOT / "submission"
 MUTATION_MEMORY = ROOT / "work" / "mutation_memory.json"
+DEFAULT_LOOP_TARGET_SENTINEL = "cairo_poseidon_style_t8"
+DEFAULT_CRYPTANALYSIS_LOOP_TARGET = "poseidon2_cryptanalysis_trackb_kernel_fast"
+LEGACY_CRYPTANALYSIS_LOOP_TARGET = "poseidon2_cryptanalysis_trackb_fast"
 
 DEFAULT_INFORMATIONAL_READINESS_CHECKS: frozenset[str] = readiness_check.INFORMATIONAL_CHECKS
 
@@ -85,8 +88,8 @@ def default_real_optimize_targets() -> str:
 def default_crypto_optimize_targets() -> str:
     return ",".join(
         [
-            "poseidon2_cryptanalysis_trackb_kernel_fast",
-            "poseidon2_cryptanalysis_trackb_fast",
+            DEFAULT_CRYPTANALYSIS_LOOP_TARGET,
+            LEGACY_CRYPTANALYSIS_LOOP_TARGET,
             "poseidon2_cryptanalysis_trackb_verified_fast",
             "poseidon2_cryptanalysis_algebraic_fast",
             "poseidon2_cryptanalysis_poseidon64_signal_fast",
@@ -113,10 +116,20 @@ class RunResult:
 
 
 def campaign_log(args: argparse.Namespace, message: str) -> None:
-    if int(getattr(args, "verbose", 0)) <= 0:
+    try:
+        verbose = int(getattr(args, "verbose", 0) or 0)
+    except (TypeError, ValueError):
+        verbose = 0
+    if verbose <= 0:
         return
     stamp = dt.datetime.now(dt.timezone.utc).isoformat()
     print(f"[campaign {stamp}] {message}", file=sys.stderr, flush=True)
+
+
+def resolve_loop_target(track: str, loop_target: str) -> str:
+    if track == "cryptanalysis" and loop_target == DEFAULT_LOOP_TARGET_SENTINEL:
+        return DEFAULT_CRYPTANALYSIS_LOOP_TARGET
+    return loop_target
 
 
 def run(argv: list[str], *, stream_stderr: bool = False) -> RunResult:
@@ -440,7 +453,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Real benchmark profile for Lean baseline targets",
     )
     parser.add_argument("--no-bootstrap", action="store_true", help="Skip bootstrap step for real targets")
-    parser.add_argument("--loop-target", default="cairo_poseidon_style_t8", help="Target for the optimization loop")
+    parser.add_argument(
+        "--loop-target",
+        default=DEFAULT_LOOP_TARGET_SENTINEL,
+        help=(
+            "Target for the optimization loop. With --track cryptanalysis, leaving the sentinel default "
+            f"switches to {DEFAULT_CRYPTANALYSIS_LOOP_TARGET}; pin --loop-target "
+            f"{LEGACY_CRYPTANALYSIS_LOOP_TARGET} to preserve the previous default."
+        ),
+    )
     parser.add_argument("--loop-iterations", type=int, default=25, help="Loop iteration budget (0 = infinite)")
     parser.add_argument("--max-accepted", type=int, default=5, help="Stop loop after N accepted improvements")
     parser.add_argument(
@@ -625,9 +646,7 @@ def main(argv: list[str] | None = None) -> int:
         if not args.build_readiness:
             args.build_readiness = True
 
-    if args.track == "cryptanalysis" and args.loop_target == "cairo_poseidon_style_t8":
-        # Track B defaults to cryptanalysis objective unless user explicitly overrides.
-        args.loop_target = "poseidon2_cryptanalysis_trackb_kernel_fast"
+    args.loop_target = resolve_loop_target(args.track, args.loop_target)
 
     start_row_count = 0 if args.fresh or not RESULTS.exists() else len(parse_results())
 
