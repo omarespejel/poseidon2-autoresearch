@@ -2430,9 +2430,10 @@ def parse_flag_bool(value: Any, default: bool = False) -> bool:
     return default
 
 
-def resolved_objective_from_trackb_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
+def resolved_objective_from_trackb_payload(payload: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
     top_level = payload.get("objective")
     resolved = top_level if isinstance(top_level, dict) else None
+    source_key = "objective" if isinstance(top_level, dict) else None
 
     active_profile = payload.get("active_profile")
     profiles = payload.get("challenge_profiles")
@@ -2442,10 +2443,11 @@ def resolved_objective_from_trackb_payload(payload: dict[str, Any]) -> dict[str,
             profile_objective = profile_payload.get("objective")
             if isinstance(profile_objective, dict):
                 resolved = profile_objective
+                source_key = f"challenge_profiles.{active_profile.strip()}.objective"
 
     if not isinstance(resolved, dict):
-        return None
-    return json.loads(json.dumps(resolved))
+        return (None, None)
+    return (json.loads(json.dumps(resolved)), source_key)
 
 
 def objective_sections_from_trackb_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -2464,9 +2466,6 @@ def objective_sections_from_trackb_payload(payload: dict[str, Any]) -> dict[str,
             if isinstance(objective, dict):
                 key = f"challenge_profiles.{profile_name}.objective"
                 sections[key] = json.loads(json.dumps(objective))
-    resolved = resolved_objective_from_trackb_payload(payload)
-    if isinstance(resolved, dict) and resolved != sections.get("objective"):
-        sections["resolved_objective"] = resolved
     return sections
 
 
@@ -2502,6 +2501,16 @@ def trackb_objective_guard(
     for key in sorted(set(before_sections.keys()) | set(after_sections.keys())):
         if before_sections.get(key) != after_sections.get(key):
             changed_paths.append(key)
+
+    before_resolved, before_resolved_source = resolved_objective_from_trackb_payload(before_payload)
+    after_resolved, after_resolved_source = resolved_objective_from_trackb_payload(after_payload)
+    resolved_sources = {
+        source_key
+        for source_key in (before_resolved_source, after_resolved_source)
+        if isinstance(source_key, str) and source_key
+    }
+    if before_resolved != after_resolved and not resolved_sources.intersection(changed_paths):
+        changed_paths.append("resolved_objective")
 
     if changed_paths:
         return False, {"enabled": True, "status": "objective_modified", "paths": changed_paths}

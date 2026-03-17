@@ -162,6 +162,27 @@ class TrackBObjectiveGuardTests(unittest.TestCase):
         self.assertEqual(details.get("status"), "objective_modified")
         self.assertIn("resolved_objective", details.get("paths", []))
 
+    def test_guard_does_not_duplicate_active_profile_objective_change(self) -> None:
+        source = stable_trackb_source()
+        payload = json.loads(source)
+        profiles = payload.setdefault("challenge_profiles", {})
+        profiles["guard_active"] = {"objective": {"weight_algebraic": 0.15}}
+        payload["active_profile"] = "guard_active"
+        source = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+
+        profiles["guard_active"]["objective"]["weight_algebraic"] = 0.35
+        candidate = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+        ok, details = train.trackb_objective_guard(
+            current_source=source,
+            candidate_source=candidate,
+            source_path=TRACKB_PATH,
+            target_config={},
+        )
+        self.assertFalse(ok)
+        self.assertEqual(details.get("status"), "objective_modified")
+        self.assertIn("challenge_profiles.guard_active.objective", details.get("paths", []))
+        self.assertNotIn("resolved_objective", details.get("paths", []))
+
     def test_guard_allows_objective_change_with_opt_in(self) -> None:
         source = stable_trackb_source()
         payload = json.loads(source)
