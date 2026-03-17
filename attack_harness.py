@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib
 import itertools
 import json
 import math
@@ -20,6 +21,9 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parent
+DEFAULT_KERNEL_MODULE = "attack_kernels_immutable"
+ALLOWED_KERNEL_MODULES = frozenset({"attack_kernels", "attack_kernels_immutable"})
+IMMUTABLE_KERNEL_SHA256 = "89dffc2a6b4edcd89417426c1881fc133d9e7cef8058fc97c40348bfe9466fea"
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -1015,6 +1019,22 @@ def load_config(path: Path) -> dict[str, Any]:
     return payload
 
 
+def load_kernel_module(module_name: str):
+    selected = module_name.strip() or DEFAULT_KERNEL_MODULE
+    if selected not in ALLOWED_KERNEL_MODULES:
+        allowed = ", ".join(sorted(ALLOWED_KERNEL_MODULES))
+        raise ValueError(f"kernel module {selected!r} must be one of: {allowed}")
+    if selected == DEFAULT_KERNEL_MODULE:
+        module_path = ROOT / f"{selected}.py"
+        digest = hashlib.sha256(module_path.read_bytes()).hexdigest()
+        if digest != IMMUTABLE_KERNEL_SHA256:
+            raise RuntimeError(
+                f"Integrity check failed for {module_path.name}: "
+                f"expected {IMMUTABLE_KERNEL_SHA256}, got {digest}"
+            )
+    return importlib.import_module(selected)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run deterministic reduced-round Poseidon2 cryptanalysis harness")
     parser.add_argument("--config", default="config/track_b_attack_config.json", help="Path to Track B config JSON")
@@ -1022,6 +1042,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--profile",
         default="",
         help="Optional challenge profile key from config.challenge_profiles",
+    )
+    parser.add_argument(
+        "--kernel-module",
+        default=DEFAULT_KERNEL_MODULE,
+        help="Python module providing attack kernels for evaluation",
     )
     parser.add_argument("--mode", choices=["fast", "full"], default="fast", help="Search budget mode")
     parser.add_argument("--output-format", choices=["json", "pretty"], default="json", help="Output encoding")
@@ -1036,6 +1061,7 @@ def main(argv: list[str] | None = None) -> int:
         config_path = ROOT / config_path
     config_raw = load_config(config_path)
     config, selected_profile = resolve_profile_config(config_raw, args.profile)
+    kernels = load_kernel_module(args.kernel_module)
 
     spec = build_spec(config, mode=args.mode)
     search = parse_search(config, mode=args.mode)
@@ -1047,29 +1073,66 @@ def main(argv: list[str] | None = None) -> int:
         seed = int.from_bytes(hashlib.sha256(material).digest()[:8], "big")
         return random.Random(seed)  # noqa: S311 - deterministic benchmarking harness, not crypto RNG.
 
-    differential = differential_kernel(spec=spec, analysis=analysis, search=search, rng=kernel_rng("differential"))
-    mitm_preimage = mitm_truncated_preimage_kernel(
+    differential = kernels.differential_kernel(
+        spec=spec,
+        analysis=analysis,
+        search=search,
+        rng=kernel_rng("differential"),
+        random_state_fn=random_state,
+        poseidon2_permute_fn=poseidon2_permute,
+    )
+    mitm_preimage = kernels.mitm_truncated_preimage_kernel(
         spec=spec,
         analysis=analysis,
         search=search,
         rng=kernel_rng("mitm_preimage"),
+        random_state_fn=random_state,
+        poseidon2_permute_fn=poseidon2_permute,
+        poseidon2_prefix_fn=poseidon2_prefix,
+        poseidon2_invert_to_prefix_fn=poseidon2_invert_to_prefix,
     )
-    collision = birthday_collision_kernel(spec=spec, analysis=analysis, search=search, rng=kernel_rng("collision"))
-    algebraic = algebraic_elimination_kernel(spec=spec, analysis=analysis, search=search, rng=kernel_rng("algebraic"))
-    metrics = score(
+    collision = kernels.birthday_collision_kernel(
+        spec=spec,
+        analysis=analysis,
+        search=search,
+        rng=kernel_rng("collision"),
+        random_state_fn=random_state,
+        poseidon2_permute_fn=poseidon2_permute,
+    )
+    algebraic = kernels.algebraic_elimination_kernel(
+        spec=spec,
+        analysis=analysis,
+        search=search,
+        rng=kernel_rng("algebraic"),
+        random_state_fn=random_state,
+        poseidon2_prefix_fn=poseidon2_prefix,
+        clamp_int_fn=clamp_int,
+    )
+    metrics = kernels.score(
         config=config,
         search=search,
         differential=differential,
         mitm_preimage=mitm_preimage,
         collision=collision,
         algebraic=algebraic,
+        clamp_float_fn=clamp_float,
+        parse_float_fn=parse_float,
     )
+
+    kernel_module_name = getattr(kernels, "__name__", args.kernel_module)
+    repro_parts = [f"python3 attack_harness.py --config {config_path}"]
+    if kernel_module_name:
+        repro_parts.append(f"--kernel-module {kernel_module_name}")
+    if selected_profile:
+        repro_parts.append(f"--profile {selected_profile}")
+    repro_parts.append(f"--mode {args.mode} --output-format json")
 
     payload = {
         "ok": True,
         "mode": args.mode,
         "config_path": str(config_path),
         "challenge_profile": selected_profile,
+        "kernel_module": kernel_module_name,
         "spec": {
             "field_modulus": spec.modulus,
             "width": spec.width,
@@ -1108,11 +1171,7 @@ def main(argv: list[str] | None = None) -> int:
             },
         },
         "repro": {
-            "command": (
-                f"python3 attack_harness.py --config {config_path} "
-                f"{f'--profile {selected_profile} ' if selected_profile else ''}"
-                f"--mode {args.mode} --output-format json"
-            )
+            "command": " ".join(repro_parts)
         },
     }
 

@@ -20,7 +20,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import readiness_check
 
@@ -161,16 +161,36 @@ def must_run(argv: list[str], *, label: str, stream_stderr: bool = False) -> Run
     return result
 
 
-def must_run_json(argv: list[str], *, label: str, stream_stderr: bool = False) -> dict[str, Any]:
+def fail_json_contract(*, label: str, reason: str, stdout: str) -> NoReturn:
+    tail = stdout[-2000:] if stdout else ""
+    sys.stderr.write(f"Invalid JSON payload [{label}]: {reason}\n")
+    if tail:
+        sys.stderr.write(tail + "\n")
+    raise SystemExit(2)
+
+
+def must_run_json(
+    argv: list[str],
+    *,
+    label: str,
+    stream_stderr: bool = False,
+    require_ok: bool = True,
+) -> dict[str, Any]:
     result = must_run(argv, label=label, stream_stderr=stream_stderr)
     raw = result.stdout.strip()
     if not raw:
-        return {}
+        fail_json_contract(label=label, reason="empty stdout", stdout="")
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError:
-        return {"parse_error": True, "stdout_tail": raw[-2000:]}
-    return payload if isinstance(payload, dict) else {"parse_error": True, "stdout_tail": raw[-2000:]}
+        fail_json_contract(label=label, reason="malformed JSON", stdout=raw)
+    if not isinstance(payload, dict):
+        fail_json_contract(label=label, reason="JSON root must be an object", stdout=raw)
+    if require_ok and "ok" not in payload:
+        fail_json_contract(label=label, reason="missing required 'ok' field", stdout=raw)
+    if require_ok and not bool(payload.get("ok")):
+        fail_json_contract(label=label, reason="step reported ok=false", stdout=raw)
+    return payload
 
 
 def reset_outputs(mutation_memory_path: Path = MUTATION_MEMORY) -> None:
