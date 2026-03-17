@@ -70,7 +70,7 @@
     },
     "poseidon2_cryptanalysis_trackb_kernel_fast": {
       "type": "command",
-      "description": "Track B kernel-first lane mutating attack_harness kernels (research_fast, fast mode)",
+      "description": "Track B kernel-first lane mutating attack_harness kernels (research_fast, target-scoped replay, fast mode)",
       "project_dir": ".",
       "source_file": "attack_harness.py",
       "language": "Python",
@@ -83,6 +83,7 @@
       "blocked_mutation_ttl": 4,
       "mutation_schedule": "ucb",
       "mutation_ucb_explore": 0.6,
+      "mutation_memory_namespace": "kernel_fast_research",
       "required_snippets": [
         "def differential_kernel(",
         "def mitm_truncated_preimage_kernel(",
@@ -109,7 +110,7 @@
     },
     "poseidon2_cryptanalysis_trackb_kernel_signal_fast": {
       "type": "command",
-      "description": "Track B kernel-first signal lane on poseidon64_bounty_shape (replaces the config-mutation default arm, fast mode)",
+      "description": "Track B kernel-first signal lane on poseidon64_bounty_shape (deterministic fast-mode evaluator, target-scoped replay, replaces the config-mutation default arm)",
       "project_dir": ".",
       "source_file": "attack_harness.py",
       "language": "Python",
@@ -122,6 +123,7 @@
       "blocked_mutation_ttl": 4,
       "mutation_schedule": "ucb",
       "mutation_ucb_explore": 0.6,
+      "mutation_memory_namespace": "kernel_signal_poseidon64",
       "required_snippets": [
         "def differential_kernel(",
         "def mitm_truncated_preimage_kernel(",
@@ -141,7 +143,7 @@
         "json"
       ],
       "warmup_runs": 0,
-      "runs": 3,
+      "runs": 1,
       "aggregate": "median",
       "metric_source": "json_stdout",
       "metric_json_path": "metrics.attack_score_signal"
