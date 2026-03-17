@@ -2770,6 +2770,8 @@ def parse_flag_bool(value: Any, default: bool = False) -> bool:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return value != 0
     return default
+
+
 def resolved_objective_from_trackb_payload(payload: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
     top_level = payload.get("objective")
     resolved = top_level if isinstance(top_level, dict) else None
@@ -2788,24 +2790,6 @@ def resolved_objective_from_trackb_payload(payload: dict[str, Any]) -> tuple[dic
     if not isinstance(resolved, dict):
         return (None, None)
     return (json.loads(json.dumps(resolved)), source_key)
-
-
-def resolved_objective_from_trackb_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
-    top_level = payload.get("objective")
-    resolved = top_level if isinstance(top_level, dict) else None
-
-    active_profile = payload.get("active_profile")
-    profiles = payload.get("challenge_profiles")
-    if isinstance(active_profile, str) and active_profile.strip() and isinstance(profiles, dict):
-        profile_payload = profiles.get(active_profile.strip())
-        if isinstance(profile_payload, dict):
-            profile_objective = profile_payload.get("objective")
-            if isinstance(profile_objective, dict):
-                resolved = profile_objective
-
-    if not isinstance(resolved, dict):
-        return None
-    return json.loads(json.dumps(resolved))
 
 
 def objective_sections_from_trackb_payload(payload: dict[str, Any]) -> dict[str, Any]:
