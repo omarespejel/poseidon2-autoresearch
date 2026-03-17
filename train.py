@@ -55,6 +55,12 @@ ALLOWED_TARGET_OVERRIDE_KEYS = {
     "blocked_mutation_ttl",
     "mutation_schedule",
     "mutation_ucb_explore",
+    "compound_every",
+    "compound_limit",
+    "compound_second_window",
+    "operator_demote_streak",
+    "operator_disable_streak",
+    "operator_reward_epsilon",
 }
 DEFAULT_MUTATION_MEMORY_FILE = ROOT / "work" / "mutation_memory.json"
 DEFAULT_MUTATION_MEMORY_MAX_ENTRIES = 512
@@ -63,6 +69,10 @@ DEFAULT_MUTATION_MEMORY_ACCEPTED_STALE_MULTIPLIER = 4.0
 DEFAULT_MUTATION_MEMORY_MIN_ACCEPTED_TOTAL = 2
 DEFAULT_MUTATION_MEMORY_MIN_SUCCESS_RATE = 0.30
 DEFAULT_MUTATION_MEMORY_SEED_VERSION = 2
+DEFAULT_MUTATOR_STATS_FILE = ROOT / "work" / "mutator_stats.json"
+DEFAULT_OPERATOR_REWARD_EPSILON = 1e-12
+DEFAULT_OPERATOR_DEMOTE_STREAK = 6
+DEFAULT_OPERATOR_DISABLE_STREAK = 12
 
 
 def configure_debug_environment(args: argparse.Namespace) -> None:
@@ -1166,6 +1176,7 @@ def python_heuristic_candidate(
     target_config: dict[str, Any] | None = None,
     preferred_mutations: list[str] | None = None,
     mutation_memory: dict[str, Any] | None = None,
+    operator_penalties: dict[str, float] | None = None,
     target_name: str = "",
     strict_target_scope: bool = False,
 ) -> tuple[str, str, bool]:
@@ -1313,7 +1324,7 @@ def python_heuristic_candidate(
                 total_memory_observations = float(
                     scope_totals.get(history_scope, scope_totals.get("global", 0.0))
                 )
-                item["ucb_score"] = mutation_ucb_score(
+                base_score = mutation_ucb_score(
                     accepted=accepted_hist,
                     rejected=rejected_hist,
                     total_observations=total_memory_observations,
@@ -1322,6 +1333,8 @@ def python_heuristic_candidate(
                     schedule_tier=int(item["tier"]),
                     attempt_count=int(item["attempts"]),
                 )
+                penalty = mutator_penalty_for_label(str(item["mutation"]), operator_penalties or {})
+                item["ucb_score"] = base_score - penalty
             candidates.sort(
                 key=lambda item: (
                     -float(item.get("ucb_score", 0.0)),
@@ -1334,6 +1347,7 @@ def python_heuristic_candidate(
         else:
             candidates.sort(
                 key=lambda item: (
+                    mutator_penalty_for_label(str(item["mutation"]), operator_penalties or {}),
                     int(item["tier"]),
                     int(item["pref_class"]),
                     int(item["pref_rank"]),
@@ -1891,6 +1905,7 @@ def heuristic_candidate(
     target_config: dict[str, Any] | None = None,
     preferred_mutations: list[str] | None = None,
     mutation_memory: dict[str, Any] | None = None,
+    operator_penalties: dict[str, float] | None = None,
     target_name: str = "",
     strict_target_scope: bool = False,
 ) -> tuple[str, str, bool]:
@@ -1934,6 +1949,7 @@ def heuristic_candidate(
             target_config=target_config,
             preferred_mutations=preferred_mutations,
             mutation_memory=mutation_memory,
+            operator_penalties=operator_penalties,
             target_name=target_name,
             strict_target_scope=strict_target_scope,
         )
@@ -2559,6 +2575,60 @@ def resolve_mutation_memory_target_scope(
     return (f"namespace:{namespace}", True)
 
 
+def update_and_save_operator_stats(
+    path: Path,
+    current_stats: dict[str, Any],
+    *,
+    target_name: str,
+    mutation: str,
+    language: str,
+    accepted: bool,
+    reward: float,
+    runtime_s: float,
+    timestamp: str,
+    reward_epsilon: float,
+    demote_streak: int,
+    disable_streak: int,
+) -> dict[str, Any]:
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    with file_lock(lock_path):
+        latest = load_mutator_stats(path)
+        update_operator_stats(
+            latest,
+            target_name=target_name,
+            mutation=mutation,
+            language=language,
+            accepted=accepted,
+            reward=reward,
+            runtime_s=runtime_s,
+            timestamp=timestamp,
+            reward_epsilon=reward_epsilon,
+            demote_streak=demote_streak,
+            disable_streak=disable_streak,
+        )
+        save_mutator_stats(path, latest)
+
+    current_stats.clear()
+    current_stats.update(latest)
+    return current_stats
+
+
+def compute_operator_reward(
+    *,
+    accepted: bool,
+    higher_is_better: bool,
+    best_before: float,
+    best_after: float,
+    runtime_s: float,
+) -> float:
+    if not accepted:
+        return 0.0
+    oriented_delta = (best_after - best_before) if higher_is_better else (best_before - best_after)
+    if oriented_delta <= 0.0:
+        return 0.0
+    return oriented_delta / max(1e-6, runtime_s)
+
+
 def preferred_mutations_from_memory(
     memory: dict[str, Any],
     *,
@@ -2757,6 +2827,239 @@ def mutation_ucb_score(
     tier_bonus = 0.02 if schedule_tier == 0 else 0.0
     attempt_penalty = min(0.25, 0.01 * max(0, attempt_count))
     return posterior_mean + bonus + preference_bonus + tier_bonus - attempt_penalty
+
+
+def load_mutator_stats(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {"version": 1, "targets": {}}
+    try:
+        payload = json.loads(path.read_text())
+    except json.JSONDecodeError:
+        return {"version": 1, "targets": {}}
+    if not isinstance(payload, dict):
+        return {"version": 1, "targets": {}}
+    payload.setdefault("version", 1)
+    if not isinstance(payload.get("targets"), dict):
+        payload["targets"] = {}
+    return payload
+
+
+def save_mutator_stats(path: Path, stats: dict[str, Any]) -> None:
+    atomic_write_text(path, json.dumps(stats, indent=2, sort_keys=True) + "\n")
+
+
+def mutator_stats_target_entries(stats: dict[str, Any], *, target_name: str) -> dict[str, Any]:
+    targets = stats.setdefault("targets", {})
+    if not isinstance(targets, dict):
+        stats["targets"] = {}
+        targets = stats["targets"]
+    target = targets.setdefault(target_name, {"mutations": {}})
+    if not isinstance(target, dict):
+        targets[target_name] = {"mutations": {}}
+        target = targets[target_name]
+    mutations = target.setdefault("mutations", {})
+    if not isinstance(mutations, dict):
+        target["mutations"] = {}
+        mutations = target["mutations"]
+    return mutations
+
+
+def mutation_matches_language(label: str, *, language: str) -> bool:
+    language_norm = language.strip().lower()
+    if not language_norm:
+        return True
+    prefix_map = {"python": "python_", "rust": "rust_", "json": "json_"}
+    required_prefix = prefix_map.get(language_norm)
+    if required_prefix is None:
+        return True
+    parts = [part.strip() for part in label.split("+") if part.strip()]
+    if not parts:
+        return False
+    return all(part.startswith(required_prefix) for part in parts)
+
+
+def mutator_penalty_for_label(label: str, penalties: dict[str, float]) -> float:
+    direct = float(penalties.get(label, 0.0))
+    if direct > 0.0:
+        return direct
+    if "+" not in label:
+        return 0.0
+    parts = [part.strip() for part in label.split("+") if part.strip()]
+    if not parts:
+        return 0.0
+    values = [float(penalties.get(part, 0.0)) for part in parts]
+    if not values:
+        return 0.0
+    return max(values)
+
+
+def compute_operator_state(
+    stats: dict[str, Any],
+    *,
+    target_name: str,
+    language: str,
+    demote_streak: int,
+    disable_streak: int,
+) -> tuple[set[str], dict[str, float], list[dict[str, Any]]]:
+    entries = mutator_stats_target_entries(stats, target_name=target_name)
+    candidate_rows: list[dict[str, Any]] = []
+
+    for label, raw in entries.items():
+        if not isinstance(label, str) or not isinstance(raw, dict):
+            continue
+        if not mutation_matches_language(label, language=language):
+            continue
+        attempts = int(raw.get("attempts", 0))
+        accepted = int(raw.get("accepted", 0))
+        rejected = int(raw.get("rejected", 0))
+        no_signal_streak = int(raw.get("no_signal_streak", 0))
+        reward_sum = float(raw.get("reward_sum", 0.0))
+        avg_reward = reward_sum / max(1, attempts)
+        row = {
+            "label": label,
+            "attempts": attempts,
+            "accepted": accepted,
+            "rejected": rejected,
+            "no_signal_streak": no_signal_streak,
+            "avg_reward": avg_reward,
+            "last_reward": float(raw.get("last_reward", 0.0)),
+            "disabled": disable_streak > 0 and no_signal_streak >= disable_streak,
+            "demoted": demote_streak > 0 and no_signal_streak >= demote_streak,
+        }
+        candidate_rows.append(row)
+
+    disabled = {str(row["label"]) for row in candidate_rows if bool(row["disabled"])}
+    # Keep at least two operators active to avoid dead loops.
+    min_active = 2
+    if len(candidate_rows) > min_active and len(disabled) >= len(candidate_rows) - (min_active - 1):
+        ranked = sorted(candidate_rows, key=lambda row: (float(row["avg_reward"]), -int(row["attempts"])), reverse=True)
+        protected = {str(row["label"]) for row in ranked[:min_active]}
+        disabled = {label for label in disabled if label not in protected}
+
+    penalties: dict[str, float] = {}
+    for row in candidate_rows:
+        label = str(row["label"])
+        if label in disabled:
+            continue
+        if bool(row["demoted"]):
+            streak = max(0, int(row["no_signal_streak"]) - max(0, demote_streak))
+            penalties[label] = min(0.20, 0.05 + (0.01 * streak))
+
+    candidate_rows.sort(key=lambda row: (float(row["avg_reward"]), -int(row["attempts"]), str(row["label"])), reverse=True)
+    return disabled, penalties, candidate_rows
+
+
+def update_operator_stats(
+    stats: dict[str, Any],
+    *,
+    target_name: str,
+    mutation: str,
+    language: str,
+    accepted: bool,
+    reward: float,
+    runtime_s: float,
+    timestamp: str,
+    reward_epsilon: float,
+    demote_streak: int,
+    disable_streak: int,
+) -> dict[str, Any]:
+    entries = mutator_stats_target_entries(stats, target_name=target_name)
+    entry = entries.setdefault(
+        mutation,
+        {
+            "attempts": 0,
+            "accepted": 0,
+            "rejected": 0,
+            "no_signal_streak": 0,
+            "reward_sum": 0.0,
+            "best_reward": 0.0,
+            "last_reward": 0.0,
+            "last_runtime_s": 0.0,
+            "demoted": False,
+            "disabled": False,
+            "languages": {},
+            "updated_at": timestamp,
+        },
+    )
+    if not isinstance(entry, dict):
+        entries[mutation] = {
+            "attempts": 0,
+            "accepted": 0,
+            "rejected": 0,
+            "no_signal_streak": 0,
+            "reward_sum": 0.0,
+            "best_reward": 0.0,
+            "last_reward": 0.0,
+            "last_runtime_s": 0.0,
+            "demoted": False,
+            "disabled": False,
+            "languages": {},
+            "updated_at": timestamp,
+        }
+        entry = entries[mutation]
+
+    entry["attempts"] = int(entry.get("attempts", 0)) + 1
+    if accepted:
+        entry["accepted"] = int(entry.get("accepted", 0)) + 1
+    else:
+        entry["rejected"] = int(entry.get("rejected", 0)) + 1
+
+    reward_f = float(reward)
+    entry["reward_sum"] = float(entry.get("reward_sum", 0.0)) + reward_f
+    entry["last_reward"] = reward_f
+    entry["last_runtime_s"] = max(0.0, float(runtime_s))
+    entry["best_reward"] = max(float(entry.get("best_reward", 0.0)), reward_f)
+    attempts = max(1, int(entry["attempts"]))
+    entry["avg_reward"] = float(entry["reward_sum"]) / float(attempts)
+    if reward_f > max(0.0, float(reward_epsilon)):
+        entry["no_signal_streak"] = 0
+    else:
+        entry["no_signal_streak"] = int(entry.get("no_signal_streak", 0)) + 1
+    streak = int(entry.get("no_signal_streak", 0))
+    entry["demoted"] = bool(demote_streak > 0 and streak >= demote_streak)
+    entry["disabled"] = bool(disable_streak > 0 and streak >= disable_streak)
+    entry["updated_at"] = timestamp
+
+    raw_languages = entry.setdefault("languages", {})
+    if isinstance(raw_languages, dict):
+        language_entry = raw_languages.setdefault(language, {"attempts": 0, "accepted": 0, "rejected": 0})
+        if isinstance(language_entry, dict):
+            language_entry["attempts"] = int(language_entry.get("attempts", 0)) + 1
+            if accepted:
+                language_entry["accepted"] = int(language_entry.get("accepted", 0)) + 1
+            else:
+                language_entry["rejected"] = int(language_entry.get("rejected", 0)) + 1
+
+    return entry
+
+
+def save_operator_stats_artifact(
+    *,
+    target_name: str,
+    run_label: str,
+    language: str,
+    stats_path: Path,
+    reward_epsilon: float,
+    demote_streak: int,
+    disable_streak: int,
+    rows: list[dict[str, Any]],
+) -> Path:
+    run_root = ARTIFACTS_DIR / target_name / run_label
+    run_root.mkdir(parents=True, exist_ok=True)
+    out_path = run_root / "mutator_stats.json"
+    payload = {
+        "timestamp": prepare.now_iso(),
+        "target": target_name,
+        "run_label": run_label,
+        "language": language,
+        "stats_file": str(stats_path),
+        "reward_epsilon": reward_epsilon,
+        "demote_streak": demote_streak,
+        "disable_streak": disable_streak,
+        "mutations": rows,
+    }
+    out_path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+    return out_path
 
 
 def required_snippets_from_target(target_config: dict[str, Any]) -> list[str]:
@@ -3539,6 +3842,27 @@ def run_loop(args: argparse.Namespace) -> int:
         target,
     )
 
+    operator_stats_path = Path(args.operator_stats_file)
+    if not operator_stats_path.is_absolute():
+        operator_stats_path = ROOT / operator_stats_path
+    operator_stats: dict[str, Any] | None = None
+    operator_stats_enabled = (not args.disable_operator_stats) and language_norm in {"rust", "json", "python"}
+    operator_reward_epsilon = max(0.0, float(target.get("operator_reward_epsilon", args.operator_reward_epsilon)))
+    operator_demote_streak = max(0, int(target.get("operator_demote_streak", args.operator_demote_streak)))
+    operator_disable_streak = max(0, int(target.get("operator_disable_streak", args.operator_disable_streak)))
+    if operator_stats_enabled:
+        lock_path = operator_stats_path.with_suffix(operator_stats_path.suffix + ".lock")
+        try:
+            with file_lock(lock_path):
+                operator_stats = load_mutator_stats(operator_stats_path)
+                save_mutator_stats(operator_stats_path, operator_stats)
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"[train] Warning: operator stats bootstrap failed ({exc}); continuing without operator stats",
+                file=sys.stderr,
+            )
+            operator_stats = None
+
     max_iterations = args.iterations if args.iterations > 0 else None
     iterations_label = str(args.iterations) if max_iterations is not None else "infinite"
 
@@ -3549,7 +3873,8 @@ def run_loop(args: argparse.Namespace) -> int:
             f"max_accepted={args.max_accepted or 'none'} "
             f"max_runtime={args.max_runtime_seconds or 'none'}s "
             f"artifacts={args.artifacts} "
-            f"git_checkpoint={git_checkpoint_mode}"
+            f"git_checkpoint={git_checkpoint_mode} "
+            f"operator_stats={'on' if operator_stats is not None else 'off'}"
         ),
         level=1,
     )
@@ -3652,6 +3977,13 @@ def run_loop(args: argparse.Namespace) -> int:
                 if isinstance((mutation_memory or {}).get("mutations"), dict)
                 else 0,
             },
+            "operator_stats": {
+                "enabled": operator_stats is not None,
+                "path": str(operator_stats_path),
+                "reward_epsilon": operator_reward_epsilon,
+                "demote_streak": operator_demote_streak,
+                "disable_streak": operator_disable_streak,
+            },
             "compute_budget": {
                 "max_iterations": max_iterations,
                 "max_accepted": args.max_accepted if args.max_accepted > 0 else None,
@@ -3722,7 +4054,36 @@ def run_loop(args: argparse.Namespace) -> int:
 
         mutation = ""
         diagnostics: dict[str, Any] = {}
-        active_blocked = {name for name, until in blocked_mutations_until.items() if until >= iteration}
+        timed_blocked = {name for name, until in blocked_mutations_until.items() if until >= iteration}
+        operator_disabled: set[str] = set()
+        operator_penalties: dict[str, float] = {}
+        operator_rows: list[dict[str, Any]] = []
+        if operator_stats is not None:
+            operator_disabled, operator_penalties, operator_rows = compute_operator_state(
+                operator_stats,
+                target_name=args.target,
+                language=language_norm,
+                demote_streak=operator_demote_streak,
+                disable_streak=operator_disable_streak,
+            )
+            if operator_rows:
+                diagnostics["operator_leaderboard_top"] = [
+                    {
+                        "mutation": str(row["label"]),
+                        "avg_reward": round(float(row["avg_reward"]), 8),
+                        "attempts": int(row["attempts"]),
+                        "streak": int(row["no_signal_streak"]),
+                        "disabled": bool(row["disabled"]),
+                    }
+                    for row in operator_rows[:5]
+                ]
+            if operator_disabled:
+                diagnostics["auto_disabled_mutations"] = sorted(operator_disabled)
+            if operator_penalties:
+                diagnostics["demoted_mutation_penalties"] = {
+                    key: round(float(value), 6) for key, value in list(operator_penalties.items())[:12]
+                }
+        active_blocked = set(timed_blocked) | set(operator_disabled)
         if active_blocked:
             diagnostics["active_blocked_mutations"] = sorted(active_blocked)
         preferred_mutations: list[str] = []
@@ -3769,6 +4130,7 @@ def run_loop(args: argparse.Namespace) -> int:
                     target_config=target,
                     preferred_mutations=preferred_mutations,
                     mutation_memory=mutation_memory,
+                    operator_penalties=operator_penalties,
                     target_name=memory_target_name,
                     strict_target_scope=strict_mutation_memory_scope,
                 )
@@ -3787,6 +4149,7 @@ def run_loop(args: argparse.Namespace) -> int:
                 target_config=target,
                 preferred_mutations=preferred_mutations,
                 mutation_memory=mutation_memory,
+                operator_penalties=operator_penalties,
                 target_name=memory_target_name,
                 strict_target_scope=strict_mutation_memory_scope,
             )
@@ -3795,14 +4158,15 @@ def run_loop(args: argparse.Namespace) -> int:
             not changed
             and is_retryable_no_change_mutation(mutation)
             and bool(target.get("recover_from_no_change", True))
-            and active_blocked
+            and timed_blocked
         ):
-            released = release_oldest_blocked_mutation(blocked_mutations_until, active_blocked)
+            released = release_oldest_blocked_mutation(blocked_mutations_until, timed_blocked)
             if released:
                 diagnostics["released_blocked_mutation"] = released
                 retry_blocked = {
                     name for name, until in blocked_mutations_until.items() if until >= iteration
                 }
+                retry_blocked |= set(operator_disabled)
                 if retry_blocked:
                     diagnostics["active_blocked_mutations"] = sorted(retry_blocked)
                 else:
@@ -3817,6 +4181,7 @@ def run_loop(args: argparse.Namespace) -> int:
                     target_config=target,
                     preferred_mutations=preferred_mutations,
                     mutation_memory=mutation_memory,
+                    operator_penalties=operator_penalties,
                     target_name=memory_target_name,
                     strict_target_scope=strict_mutation_memory_scope,
                 )
@@ -3896,6 +4261,21 @@ def run_loop(args: argparse.Namespace) -> int:
                 f"iter {iteration}: rejected mutation={mutation_key} reason=required_snippet_guardrail",
                 level=1,
             )
+            if operator_stats is not None:
+                operator_stats = update_and_save_operator_stats(
+                    operator_stats_path,
+                    operator_stats,
+                    target_name=args.target,
+                    mutation=mutation_key,
+                    language=infer_mutation_language(mutation=mutation_key, target_language=language_norm),
+                    accepted=False,
+                    reward=0.0,
+                    runtime_s=0.0,
+                    timestamp=prepare.now_iso(),
+                    reward_epsilon=operator_reward_epsilon,
+                    demote_streak=operator_demote_streak,
+                    disable_streak=operator_disable_streak,
+                )
             continue
 
         objective_guard_ok, objective_guard_details = trackb_objective_guard(
@@ -3950,6 +4330,21 @@ def run_loop(args: argparse.Namespace) -> int:
                 f"iter {iteration}: rejected mutation={mutation_key} reason=trackb_objective_guardrail",
                 level=1,
             )
+            if operator_stats is not None:
+                operator_stats = update_and_save_operator_stats(
+                    operator_stats_path,
+                    operator_stats,
+                    target_name=args.target,
+                    mutation=mutation_key,
+                    language=infer_mutation_language(mutation=mutation_key, target_language=language_norm),
+                    accepted=False,
+                    reward=0.0,
+                    runtime_s=0.0,
+                    timestamp=prepare.now_iso(),
+                    reward_epsilon=operator_reward_epsilon,
+                    demote_streak=operator_demote_streak,
+                    disable_streak=operator_disable_streak,
+                )
             continue
 
         source_path.write_text(candidate)
@@ -4109,6 +4504,38 @@ def run_loop(args: argparse.Namespace) -> int:
                     metric_after=best_metric if improved else None,
                 )
 
+            if operator_stats is not None:
+                runtime_s = (
+                    float(result.get("check_s", 0.0))
+                    + float(result.get("info_or_bench_s", 0.0))
+                    + float(result.get("execute_s", 0.0))
+                )
+                reward = compute_operator_reward(
+                    accepted=improved,
+                    higher_is_better=bool(target["higher_is_better"]),
+                    best_before=best_before,
+                    best_after=best_metric,
+                    runtime_s=runtime_s,
+                )
+                operator_stats = update_and_save_operator_stats(
+                    operator_stats_path,
+                    operator_stats,
+                    target_name=args.target,
+                    mutation=mutation_key,
+                    language=infer_mutation_language(mutation=mutation_key, target_language=language_norm),
+                    accepted=improved,
+                    reward=reward,
+                    runtime_s=runtime_s,
+                    timestamp=prepare.now_iso(),
+                    reward_epsilon=operator_reward_epsilon,
+                    demote_streak=operator_demote_streak,
+                    disable_streak=operator_disable_streak,
+                )
+                diagnostics["operator_reward"] = {
+                    "reward": reward,
+                    "runtime_s": runtime_s,
+                }
+
             should_write_artifact = args.artifacts == "all" or (args.artifacts == "accepted" and improved)
             if should_write_artifact:
                 artifact_source = candidate if improved or args.artifacts == "all" else current_source
@@ -4251,6 +4678,37 @@ def run_loop(args: argparse.Namespace) -> int:
         }
     )
 
+    operator_artifact_path: Path | None = None
+    if operator_stats is not None:
+        _, _, operator_rows = compute_operator_state(
+            operator_stats,
+            target_name=args.target,
+            language=language_norm,
+            demote_streak=operator_demote_streak,
+            disable_streak=operator_disable_streak,
+        )
+        operator_artifact_path = save_operator_stats_artifact(
+            target_name=args.target,
+            run_label=run_label,
+            language=language_norm,
+            stats_path=operator_stats_path,
+            reward_epsilon=operator_reward_epsilon,
+            demote_streak=operator_demote_streak,
+            disable_streak=operator_disable_streak,
+            rows=operator_rows,
+        )
+        prepare.append_log(
+            {
+                "event": "operator_stats_artifact",
+                "timestamp": prepare.now_iso(),
+                "target": args.target,
+                "run_label": run_label,
+                "path": str(operator_artifact_path),
+                "mutations": len(operator_rows),
+            }
+        )
+        train_log(args, f"wrote operator stats artifact: {operator_artifact_path}", level=1)
+
     print(
         json.dumps(
             {
@@ -4264,6 +4722,8 @@ def run_loop(args: argparse.Namespace) -> int:
                 "max_runtime_seconds": args.max_runtime_seconds if args.max_runtime_seconds > 0 else None,
                 "git_checkpoint_mode": git_checkpoint_mode,
                 "git_checkpoint_prefix": git_checkpoint_prefix if git_checkpoint_mode != "off" else None,
+                "operator_stats_file": str(operator_stats_path) if operator_stats is not None else None,
+                "operator_stats_artifact": str(operator_artifact_path) if operator_artifact_path is not None else None,
                 "elapsed_seconds": elapsed_seconds,
                 "stop_reason": stop_reason,
             },
@@ -4333,6 +4793,34 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable mutation replay memory and use only per-run heuristics",
     )
     parser.add_argument(
+        "--operator-stats-file",
+        default=str(DEFAULT_MUTATOR_STATS_FILE),
+        help="Path to persisted mutator leaderboard stats (reward/demotion/disable)",
+    )
+    parser.add_argument(
+        "--disable-operator-stats",
+        action="store_true",
+        help="Disable mutator leaderboard stats and auto demotion/disable logic",
+    )
+    parser.add_argument(
+        "--operator-reward-epsilon",
+        type=float,
+        default=DEFAULT_OPERATOR_REWARD_EPSILON,
+        help="Reward threshold treated as no-signal for mutator streak accounting",
+    )
+    parser.add_argument(
+        "--operator-demote-streak",
+        type=int,
+        default=DEFAULT_OPERATOR_DEMOTE_STREAK,
+        help="No-signal streak before mutator demotion penalty is applied",
+    )
+    parser.add_argument(
+        "--operator-disable-streak",
+        type=int,
+        default=DEFAULT_OPERATOR_DISABLE_STREAK,
+        help="No-signal streak before mutator is auto-disabled",
+    )
+    parser.add_argument(
         "--git-checkpoint-mode",
         choices=["off", "accepted", "all"],
         default="off",
@@ -4351,6 +4839,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.iterations < 0:
         parser.error("--iterations must be >= 0")
+    if args.operator_reward_epsilon < 0:
+        parser.error("--operator-reward-epsilon must be >= 0")
+    if args.operator_demote_streak < 0:
+        parser.error("--operator-demote-streak must be >= 0")
+    if args.operator_disable_streak < 0:
+        parser.error("--operator-disable-streak must be >= 0")
     return run_loop(args)
 
 

@@ -312,6 +312,39 @@ def helper():
         self.assertNotEqual(candidate, source)
         self.assertEqual(mutation, "python_trackb_diff_secondary_lane_structure")
 
+    def test_operator_stats_demote_then_disable_on_no_signal_streak(self) -> None:
+        stats = {"version": 1, "targets": {}}
+        for _ in range(3):
+            train.update_operator_stats(
+                stats,
+                target_name="poseidon2_cryptanalysis_trackb_kernel_fast",
+                mutation="python_trackb_diff_multi_delta_prob_up",
+                language="python",
+                accepted=False,
+                reward=0.0,
+                runtime_s=1.0,
+                timestamp="2026-03-17T00:00:00+00:00",
+                reward_epsilon=1e-12,
+                demote_streak=2,
+                disable_streak=3,
+            )
+        _, penalties, rows = train.compute_operator_state(
+            stats,
+            target_name="poseidon2_cryptanalysis_trackb_kernel_fast",
+            language="python",
+            demote_streak=2,
+            disable_streak=3,
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0]["demoted"])
+        self.assertTrue(rows[0]["disabled"])
+        self.assertNotIn("python_trackb_diff_multi_delta_prob_up", penalties)
+
+    def test_mutator_penalty_for_compound_uses_part_penalty(self) -> None:
+        penalties = {"python_trackb_a": 0.05, "python_trackb_b": 0.11}
+        score = train.mutator_penalty_for_label("python_trackb_a+python_trackb_b", penalties)
+        self.assertAlmostEqual(score, 0.11, places=6)
+
     def test_algorithmic_mitm_key_mutator_applies(self) -> None:
         source = harness_source()
         candidate, mutation, changed = train.python_mutator_mitm_augmented_middle_key(source)
