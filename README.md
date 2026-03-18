@@ -330,13 +330,15 @@ Kernel-first Track B targets add three extra search policies on top of that:
 - single-kernel focus: present one attack family per Codex request, with only the relevant helper summaries, instead of prompting over the entire kernel module
 - family scheduler + novelty filter: allocate Codex attempts across `differential`, `mitm`, `collision`, and `algebraic` kernels using bandit-style scoring, and reject duplicate semantic signatures before benchmark spend
 
-The primary kernel targets expose these knobs directly in [`config/targets.json`](/Users/espejelomar/StarkNet/2026-03-17-poseidon2-autoresearch/config/targets.json):
+The primary kernel targets expose these knobs directly in [`config/targets.json`](config/targets.json):
 
 - `codex_timeout_retry_count`
 - `codex_timeout_retry_seconds`
 - `codex_kernel_family_explore`
 - `codex_kernel_family_novelty_weight`
 - `codex_kernel_family_timeout_penalty`
+
+Cross-run family scheduler state is persisted in `work/codex_focus_stats.json`, so short Codex-backed runs can accumulate timeout/reward/duplicate statistics instead of restarting the bandit from scratch every time.
 
 The loop falls back to heuristics automatically if the OpenAI or Codex request path fails.
 The Codex CLI path uses tagged flat-text sections because `codex exec` does not expose a separate system-role channel; treat prompt-injection protections on that path as weaker than the OpenAI API path and prefer pinned model IDs for reproducible experiments.

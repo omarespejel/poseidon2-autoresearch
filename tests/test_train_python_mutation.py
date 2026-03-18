@@ -1371,6 +1371,18 @@ def helper():
         score_table = {row["function"]: row["score"] for row in diagnostics["scores"]}
         self.assertGreater(score_table["mitm_truncated_preimage_kernel"], score_table["differential_kernel"])
 
+    def test_select_codex_kernel_focus_function_raises_on_empty_list(self) -> None:
+        with self.assertRaises(ValueError):
+            train.select_codex_kernel_focus_function(
+                available_functions=[],
+                family_stats=None,
+                seen_signatures=None,
+                explore=0.35,
+                novelty_weight=0.3,
+                timeout_penalty=0.2,
+                rng=random.Random(0),
+            )
+
     def test_build_codex_python_focus_context_reports_missing_focus_function(self) -> None:
         context, diagnostics = train.build_codex_python_focus_context(
             target_name="poseidon2_cryptanalysis_trackb_kernel_fast",
@@ -1511,6 +1523,7 @@ def helper():
                 "version": 1,
                 "entries": [
                     {
+                        "accepted_total": 1,
                         "language": "python",
                         "source_code": candidate,
                     }
@@ -1527,6 +1540,25 @@ def helper():
             archive["mitm_truncated_preimage_kernel"],
         )
 
+    def test_collect_codex_function_signature_archive_ignores_rejected_entries(self) -> None:
+        source = harness_source()
+        candidate = source.replace("        if rng.random() < 0.35:\n", "        if rng.random() < 0.5:\n", 1)
+        archive = train.collect_codex_function_signature_archive(
+            {
+                "version": 1,
+                "entries": [
+                    {
+                        "accepted_total": 0,
+                        "rejected_total": 1,
+                        "language": "python",
+                        "source_code": candidate,
+                    }
+                ],
+            },
+            function_names=["differential_kernel"],
+        )
+        self.assertEqual(archive["differential_kernel"], set())
+
     def test_codex_function_novelty_guard_rejects_duplicate_signature(self) -> None:
         source = harness_source()
         candidate = source.replace("        if rng.random() < 0.35:\n", "        if rng.random() < 0.5:\n", 1)
@@ -1540,7 +1572,7 @@ def helper():
         self.assertEqual(details["status"], "duplicate_signature")
         self.assertEqual(details["duplicate_functions"], ["differential_kernel"])
 
-    def test_codex_function_novelty_guard_accepts_new_signature_and_records_it(self) -> None:
+    def test_codex_function_novelty_guard_accepts_new_signature_without_recording_it(self) -> None:
         source = harness_source()
         candidate = source.replace("        if rng.random() < 0.35:\n", "        if rng.random() < 0.5:\n", 1)
         seen = {"differential_kernel": set()}
@@ -1551,7 +1583,90 @@ def helper():
         )
         self.assertFalse(blocked)
         self.assertEqual(details["status"], "ok")
-        self.assertTrue(seen["differential_kernel"])
+        self.assertEqual(seen["differential_kernel"], set())
+        self.assertIn("differential_kernel", details["candidate_functions"])
+
+    def test_codex_function_novelty_guard_returns_no_updated_functions(self) -> None:
+        blocked, details = train.codex_function_novelty_guard(
+            candidate_source=harness_source(),
+            updated_functions=[],
+            seen_signatures={},
+        )
+        self.assertFalse(blocked)
+        self.assertEqual(details["status"], "no_updated_functions")
+
+    def test_codex_function_novelty_guard_blocks_duplicate_when_other_function_is_skipped(self) -> None:
+        with patch(
+            "train.python_named_function_semantic_signature",
+            side_effect=lambda source, name: None if name == "missing_kernel" else "dup-signature",
+        ):
+            blocked, details = train.codex_function_novelty_guard(
+                candidate_source="candidate",
+                updated_functions=["differential_kernel", "missing_kernel"],
+                seen_signatures={"differential_kernel": {"dup-signature"}},
+            )
+        self.assertTrue(blocked)
+        self.assertEqual(details["status"], "duplicate_signature")
+        self.assertEqual(details["duplicate_functions"], ["differential_kernel"])
+        self.assertEqual(details["candidate_functions"], [])
+
+    def test_codex_function_novelty_guard_all_skipped_functions_does_not_block(self) -> None:
+        with patch("train.python_named_function_semantic_signature", return_value=None):
+            blocked, details = train.codex_function_novelty_guard(
+                candidate_source="candidate",
+                updated_functions=["differential_kernel"],
+                seen_signatures={},
+            )
+        self.assertFalse(blocked)
+        self.assertEqual(details["status"], "no_checkable_functions")
+        self.assertEqual(details["duplicate_functions"], [])
+
+    def test_record_codex_function_signatures_records_pending_signatures(self) -> None:
+        seen = {"differential_kernel": set()}
+        details = train.record_codex_function_signatures(
+            seen_signatures=seen,
+            candidate_signatures={"differential_kernel": "abc123"},
+        )
+        self.assertEqual(details["recorded_functions"], ["differential_kernel"])
+        self.assertEqual(seen["differential_kernel"], {"abc123"})
+
+    def test_update_and_save_codex_focus_stats_persists_family_deltas(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "codex_focus_stats.json"
+            current_stats = {"version": 1, "targets": {}}
+            updated = train.update_and_save_codex_focus_stats(
+                path,
+                current_stats,
+                target_name="poseidon2_cryptanalysis_trackb_kernel_fast",
+                previous_family_stats={
+                    "birthday_collision_kernel": {
+                        "attempts": 1.0,
+                        "reward_total": 0.0,
+                        "timeout_total": 0.0,
+                        "duplicate_total": 0.0,
+                        "structural_only_total": 0.0,
+                    }
+                },
+                family_stats={
+                    "birthday_collision_kernel": {
+                        "attempts": 3.0,
+                        "reward_total": 1.0,
+                        "timeout_total": 1.0,
+                        "duplicate_total": 0.0,
+                        "structural_only_total": 1.0,
+                    }
+                },
+            )
+            persisted = train.load_codex_focus_stats(path)
+            families = train.codex_focus_stats_target_families(
+                persisted,
+                target_name="poseidon2_cryptanalysis_trackb_kernel_fast",
+            )
+            self.assertEqual(families["birthday_collision_kernel"]["attempts"], 2.0)
+            self.assertEqual(families["birthday_collision_kernel"]["reward_total"], 1.0)
+            self.assertEqual(families["birthday_collision_kernel"]["timeout_total"], 1.0)
+            self.assertEqual(families["birthday_collision_kernel"]["structural_only_total"], 1.0)
+            self.assertIn("targets", updated)
 
     def test_request_codex_candidate_applies_structured_function_updates(self) -> None:
         source = harness_source()

@@ -123,11 +123,19 @@ DEFAULT_OPERATOR_VALIDATION_BLOCK_DISABLE_STREAK = 0
 DEFAULT_OPERATOR_UCB_EXPLORE = 0.0
 DEFAULT_CODEX_REASONING_EFFORT = "high"
 DEFAULT_CODEX_TIMEOUT_SECONDS = 180.0
+DEFAULT_CODEX_FOCUS_STATS_FILE = ROOT / "work" / "codex_focus_stats.json"
 DEFAULT_CODEX_KERNEL_TIMEOUT_RETRY_SECONDS = 300.0
 DEFAULT_CODEX_KERNEL_TIMEOUT_RETRY_COUNT = 1
 DEFAULT_CODEX_KERNEL_FAMILY_EXPLORE = 0.35
 DEFAULT_CODEX_KERNEL_FAMILY_NOVELTY_WEIGHT = 0.30
 DEFAULT_CODEX_KERNEL_FAMILY_TIMEOUT_PENALTY = 0.20
+CODEX_FOCUS_STAT_KEYS = (
+    "attempts",
+    "reward_total",
+    "timeout_total",
+    "duplicate_total",
+    "structural_only_total",
+)
 TRACKB_BASE_CONFIG_NAME = "track_b_attack_config.json"
 TRACKB_MUTABLE_CONFIG_PREFIX = "track_b_mutable_"
 TRACKB_CONFIG_DIR = (ROOT / "config").resolve()
@@ -3652,6 +3660,8 @@ def collect_codex_function_signature_archive(
             continue
         if str(raw.get("language", "")).strip().lower() != "python":
             continue
+        if population_entry_verified_total(raw) <= 0:
+            continue
         source_code = raw.get("source_code")
         if not isinstance(source_code, str) or not source_code:
             continue
@@ -3672,7 +3682,7 @@ def codex_function_novelty_guard(
         return False, {"status": "no_updated_functions"}
     duplicate_functions: list[str] = []
     skipped_functions: list[dict[str, str]] = []
-    discovered: dict[str, str] = {}
+    candidate_signatures: dict[str, str] = {}
     for name in updated_functions:
         signature = python_named_function_semantic_signature(candidate_source, name)
         if signature is None:
@@ -3682,17 +3692,31 @@ def codex_function_novelty_guard(
         if signature in observed:
             duplicate_functions.append(name)
             continue
-        discovered[name] = signature
-    blocked = bool(updated_functions) and bool(duplicate_functions) and not discovered and not skipped_functions
-    if not blocked:
-        for name, signature in discovered.items():
-            seen_signatures.setdefault(name, set()).add(signature)
+        candidate_signatures[name] = signature
+    blocked = bool(duplicate_functions) and not candidate_signatures
+    checkable_functions = len(updated_functions) - len(skipped_functions)
+    status = "duplicate_signature" if blocked else ("no_checkable_functions" if checkable_functions <= 0 else "ok")
     return blocked, {
-        "status": "duplicate_signature" if blocked else "ok",
+        "status": status,
+        "candidate_functions": sorted(candidate_signatures),
+        "candidate_signatures": candidate_signatures,
         "duplicate_functions": sorted(duplicate_functions),
-        "recorded_functions": sorted(discovered),
         "skipped_functions": skipped_functions,
     }
+
+
+def record_codex_function_signatures(
+    *,
+    seen_signatures: dict[str, set[str]],
+    candidate_signatures: dict[str, str],
+) -> dict[str, Any]:
+    recorded_functions: list[str] = []
+    for name, signature in candidate_signatures.items():
+        if not name or not signature:
+            continue
+        seen_signatures.setdefault(name, set()).add(signature)
+        recorded_functions.append(name)
+    return {"recorded_functions": sorted(recorded_functions)}
 
 
 def codex_structural_only_replacement_guard(
@@ -4453,6 +4477,108 @@ def load_mutator_stats(path: Path) -> dict[str, Any]:
 def save_mutator_stats(path: Path, stats: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(path, json.dumps(stats, indent=2, sort_keys=True) + "\n")
+
+
+def empty_codex_focus_family_stats() -> dict[str, float]:
+    return {key: 0.0 for key in CODEX_FOCUS_STAT_KEYS}
+
+
+def normalize_codex_focus_family_stats(
+    raw_stats: dict[str, Any] | None,
+    *,
+    family_names: list[str],
+) -> dict[str, dict[str, float]]:
+    normalized = {name: empty_codex_focus_family_stats() for name in family_names}
+    if not isinstance(raw_stats, dict):
+        return normalized
+    for name in family_names:
+        raw_entry = raw_stats.get(name)
+        if not isinstance(raw_entry, dict):
+            continue
+        entry = normalized[name]
+        for key in CODEX_FOCUS_STAT_KEYS:
+            try:
+                value = float(raw_entry.get(key, 0.0))
+            except (TypeError, ValueError):
+                value = 0.0
+            entry[key] = max(0.0, value)
+    return normalized
+
+
+def load_codex_focus_stats(path: Path) -> dict[str, Any]:
+    base = {"version": 1, "updated_at": None, "targets": {}}
+    if not path.exists():
+        return base
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return base
+    if not isinstance(payload, dict):
+        return base
+    payload.setdefault("version", 1)
+    payload.setdefault("updated_at", None)
+    if not isinstance(payload.get("targets"), dict):
+        payload["targets"] = {}
+    return payload
+
+
+def save_codex_focus_stats(path: Path, stats: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    stats["updated_at"] = prepare.now_iso()
+    atomic_write_text(path, json.dumps(stats, indent=2, sort_keys=True) + "\n")
+
+
+def codex_focus_stats_target_families(stats: dict[str, Any], *, target_name: str) -> dict[str, Any]:
+    targets = stats.setdefault("targets", {})
+    if not isinstance(targets, dict):
+        stats["targets"] = {}
+        targets = stats["targets"]
+    target_entry = targets.setdefault(target_name, {"families": {}})
+    if not isinstance(target_entry, dict):
+        targets[target_name] = {"families": {}}
+        target_entry = targets[target_name]
+    families = target_entry.setdefault("families", {})
+    if not isinstance(families, dict):
+        target_entry["families"] = {}
+        families = target_entry["families"]
+    return families
+
+
+def update_and_save_codex_focus_stats(
+    path: Path,
+    current_stats: dict[str, Any] | None,
+    *,
+    target_name: str,
+    previous_family_stats: dict[str, dict[str, float]],
+    family_stats: dict[str, dict[str, float]],
+) -> dict[str, Any]:
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    with file_lock(lock_path):
+        latest = load_codex_focus_stats(path)
+        families = codex_focus_stats_target_families(latest, target_name=target_name)
+        for name, current_entry in family_stats.items():
+            previous_entry = previous_family_stats.get(name, {})
+            latest_entry = families.setdefault(name, empty_codex_focus_family_stats())
+            if not isinstance(latest_entry, dict):
+                families[name] = empty_codex_focus_family_stats()
+                latest_entry = families[name]
+            for key in CODEX_FOCUS_STAT_KEYS:
+                try:
+                    delta = float(current_entry.get(key, 0.0)) - float(previous_entry.get(key, 0.0))
+                except (TypeError, ValueError):
+                    delta = 0.0
+                if delta <= 0.0:
+                    continue
+                try:
+                    existing_value = float(latest_entry.get(key, 0.0))
+                except (TypeError, ValueError):
+                    existing_value = 0.0
+                latest_entry[key] = max(0.0, existing_value) + delta
+        save_codex_focus_stats(path, latest)
+    if current_stats is not None:
+        current_stats.clear()
+        current_stats.update(latest)
+    return latest
 
 
 def mutator_stats_target_entries(stats: dict[str, Any], *, target_name: str) -> dict[str, Any]:
@@ -6720,16 +6846,35 @@ def run_loop(args: argparse.Namespace) -> int:
         source_path=source_path,
         signature_guard_names=signature_guard_names,
     )
-    codex_focus_family_stats: dict[str, dict[str, float]] = {
-        name: {
-            "attempts": 0.0,
-            "reward_total": 0.0,
-            "timeout_total": 0.0,
-            "duplicate_total": 0.0,
-            "structural_only_total": 0.0,
-        }
-        for name in available_codex_focus_names
-    }
+    codex_focus_stats_path = DEFAULT_CODEX_FOCUS_STATS_FILE
+    codex_focus_stats: dict[str, Any] | None = None
+    persisted_codex_focus_family_stats: dict[str, dict[str, float]] = normalize_codex_focus_family_stats(
+        None,
+        family_names=available_codex_focus_names,
+    )
+    if llm_backend == "codex" and available_codex_focus_names:
+        codex_focus_lock_path = codex_focus_stats_path.with_suffix(codex_focus_stats_path.suffix + ".lock")
+        try:
+            with file_lock(codex_focus_lock_path):
+                codex_focus_stats = load_codex_focus_stats(codex_focus_stats_path)
+                save_codex_focus_stats(codex_focus_stats_path, codex_focus_stats)
+            persisted_codex_focus_family_stats = normalize_codex_focus_family_stats(
+                codex_focus_stats_target_families(codex_focus_stats, target_name=args.target),
+                family_names=available_codex_focus_names,
+            )
+        except Exception as exc:  # noqa: BLE001
+            warning = f"codex focus stats bootstrap failed ({exc}); continuing with in-memory scheduler state"
+            print(f"[train] Warning: {warning}", file=sys.stderr)
+            feature_warnings.append(warning)
+            codex_focus_stats = None
+    codex_focus_family_stats = normalize_codex_focus_family_stats(
+        persisted_codex_focus_family_stats,
+        family_names=available_codex_focus_names,
+    )
+    codex_focus_initial_family_stats = normalize_codex_focus_family_stats(
+        codex_focus_family_stats,
+        family_names=available_codex_focus_names,
+    )
     codex_focus_seen_signatures = collect_codex_function_signature_archive(
         population_memory,
         function_names=available_codex_focus_names,
@@ -6748,6 +6893,7 @@ def run_loop(args: argparse.Namespace) -> int:
             "novelty_weight": codex_kernel_family_novelty_weight,
             "timeout_penalty": codex_kernel_family_timeout_penalty,
             "timeout_plan": codex_timeout_plan,
+            "persisted_stats": codex_focus_family_stats,
         },
     )
     train_log(
@@ -6958,6 +7104,7 @@ def run_loop(args: argparse.Namespace) -> int:
                 "codex_reasoning_effort": codex_reasoning_effort if llm_backend == "codex" else None,
                 "codex_timeout_seconds": codex_timeout_seconds if llm_backend == "codex" else None,
                 "codex_timeout_plan": codex_timeout_plan if llm_backend == "codex" else None,
+                "codex_focus_stats_file": str(codex_focus_stats_path) if llm_backend == "codex" else None,
             },
             "mutation_memory": {
                 "enabled": mutation_memory is not None,
@@ -6991,6 +7138,7 @@ def run_loop(args: argparse.Namespace) -> int:
                 "family_explore": codex_kernel_family_explore,
                 "family_novelty_weight": codex_kernel_family_novelty_weight,
                 "family_timeout_penalty": codex_kernel_family_timeout_penalty,
+                "family_stats": codex_focus_family_stats if llm_backend == "codex" else None,
                 "known_signatures": {
                     name: len(codex_focus_seen_signatures.get(name, set())) for name in available_codex_focus_names
                 },
@@ -7224,6 +7372,7 @@ def run_loop(args: argparse.Namespace) -> int:
         )
         diagnostics["threshold"] = threshold_diag
         selected_codex_focus_name: str | None = None
+        pending_codex_signatures: dict[str, str] = {}
 
         if llm_backend in {"openai", "codex"}:
             system_prompt = build_llm_system_prompt(language)
@@ -7294,13 +7443,7 @@ def run_loop(args: argparse.Namespace) -> int:
             if llm_backend == "codex" and selected_codex_focus_name:
                 family_stats = codex_focus_family_stats.setdefault(
                     selected_codex_focus_name,
-                    {
-                        "attempts": 0.0,
-                        "reward_total": 0.0,
-                        "timeout_total": 0.0,
-                        "duplicate_total": 0.0,
-                        "structural_only_total": 0.0,
-                    },
+                    empty_codex_focus_family_stats(),
                 )
                 family_stats["attempts"] = float(family_stats.get("attempts", 0.0)) + 1.0
                 if str(llm_diagnostics.get("reason", "")) == "codex_timeout":
@@ -7464,6 +7607,13 @@ def run_loop(args: argparse.Namespace) -> int:
                     seen_signatures=codex_focus_seen_signatures,
                 )
                 diagnostics["codex_novelty_guard"] = novelty_details
+                candidate_signatures = novelty_details.get("candidate_signatures", {})
+                if isinstance(candidate_signatures, dict):
+                    pending_codex_signatures = {
+                        str(name): str(signature)
+                        for name, signature in candidate_signatures.items()
+                        if str(name) and str(signature)
+                    }
                 if novelty_blocked:
                     if selected_codex_focus_name:
                         codex_focus_family_stats[selected_codex_focus_name]["duplicate_total"] = (
@@ -8019,6 +8169,11 @@ def run_loop(args: argparse.Namespace) -> int:
                 codex_focus_family_stats[selected_codex_focus_name]["reward_total"] = (
                     float(codex_focus_family_stats[selected_codex_focus_name].get("reward_total", 0.0)) + 1.0
                 )
+            if llm_backend == "codex" and mutation == "codex_patch" and improved and pending_codex_signatures:
+                diagnostics["codex_novelty_record"] = record_codex_function_signatures(
+                    seen_signatures=codex_focus_seen_signatures,
+                    candidate_signatures=pending_codex_signatures,
+                )
 
             if not improved:
                 blocked_mutations_until[mutation_key] = iteration + blocked_mutation_ttl
@@ -8225,6 +8380,19 @@ def run_loop(args: argparse.Namespace) -> int:
                     "reason": "no_accepted_mutations",
                 }
             )
+    codex_focus_stats_persisted = False
+    if llm_backend == "codex" and available_codex_focus_names:
+        try:
+            codex_focus_stats = update_and_save_codex_focus_stats(
+                codex_focus_stats_path,
+                codex_focus_stats,
+                target_name=args.target,
+                previous_family_stats=codex_focus_initial_family_stats,
+                family_stats=codex_focus_family_stats,
+            )
+            codex_focus_stats_persisted = True
+        except Exception as exc:  # noqa: BLE001
+            train_log(args, f"warning: failed to persist codex focus stats ({exc})", level=1)
     train_log(
         args,
         (
@@ -8272,6 +8440,8 @@ def run_loop(args: argparse.Namespace) -> int:
                 "model": llm_model,
                 "codex_timeout_plan": codex_timeout_plan if llm_backend == "codex" else None,
                 "codex_reasoning_effort": codex_reasoning_effort if llm_backend == "codex" else None,
+                "codex_focus_stats_file": str(codex_focus_stats_path) if llm_backend == "codex" else None,
+                "codex_focus_stats_persisted": codex_focus_stats_persisted if llm_backend == "codex" else None,
             },
             "codex_focus": {
                 "available_functions": available_codex_focus_names,
@@ -8372,6 +8542,8 @@ def run_loop(args: argparse.Namespace) -> int:
                 "llm_model": llm_model,
                 "codex_timeout_plan": codex_timeout_plan if llm_backend == "codex" else None,
                 "codex_reasoning_effort": codex_reasoning_effort if llm_backend == "codex" else None,
+                "codex_focus_stats_file": str(codex_focus_stats_path) if llm_backend == "codex" else None,
+                "codex_focus_stats_persisted": codex_focus_stats_persisted if llm_backend == "codex" else None,
                 "codex_focus_family_stats": codex_focus_family_stats if llm_backend == "codex" else None,
                 "codex_focus_known_signatures": (
                     {
