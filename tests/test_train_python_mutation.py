@@ -1150,6 +1150,12 @@ def helper():
     def test_extract_source_from_llm_response_empty_string(self) -> None:
         self.assertEqual(train.extract_source_from_llm_response(""), "")
 
+    def test_build_llm_system_prompt_discourages_structural_only_edits(self) -> None:
+        prompt = train.build_llm_system_prompt("Python")
+        self.assertIn("refactors", prompt)
+        self.assertIn("helper extraction", prompt)
+        self.assertIn("equivalent rewrites", prompt)
+
     def test_model_name_is_version_pinned_detects_snapshot_suffixes(self) -> None:
         self.assertTrue(train.model_name_is_version_pinned("gpt-5-mini-2026-03-01"))
         self.assertTrue(train.model_name_is_version_pinned("gpt-5-mini-2026-03-01-preview"))
@@ -1274,11 +1280,21 @@ def helper():
         self.assertEqual(diagnostics["strategy"], "focused_python_functions")
         self.assertEqual(diagnostics["focus_function_count"], 2)
         self.assertIn("Only modify the editable functions", context["prompt"])
+        self.assertIn("Only propose behavior-changing attack-logic edits", context["prompt"])
+        self.assertIn("return updated_functions as an empty list", context["prompt"])
+        self.assertIn("Do not spend edits on refactors", context["prompt"])
         self.assertEqual(
             [entry["name"] for entry in context["editable_blocks"]],
             ["differential_kernel", "score"],
         )
         self.assertIn("def parse_float", "\n".join(context["helper_summaries"]))
+
+    def test_codex_focus_function_names_excludes_score_for_attack_kernels(self) -> None:
+        selected = train.codex_focus_function_names(
+            source_path=KERNEL_PATH,
+            signature_guard_names=list(train.ATTACK_KERNEL_SIGNATURE_FUNCTIONS),
+        )
+        self.assertEqual(selected, list(train.ATTACK_KERNEL_CODEX_FOCUS_FUNCTIONS))
 
     def test_build_codex_python_focus_context_reports_missing_focus_function(self) -> None:
         context, diagnostics = train.build_codex_python_focus_context(
@@ -1373,6 +1389,36 @@ def helper():
         )
         self.assertIsNone(candidate)
         self.assertEqual(details["reason"], "duplicate_function_name")
+
+    def test_codex_structural_only_replacement_guard_rejects_alias_refactor(self) -> None:
+        source = harness_source()
+        candidate = source.replace(
+            '    lane = int(analysis["target_lane"])\n',
+            '    target_lane = analysis["target_lane"]\n    lane = int(target_lane)\n',
+            1,
+        )
+        blocked, details = train.codex_structural_only_replacement_guard(
+            previous_source=source,
+            candidate_source=candidate,
+            updated_functions=["differential_kernel"],
+        )
+        self.assertTrue(blocked)
+        self.assertEqual(details["status"], "structural_only")
+        self.assertEqual(details["structural_only_functions"], ["differential_kernel"])
+        self.assertEqual(details["semantic_delta_functions"], [])
+
+    def test_codex_structural_only_replacement_guard_allows_attack_logic_change(self) -> None:
+        source = harness_source()
+        candidate = source.replace("        if rng.random() < 0.35:\n", "        if rng.random() < 0.5:\n", 1)
+        blocked, details = train.codex_structural_only_replacement_guard(
+            previous_source=source,
+            candidate_source=candidate,
+            updated_functions=["differential_kernel"],
+        )
+        self.assertFalse(blocked)
+        self.assertEqual(details["status"], "ok")
+        self.assertEqual(details["structural_only_functions"], [])
+        self.assertEqual(details["semantic_delta_functions"], ["differential_kernel"])
 
     def test_request_codex_candidate_applies_structured_function_updates(self) -> None:
         source = harness_source()
