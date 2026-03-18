@@ -243,6 +243,33 @@ def resolve_model_name(args: argparse.Namespace, *, backend: str) -> str:
     return ""
 
 
+def model_name_is_version_pinned(model_name: str) -> bool:
+    normalized = str(model_name or "").strip()
+    if not normalized:
+        return False
+    return bool(
+        re.search(r"(?:^|[-_@/])\d{4}-\d{2}-\d{2}$", normalized)
+        or re.search(r"(?:^|[-_@/])\d{8}$", normalized)
+    )
+
+
+def build_codex_exec_prompt(*, system_prompt: str, user_prompt: str) -> str:
+    return (
+        "<SYSTEM_PROMPT>\n"
+        "The following block contains the highest-priority instructions for this run.\n"
+        f"{system_prompt}\n"
+        "</SYSTEM_PROMPT>\n\n"
+        "<OUTPUT_REQUIREMENTS>\n"
+        "Return only the complete updated source file contents.\n"
+        "Do not use Markdown fences.\n"
+        "Do not include explanations.\n"
+        "</OUTPUT_REQUIREMENTS>\n\n"
+        "<USER_PROMPT>\n"
+        f"{user_prompt}\n"
+        "</USER_PROMPT>\n"
+    )
+
+
 def resolve_codex_reasoning_effort(raw_effort: Any) -> str:
     effort = str(raw_effort or DEFAULT_CODEX_REASONING_EFFORT).strip().lower()
     if effort not in {"low", "medium", "high"}:
@@ -5005,12 +5032,8 @@ def request_codex_candidate(
         timeout_seconds = 180.0
 
     effort = resolve_codex_reasoning_effort(reasoning_effort)
-    final_prompt = (
-        f"{system_prompt}\n\n"
-        "Return only the complete updated source file contents. "
-        "Do not use Markdown fences. Do not include explanations.\n\n"
-        f"{user_prompt}"
-    )
+    final_prompt = build_codex_exec_prompt(system_prompt=system_prompt, user_prompt=user_prompt)
+    model_pinned = model_name_is_version_pinned(model)
 
     with tempfile.TemporaryDirectory(prefix="autoresearch-codex-") as tmpdir:
         output_path = Path(tmpdir) / "last_message.txt"
@@ -5039,7 +5062,6 @@ def request_codex_candidate(
                 input=final_prompt,
                 text=True,
                 capture_output=True,
-                cwd=working_root,
                 timeout=timeout_seconds,
                 check=False,
             )
@@ -5063,7 +5085,11 @@ def request_codex_candidate(
             "stdout": proc.stdout[:2000],
             "stderr": proc.stderr[:2000],
             "model": model,
+            "model_version_pinned": model_pinned,
+            "model_warning": "non_version_pinned_model" if model and not model_pinned else None,
             "reasoning_effort": effort,
+            "system_prompt_transport": "flat_text_sections",
+            "system_prompt_privileged": False,
         }
         if proc.returncode != 0:
             return None, diagnostics
@@ -5656,6 +5682,13 @@ def run_loop(args: argparse.Namespace) -> int:
     llm_backend = resolve_llm_backend(args)
     llm_model = resolve_model_name(args, backend=llm_backend)
     codex_reasoning_effort = resolve_codex_reasoning_effort(getattr(args, "codex_reasoning_effort", "high"))
+    llm_model_pinned = model_name_is_version_pinned(llm_model) if llm_model else None
+    llm_model_warning = "non_version_pinned_model" if llm_model and not llm_model_pinned else None
+    if llm_model_warning:
+        train_log(
+            args,
+            f"warning: model {llm_model!r} is not version-pinned; experiment traces may not be reproducible",
+        )
 
     git_checkpoint_mode = str(args.git_checkpoint_mode).strip().lower()
     if git_checkpoint_mode not in {"off", "accepted", "all"}:
@@ -6074,6 +6107,8 @@ def run_loop(args: argparse.Namespace) -> int:
             "llm": {
                 "backend": llm_backend,
                 "model": llm_model or None,
+                "model_version_pinned": llm_model_pinned,
+                "model_warning": llm_model_warning,
                 "temperature": args.temperature if llm_backend == "openai" else None,
                 "codex_reasoning_effort": codex_reasoning_effort if llm_backend == "codex" else None,
             },
@@ -6363,7 +6398,7 @@ def run_loop(args: argparse.Namespace) -> int:
                     reasoning_effort=codex_reasoning_effort,
                     working_root=ROOT,
                 )
-            diagnostics.update(llm_diagnostics)
+            diagnostics["llm"] = llm_diagnostics
             if candidate is None:
                 candidate, mutation, changed = heuristic_candidate(
                     current_source,

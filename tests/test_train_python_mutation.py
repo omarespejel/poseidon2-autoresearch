@@ -1143,6 +1143,17 @@ def helper():
         content = "Here is the patch:\n```python\ndef score():\n    return 1\n```\n"
         self.assertEqual(train.extract_source_from_llm_response(content), "def score():\n    return 1")
 
+    def test_extract_source_from_llm_response_returns_raw_when_no_fence(self) -> None:
+        content = "def score():\n    return 1\n"
+        self.assertEqual(train.extract_source_from_llm_response(content), content)
+
+    def test_extract_source_from_llm_response_empty_string(self) -> None:
+        self.assertEqual(train.extract_source_from_llm_response(""), "")
+
+    def test_model_name_is_version_pinned_detects_snapshot_suffixes(self) -> None:
+        self.assertTrue(train.model_name_is_version_pinned("gpt-5-mini-2026-03-01"))
+        self.assertFalse(train.model_name_is_version_pinned("gpt-5-mini"))
+
     def test_request_codex_candidate_reports_missing_binary(self) -> None:
         with patch.object(train.shutil, "which", return_value=None):
             candidate, diagnostics = train.request_codex_candidate(
@@ -1163,7 +1174,10 @@ def helper():
             output_path.write_text("```python\ndef score():\n    return 1\n```\n", encoding="utf-8")
             self.assertIn("--sandbox", cmd)
             self.assertIn("read-only", cmd)
-            self.assertEqual(kwargs["cwd"], ROOT)
+            self.assertNotIn("cwd", kwargs)
+            prompt = str(kwargs["input"])
+            self.assertIn("<SYSTEM_PROMPT>", prompt)
+            self.assertIn("<USER_PROMPT>", prompt)
             return subprocess.CompletedProcess(cmd, 0, stdout='{"event":"done"}\n', stderr="")
 
         with patch.object(train.shutil, "which", return_value="/usr/bin/codex"):
@@ -1180,7 +1194,50 @@ def helper():
         self.assertEqual(diagnostics["reason"], "ok")
         self.assertEqual(diagnostics["backend"], "codex")
         self.assertEqual(diagnostics["model"], "gpt-5-codex")
+        self.assertEqual(diagnostics["model_warning"], "non_version_pinned_model")
         self.assertEqual(diagnostics["reasoning_effort"], "high")
+        self.assertFalse(diagnostics["system_prompt_privileged"])
+        self.assertEqual(diagnostics["system_prompt_transport"], "flat_text_sections")
+
+    def test_request_codex_candidate_reports_missing_output_file(self) -> None:
+        completed = subprocess.CompletedProcess(
+            ["/usr/bin/codex", "exec"],
+            0,
+            stdout='{"event":"done"}\n',
+            stderr="",
+        )
+        with patch.object(train.shutil, "which", return_value="/usr/bin/codex"):
+            with patch("train.subprocess.run", return_value=completed):
+                candidate, diagnostics = train.request_codex_candidate(
+                    model="gpt-5-codex",
+                    system_prompt="system",
+                    user_prompt="user",
+                    reasoning_effort="high",
+                    working_root=ROOT,
+                )
+
+        self.assertIsNone(candidate)
+        self.assertEqual(diagnostics["reason"], "codex_output_missing")
+
+    def test_request_codex_candidate_reports_empty_output(self) -> None:
+        def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            output_flag_index = cmd.index("--output-last-message")
+            output_path = Path(cmd[output_flag_index + 1])
+            output_path.write_text(" \n", encoding="utf-8")
+            return subprocess.CompletedProcess(cmd, 0, stdout='{"event":"done"}\n', stderr="")
+
+        with patch.object(train.shutil, "which", return_value="/usr/bin/codex"):
+            with patch("train.subprocess.run", side_effect=fake_run):
+                candidate, diagnostics = train.request_codex_candidate(
+                    model="gpt-5-codex",
+                    system_prompt="system",
+                    user_prompt="user",
+                    reasoning_effort="high",
+                    working_root=ROOT,
+                )
+
+        self.assertIsNone(candidate)
+        self.assertEqual(diagnostics["reason"], "codex_empty_output")
 
     def test_request_codex_candidate_reports_subprocess_failure(self) -> None:
         failed = subprocess.CompletedProcess(

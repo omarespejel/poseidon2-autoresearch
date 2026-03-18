@@ -322,6 +322,7 @@ Controls:
 - `AUTORESEARCH_CODEX_TIMEOUT_SECONDS=180` to raise/lower the Codex request timeout
 
 The loop falls back to heuristics automatically if the OpenAI or Codex request path fails.
+The Codex CLI path uses tagged flat-text sections because `codex exec` does not expose a separate system-role channel; treat prompt-injection protections on that path as weaker than the OpenAI API path and prefer pinned model IDs for reproducible experiments.
 
 ## Cross-Target Mutation Replay
 
