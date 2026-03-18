@@ -298,7 +298,7 @@ python3 train.py --target poseidon2_cryptanalysis_algebraic_fast --iterations 12
 
 ## LLM Mode (Optional)
 
-`train.py` defaults to deterministic heuristics. To enable model-proposed patches:
+`train.py` defaults to deterministic heuristics. To enable model-proposed patches with the OpenAI API:
 
 ```bash
 export OPENAI_API_KEY=...
@@ -306,7 +306,23 @@ export OPENAI_MODEL=gpt-5-mini
 python3 train.py --target cairo_poseidon_style_t8 --iterations 25
 ```
 
-The loop falls back to heuristics automatically if an API call fails.
+To use the logged-in Codex desktop/CLI session instead of an API key:
+
+```bash
+codex login status
+python3 train.py --target poseidon2_cryptanalysis_trackb_kernel_fast --iterations 12 --llm-backend codex --model gpt-5-codex
+```
+
+Controls:
+
+- `--llm-backend auto|heuristic|openai|codex`
+- `--model ...` for the selected backend
+- `--codex-reasoning-effort low|medium|high` for Codex CLI mode
+- `AUTORESEARCH_CODEX_BIN=/path/to/codex` to override the CLI path
+- `AUTORESEARCH_CODEX_TIMEOUT_SECONDS=180` to raise/lower the Codex request timeout
+
+The loop falls back to heuristics automatically if the OpenAI or Codex request path fails.
+The Codex CLI path uses tagged flat-text sections because `codex exec` does not expose a separate system-role channel; treat prompt-injection protections on that path as weaker than the OpenAI API path and prefer pinned model IDs for reproducible experiments.
 
 ## Cross-Target Mutation Replay
 
