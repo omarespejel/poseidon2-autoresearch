@@ -111,6 +111,18 @@
       ],
       "validation_allow_drop_abs": 0.0,
       "validation_allow_drop_rel": 0.0,
+      "holdout_targets": [
+        "poseidon2_cryptanalysis_trackb_kernel_verified_fast",
+        "poseidon2_cryptanalysis_trackb_kernel_algebraic_fast"
+      ],
+      "holdout_allow_drop_abs": 0.0,
+      "holdout_allow_drop_rel": 0.0,
+      "reward_audit_targets": [
+        "poseidon2_cryptanalysis_trackb_kernel_poseidon256_signal_fast",
+        "poseidon2_cryptanalysis_trackb_kernel_koalabear16_signal_fast"
+      ],
+      "reward_audit_allow_drop_abs": 0.0,
+      "reward_audit_allow_drop_rel": 0.0,
       "signature_guard_functions": [
         "differential_kernel",
         "mitm_truncated_preimage_kernel",
@@ -185,6 +197,18 @@
       ],
       "validation_allow_drop_abs": 0.0,
       "validation_allow_drop_rel": 0.0,
+      "holdout_targets": [
+        "poseidon2_cryptanalysis_trackb_kernel_verified_fast",
+        "poseidon2_cryptanalysis_trackb_kernel_algebraic_fast"
+      ],
+      "holdout_allow_drop_abs": 0.0,
+      "holdout_allow_drop_rel": 0.0,
+      "reward_audit_targets": [
+        "poseidon2_cryptanalysis_trackb_kernel_poseidon256_signal_fast",
+        "poseidon2_cryptanalysis_trackb_kernel_koalabear16_signal_fast"
+      ],
+      "reward_audit_allow_drop_abs": 0.0,
+      "reward_audit_allow_drop_rel": 0.0,
       "signature_guard_functions": [
         "differential_kernel",
         "mitm_truncated_preimage_kernel",
@@ -207,6 +231,170 @@
         "config/track_b_attack_config.json",
         "--profile",
         "poseidon64_bounty_shape",
+        "--mode",
+        "fast",
+        "--output-format",
+        "json"
+      ],
+      "warmup_runs": 0,
+      "runs": 2,
+      "aggregate": "median",
+      "metric_source": "json_stdout",
+      "metric_json_path": "metrics.attack_score_signal"
+    },
+    "poseidon2_cryptanalysis_trackb_kernel_verified_fast": {
+      "type": "command",
+      "description": "Track B kernel verified-hit holdout lane on research_fast (shared-source verifier gate)",
+      "project_dir": ".",
+      "source_file": "attack_kernels.py",
+      "language": "Python",
+      "metric_name": "attack_score_verified",
+      "higher_is_better": true,
+      "signature_guard_functions": [
+        "differential_kernel",
+        "mitm_truncated_preimage_kernel",
+        "birthday_collision_kernel",
+        "algebraic_elimination_kernel",
+        "score"
+      ],
+      "required_snippets": [
+        "def differential_kernel(",
+        "def mitm_truncated_preimage_kernel(",
+        "def algebraic_elimination_kernel(",
+        "def score("
+      ],
+      "benchmark_command": [
+        "python3",
+        "attack_harness.py",
+        "--kernel-module",
+        "attack_kernels",
+        "--config",
+        "config/track_b_attack_config.json",
+        "--profile",
+        "research_fast",
+        "--mode",
+        "fast",
+        "--output-format",
+        "json"
+      ],
+      "warmup_runs": 0,
+      "runs": 2,
+      "aggregate": "median",
+      "metric_source": "json_stdout",
+      "metric_json_path": "metrics.attack_score_verified"
+    },
+    "poseidon2_cryptanalysis_trackb_kernel_algebraic_fast": {
+      "type": "command",
+      "description": "Track B kernel algebraic holdout lane on research_fast (shared-source verifier gate)",
+      "project_dir": ".",
+      "source_file": "attack_kernels.py",
+      "language": "Python",
+      "metric_name": "attack_score_algebraic",
+      "higher_is_better": true,
+      "signature_guard_functions": [
+        "differential_kernel",
+        "mitm_truncated_preimage_kernel",
+        "birthday_collision_kernel",
+        "algebraic_elimination_kernel",
+        "score"
+      ],
+      "required_snippets": [
+        "def differential_kernel(",
+        "def mitm_truncated_preimage_kernel(",
+        "def algebraic_elimination_kernel(",
+        "def score("
+      ],
+      "benchmark_command": [
+        "python3",
+        "attack_harness.py",
+        "--kernel-module",
+        "attack_kernels",
+        "--config",
+        "config/track_b_attack_config.json",
+        "--profile",
+        "research_fast",
+        "--mode",
+        "fast",
+        "--output-format",
+        "json"
+      ],
+      "warmup_runs": 0,
+      "runs": 2,
+      "aggregate": "median",
+      "metric_source": "json_stdout",
+      "metric_json_path": "metrics.attack_score_algebraic"
+    },
+    "poseidon2_cryptanalysis_trackb_kernel_poseidon256_signal_fast": {
+      "type": "command",
+      "description": "Track B kernel reward-audit lane on poseidon256_bounty_shape (shared-source verifier gate)",
+      "project_dir": ".",
+      "source_file": "attack_kernels.py",
+      "language": "Python",
+      "metric_name": "attack_score_signal",
+      "higher_is_better": true,
+      "signature_guard_functions": [
+        "differential_kernel",
+        "mitm_truncated_preimage_kernel",
+        "birthday_collision_kernel",
+        "algebraic_elimination_kernel",
+        "score"
+      ],
+      "required_snippets": [
+        "def differential_kernel(",
+        "def mitm_truncated_preimage_kernel(",
+        "def algebraic_elimination_kernel(",
+        "def score("
+      ],
+      "benchmark_command": [
+        "python3",
+        "attack_harness.py",
+        "--kernel-module",
+        "attack_kernels",
+        "--config",
+        "config/track_b_attack_config.json",
+        "--profile",
+        "poseidon256_bounty_shape",
+        "--mode",
+        "fast",
+        "--output-format",
+        "json"
+      ],
+      "warmup_runs": 0,
+      "runs": 2,
+      "aggregate": "median",
+      "metric_source": "json_stdout",
+      "metric_json_path": "metrics.attack_score_signal"
+    },
+    "poseidon2_cryptanalysis_trackb_kernel_koalabear16_signal_fast": {
+      "type": "command",
+      "description": "Track B kernel reward-audit lane on koalabear_w16_shape (shared-source verifier gate)",
+      "project_dir": ".",
+      "source_file": "attack_kernels.py",
+      "language": "Python",
+      "metric_name": "attack_score_signal",
+      "higher_is_better": true,
+      "signature_guard_functions": [
+        "differential_kernel",
+        "mitm_truncated_preimage_kernel",
+        "birthday_collision_kernel",
+        "algebraic_elimination_kernel",
+        "score"
+      ],
+      "required_snippets": [
+        "def differential_kernel(",
+        "def mitm_truncated_preimage_kernel(",
+        "def algebraic_elimination_kernel(",
+        "def score("
+      ],
+      "benchmark_command": [
+        "python3",
+        "attack_harness.py",
+        "--kernel-module",
+        "attack_kernels",
+        "--config",
+        "config/track_b_attack_config.json",
+        "--profile",
+        "koalabear_w16_shape",
         "--mode",
         "fast",
         "--output-format",

@@ -82,6 +82,12 @@ ALLOWED_TARGET_OVERRIDE_KEYS = {
     "validation_targets",
     "validation_allow_drop_abs",
     "validation_allow_drop_rel",
+    "holdout_targets",
+    "holdout_allow_drop_abs",
+    "holdout_allow_drop_rel",
+    "reward_audit_targets",
+    "reward_audit_allow_drop_abs",
+    "reward_audit_allow_drop_rel",
 }
 DEFAULT_MUTATION_MEMORY_FILE = ROOT / "work" / "mutation_memory.json"
 DEFAULT_MUTATION_MEMORY_MAX_ENTRIES = 512
@@ -2737,10 +2743,12 @@ def compact_population_entries(
         return metric_f if higher_is_better else -metric_f
 
     def sort_key(entry: dict[str, Any]) -> tuple[int, int, float, float]:
+        verified_total = population_entry_verified_total(entry)
         accepted_total = max(0, int(entry.get("accepted_total", 0)))
         rejected_total = max(0, int(entry.get("rejected_total", 0)))
         seen = parse_iso_to_epoch(entry.get("last_seen_at"))
         return (
+            1 if verified_total > 0 else 0,
             1 if accepted_total > 0 else 0,
             accepted_total - rejected_total,
             quality(entry),
@@ -2762,6 +2770,20 @@ def population_metric_component(
     return math.tanh(oriented_metric / scale)
 
 
+def population_entry_verified_total(entry: dict[str, Any]) -> int:
+    if not isinstance(entry, dict):
+        return 0
+    if "verified_total" in entry:
+        try:
+            return max(0, int(entry.get("verified_total", 0)))
+        except Exception:  # noqa: BLE001
+            return 0
+    try:
+        return max(0, int(entry.get("accepted_total", 0)))
+    except Exception:  # noqa: BLE001
+        return 0
+
+
 def upsert_population_entry(
     memory: dict[str, Any],
     *,
@@ -2774,6 +2796,7 @@ def upsert_population_entry(
     timestamp: str,
     notes: str,
     max_entries: int,
+    promotion_status: str | None = None,
 ) -> dict[str, Any]:
     entries = memory.setdefault("entries", [])
     if not isinstance(entries, list):
@@ -2802,6 +2825,7 @@ def upsert_population_entry(
             "higher_is_better": higher_is_better,
             "metric_value": metric_value,
             "accepted_total": 0,
+            "verified_total": 0,
             "rejected_total": 0,
             "sampled_total": 0,
             "created_at": timestamp,
@@ -2814,6 +2838,11 @@ def upsert_population_entry(
     else:
         # Keep freshest source and best observed metric for this source hash/target.
         existing["source_code"] = source_code
+        if "verified_total" not in existing:
+            try:
+                existing["verified_total"] = max(0, int(existing.get("accepted_total", 0)))
+            except Exception:  # noqa: BLE001
+                existing["verified_total"] = 0
         old_metric = existing.get("metric_value")
         replace_metric = metric_value is not None and old_metric is None
         if metric_value is not None and old_metric is not None:
@@ -2827,15 +2856,27 @@ def upsert_population_entry(
             existing["metric_value"] = metric_value
         existing["higher_is_better"] = higher_is_better
 
+    normalized_promotion_status = str(promotion_status or "").strip().lower() or None
+    if normalized_promotion_status is None:
+        if accepted is True:
+            normalized_promotion_status = "verified"
+        elif accepted is False:
+            normalized_promotion_status = "rejected"
+        else:
+            normalized_promotion_status = "seeded"
     if accepted is True:
         existing["accepted_total"] = int(existing.get("accepted_total", 0)) + 1
         existing["last_accepted_at"] = timestamp
+        if normalized_promotion_status == "verified":
+            existing["verified_total"] = int(existing.get("verified_total", 0)) + 1
+            existing["last_verified_at"] = timestamp
     elif accepted is False:
         existing["rejected_total"] = int(existing.get("rejected_total", 0)) + 1
         existing["last_rejected_at"] = timestamp
     else:
         existing["seeded_total"] = int(existing.get("seeded_total", 0)) + 1
         existing["last_seeded_at"] = timestamp
+    existing["last_promotion_status"] = normalized_promotion_status
     existing["last_seen_at"] = timestamp
     existing["last_notes"] = notes
     compact_population_entries(entries, max_entries=max_entries)
@@ -2855,6 +2896,7 @@ def update_and_save_population_memory(
     timestamp: str,
     notes: str,
     max_entries: int,
+    promotion_status: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
     lock_path = path.with_suffix(path.suffix + ".lock")
     entry: dict[str, Any] | None = None
@@ -2871,6 +2913,7 @@ def update_and_save_population_memory(
             timestamp=timestamp,
             notes=notes,
             max_entries=max_entries,
+            promotion_status=promotion_status,
         )
         save_population_memory(path, latest)
 
@@ -2925,10 +2968,18 @@ def select_population_parent(
             metric_f = float(metric_value)
         except Exception:  # noqa: BLE001
             continue
+        verified_total = population_entry_verified_total(raw)
         accepted_total = max(0, int(raw.get("accepted_total", 0)))
         rejected_total = max(0, int(raw.get("rejected_total", 0)))
         sampled_total = max(0, int(raw.get("sampled_total", 0)))
+        seeded_total = max(0, int(raw.get("seeded_total", 0)))
+        eligible_seed = seeded_total > 0 and accepted_total == 0 and rejected_total == 0
+        eligible_verified = verified_total > 0
+        if not eligible_verified and not eligible_seed:
+            continue
         if not same_target and accepted_total < max(0, int(cross_target_min_accepted)):
+            continue
+        if not same_target and not eligible_verified:
             continue
         entry_higher_is_better = bool(raw.get("higher_is_better", higher_is_better))
         if not same_target and entry_higher_is_better != bool(higher_is_better):
@@ -2947,7 +2998,8 @@ def select_population_parent(
         else:
             metric_component = float(cross_target_score_scale) * success_rate
         target_bonus = 0.15 if same_target else 0.0
-        selection_score = metric_component + target_bonus + (0.20 * success_rate) + (0.10 * novelty)
+        promotion_bonus = 0.25 if eligible_verified else 0.05
+        selection_score = metric_component + target_bonus + promotion_bonus + (0.20 * success_rate) + (0.10 * novelty)
         candidates.append((selection_score, raw))
 
     if not candidates:
@@ -3253,7 +3305,14 @@ def should_record_population_candidate(*, accepted: bool, notes: str) -> bool:
     if accepted:
         return True
     token = str(notes or "").split(";", 1)[0].strip().lower()
-    return token.startswith("rejected_below_threshold") or token.startswith("rejected_validation_")
+    return token.startswith(
+        (
+            "rejected_below_threshold",
+            "rejected_validation_",
+            "rejected_holdout_",
+            "rejected_reward_audit_",
+        )
+    )
 
 
 def _increment_stat(container: dict[str, Any], key: str, accepted: bool) -> None:
@@ -4954,10 +5013,116 @@ def validation_metric_passes(
     )
 
 
-def evaluate_validation_targets(
+def configured_stage_targets(
+    target_config: dict[str, Any],
     *,
-    validation_targets: list[str],
-    validation_baselines: dict[str, float],
+    field_name: str,
+    primary_target_name: str,
+) -> list[str]:
+    raw_targets = target_config.get(field_name, [])
+    stage_targets: list[str] = []
+    if not isinstance(raw_targets, list):
+        return stage_targets
+    for item in raw_targets:
+        if not isinstance(item, str):
+            continue
+        name = item.strip()
+        if not name or name == primary_target_name or name in stage_targets:
+            continue
+        stage_targets.append(name)
+    return stage_targets
+
+
+def stage_label(stage_name: str) -> str:
+    return stage_name.replace("_", " ").strip()
+
+
+def ensure_stage_targets_share_source(
+    *,
+    stage_name: str,
+    stage_targets: list[str],
+    targets_catalog: dict[str, dict[str, Any]],
+    source_path: Path,
+) -> tuple[bool, str | None]:
+    label = stage_label(stage_name)
+    for stage_target in stage_targets:
+        if stage_target not in targets_catalog:
+            return False, f"Unknown {label} target: {stage_target}"
+        cfg = targets_catalog[stage_target]
+        validation_source_file = cfg.get("source_file")
+        if not isinstance(validation_source_file, str):
+            return False, f"{label.capitalize()} target missing source_file: {stage_target}"
+        validation_source_path = ROOT / validation_source_file
+        if validation_source_path.resolve() != source_path.resolve():
+            return (
+                False,
+                (
+                    f"{label.capitalize()} target source_file mismatch; cross-target {label} requires same mutable "
+                    f"source. primary={source_path} {stage_name}={validation_source_path} target={stage_target}"
+                ),
+            )
+    return True, None
+
+
+def mutable_evaluator_guard_error(
+    *,
+    target_config: dict[str, Any],
+    target_name: str | None = None,
+    stage_name: str | None = None,
+) -> str | None:
+    source_file = str(target_config.get("source_file", "")).strip()
+    if str(target_config.get("type", "")).strip().lower() != "command":
+        return None
+    if not source_file or not source_file_is_executable_code(source_file):
+        return None
+
+    self_scoring_refs = benchmark_references_source_file(
+        target_config=target_config,
+        source_file=source_file,
+    )
+    allow_self_modifying_evaluator = parse_flag_bool(
+        target_config.get("allow_self_modifying_evaluator"),
+        default=False,
+    )
+    if not self_scoring_refs or allow_self_modifying_evaluator:
+        return None
+
+    joined = ", ".join(self_scoring_refs)
+    if stage_name is not None:
+        label = stage_label(stage_name)
+        return (
+            f"Unsafe {label} target config: benchmark command references mutable source_file "
+            f"({source_file}) via tokens [{joined}] for target {target_name}. "
+            "Set allow_self_modifying_evaluator=true to override."
+        )
+    return (
+        "Unsafe target config: benchmark command references mutable source_file "
+        f"({source_file}) via tokens [{joined}]. "
+        "Set allow_self_modifying_evaluator=true to override."
+    )
+
+
+def establish_stage_baselines(
+    *,
+    stage_targets: list[str],
+) -> tuple[dict[str, float], dict[str, Any] | None, str | None]:
+    baselines: dict[str, float] = {}
+    failure_payload: dict[str, Any] | None = None
+    for stage_target in stage_targets:
+        result = prepare.evaluate_target(stage_target)
+        metric_value = result.get("metric_value")
+        if result.get("status") != "success" or metric_value is None:
+            failure_payload = result
+            return baselines, failure_payload, stage_target
+        baselines[stage_target] = float(metric_value)
+    return baselines, None, None
+
+
+def evaluate_stage_targets(
+    *,
+    stage_name: str,
+    stage_targets: list[str],
+    stage_baselines: dict[str, float],
     targets_catalog: dict[str, dict[str, Any]],
     allow_drop_abs: float,
     allow_drop_rel: float,
@@ -4965,10 +5130,10 @@ def evaluate_validation_targets(
     details: dict[str, Any] = {}
     observed_metrics: dict[str, float] = {}
 
-    for target_name in validation_targets:
+    for target_name in stage_targets:
         target_cfg = targets_catalog.get(target_name, {})
         higher_is_better = bool(target_cfg.get("higher_is_better", True))
-        baseline_value = validation_baselines.get(target_name)
+        baseline_value = stage_baselines.get(target_name)
         if baseline_value is None:
             return False, details, observed_metrics, f"missing_baseline:{target_name}"
 
@@ -4976,6 +5141,7 @@ def evaluate_validation_targets(
         metric_value_raw = result.get("metric_value")
         if result.get("status") != "success" or metric_value_raw is None:
             details[target_name] = {
+                "stage": stage_name,
                 "status": result.get("status", "failed"),
                 "reason": "evaluation_failed",
                 "result_notes": result.get("notes"),
@@ -4991,6 +5157,7 @@ def evaluate_validation_targets(
             allow_drop_rel=allow_drop_rel,
         )
         details[target_name] = {
+            "stage": stage_name,
             "status": "ok" if ok else "rejected",
             "higher_is_better": higher_is_better,
             "gate": gate,
@@ -5001,6 +5168,24 @@ def evaluate_validation_targets(
             return False, details, observed_metrics, f"degraded:{target_name}"
 
     return True, details, observed_metrics, "ok"
+
+
+def evaluate_validation_targets(
+    *,
+    validation_targets: list[str],
+    validation_baselines: dict[str, float],
+    targets_catalog: dict[str, dict[str, Any]],
+    allow_drop_abs: float,
+    allow_drop_rel: float,
+) -> tuple[bool, dict[str, Any], dict[str, float], str]:
+    return evaluate_stage_targets(
+        stage_name="validation",
+        stage_targets=validation_targets,
+        stage_baselines=validation_baselines,
+        targets_catalog=targets_catalog,
+        allow_drop_abs=allow_drop_abs,
+        allow_drop_rel=allow_drop_rel,
+    )
 
 
 def finite_or_zero(value: float) -> float:
@@ -5242,64 +5427,58 @@ def run_loop(args: argparse.Namespace) -> int:
         print(str(trackb_base_guard_details.get("message", "Track B base config mutation is disabled")), file=sys.stderr)
         return 2
 
-    if str(target.get("type", "")).strip().lower() == "command" and source_file_is_executable_code(
-        str(target["source_file"])
-    ):
-        self_scoring_refs = benchmark_references_source_file(
-            target_config=target,
-            source_file=str(target["source_file"]),
-        )
-        allow_self_modifying_evaluator = parse_flag_bool(
-            target.get("allow_self_modifying_evaluator"),
-            default=False,
-        )
-        if self_scoring_refs and not allow_self_modifying_evaluator:
-            joined = ", ".join(self_scoring_refs)
-            print(
-                (
-                    "Unsafe target config: benchmark command references mutable source_file "
-                    f"({target['source_file']}) via tokens [{joined}]. "
-                    "Set allow_self_modifying_evaluator=true to override."
-                ),
-                file=sys.stderr,
-            )
-            return 2
+    primary_guard_error = mutable_evaluator_guard_error(target_config=target)
+    if primary_guard_error is not None:
+        print(primary_guard_error, file=sys.stderr)
+        return 2
 
-    raw_validation_targets = target.get("validation_targets", [])
-    validation_targets: list[str] = []
-    if isinstance(raw_validation_targets, list):
-        for item in raw_validation_targets:
-            if not isinstance(item, str):
-                continue
-            name = item.strip()
-            if not name or name == args.target:
-                continue
-            validation_targets.append(name)
+    validation_targets = configured_stage_targets(
+        target,
+        field_name="validation_targets",
+        primary_target_name=args.target,
+    )
+    holdout_targets = configured_stage_targets(
+        target,
+        field_name="holdout_targets",
+        primary_target_name=args.target,
+    )
+    reward_audit_targets = configured_stage_targets(
+        target,
+        field_name="reward_audit_targets",
+        primary_target_name=args.target,
+    )
     allow_drop_abs = max(0.0, float(target.get("validation_allow_drop_abs", 0.0)))
     allow_drop_rel = max(0.0, float(target.get("validation_allow_drop_rel", 0.0)))
+    holdout_allow_drop_abs = max(0.0, float(target.get("holdout_allow_drop_abs", 0.0)))
+    holdout_allow_drop_rel = max(0.0, float(target.get("holdout_allow_drop_rel", 0.0)))
+    reward_audit_allow_drop_abs = max(0.0, float(target.get("reward_audit_allow_drop_abs", 0.0)))
+    reward_audit_allow_drop_rel = max(0.0, float(target.get("reward_audit_allow_drop_rel", 0.0)))
     validation_baselines: dict[str, float] = {}
-    for validation_target in validation_targets:
-        if validation_target not in targets:
-            print(f"Unknown validation target: {validation_target}", file=sys.stderr)
+    holdout_baselines: dict[str, float] = {}
+    reward_audit_baselines: dict[str, float] = {}
+    for stage_name, stage_targets in (
+        ("validation", validation_targets),
+        ("holdout", holdout_targets),
+        ("reward_audit", reward_audit_targets),
+    ):
+        ok, error = ensure_stage_targets_share_source(
+            stage_name=stage_name,
+            stage_targets=stage_targets,
+            targets_catalog=targets,
+            source_path=source_path,
+        )
+        if not ok:
+            print(error, file=sys.stderr)
             return 2
-        cfg = targets[validation_target]
-        validation_source_file = cfg.get("source_file")
-        if not isinstance(validation_source_file, str):
-            print(
-                f"Validation target missing source_file: {validation_target}",
-                file=sys.stderr,
+        for stage_target in stage_targets:
+            guard_error = mutable_evaluator_guard_error(
+                target_config=targets.get(stage_target, {}),
+                target_name=stage_target,
+                stage_name=stage_name,
             )
-            return 2
-        validation_source_path = ROOT / validation_source_file
-        if validation_source_path.resolve() != source_path.resolve():
-            print(
-                (
-                    "Validation target source_file mismatch; cross-target validation requires same mutable source. "
-                    f"primary={source_path} validation={validation_source_path} target={validation_target}"
-                ),
-                file=sys.stderr,
-            )
-            return 2
+            if guard_error is not None:
+                print(guard_error, file=sys.stderr)
+                return 2
 
     template = load_prompt_template()
     if "language" in target:
@@ -5566,28 +5745,32 @@ def run_loop(args: argparse.Namespace) -> int:
         ),
     )
 
-    if validation_targets:
-        for validation_target in validation_targets:
-            validation_result = prepare.evaluate_target(validation_target)
-            metric_value = validation_result.get("metric_value")
-            if validation_result.get("status") != "success" or metric_value is None:
-                print(
-                    (
-                        "Validation baseline evaluation failed; aborting optimization loop "
-                        f"(target={validation_target})"
-                    ),
-                    file=sys.stderr,
-                )
-                print(json.dumps(validation_result, indent=2, sort_keys=True), file=sys.stderr)
-                return 1
-            validation_baselines[validation_target] = float(metric_value)
+    for stage_name, stage_targets, stage_baselines in (
+        ("validation", validation_targets, validation_baselines),
+        ("holdout", holdout_targets, holdout_baselines),
+        ("reward_audit", reward_audit_targets, reward_audit_baselines),
+    ):
+        if not stage_targets:
+            continue
+        baselines, failed_payload, failed_target = establish_stage_baselines(stage_targets=stage_targets)
+        if failed_payload is not None or failed_target is not None:
+            label = stage_label(stage_name)
+            print(
+                (
+                    f"{label.capitalize()} baseline evaluation failed; aborting optimization loop "
+                    f"(target={failed_target})"
+                ),
+                file=sys.stderr,
+            )
+            print(json.dumps(failed_payload, indent=2, sort_keys=True), file=sys.stderr)
+            return 1
+        stage_baselines.update(baselines)
+        label = stage_label(stage_name)
         train_log(
             args,
             (
-                "validation baselines "
-                + ", ".join(
-                    f"{name}={validation_baselines[name]:.6f}" for name in validation_targets
-                )
+                f"{label} baselines "
+                + ", ".join(f"{name}={stage_baselines[name]:.6f}" for name in stage_targets)
             ),
             level=1,
         )
@@ -5794,6 +5977,18 @@ def run_loop(args: argparse.Namespace) -> int:
                 "allow_drop_abs": allow_drop_abs,
                 "allow_drop_rel": allow_drop_rel,
                 "baselines": validation_baselines,
+            },
+            "holdout_gate": {
+                "targets": holdout_targets,
+                "allow_drop_abs": holdout_allow_drop_abs,
+                "allow_drop_rel": holdout_allow_drop_rel,
+                "baselines": holdout_baselines,
+            },
+            "reward_audit_gate": {
+                "targets": reward_audit_targets,
+                "allow_drop_abs": reward_audit_allow_drop_abs,
+                "allow_drop_rel": reward_audit_allow_drop_rel,
+                "baselines": reward_audit_baselines,
             },
             "source_guardrails": {
                 "required_snippets": len(required_snippet_counts),
@@ -6469,36 +6664,97 @@ def run_loop(args: argparse.Namespace) -> int:
                                     allow_drop_abs=allow_drop_abs,
                                     allow_drop_rel=allow_drop_rel,
                                 )
-                            )
+                                )
                             diagnostics["validation_targets"] = validation_details
 
                         if validation_ok:
-                            accepted += 1
-                            blocked_mutations_until.clear()
-                            best_metric = float(metric_value) if confirmed_metric is None else confirmed_metric
-                            best_source = candidate
-                            if confirmed_metric is not None:
-                                metric_for_row = confirmed_metric
-                            accepted_series = ab_details.get("candidate_values") if ab_details else None
-                            if isinstance(accepted_series, list) and accepted_series:
-                                best_metric_series = [float(v) for v in accepted_series]
-                            elif confirmed_values:
-                                best_metric_series = [float(v) for v in confirmed_values]
-                            elif metric_series is not None and metric_series:
-                                best_metric_series = metric_series
-                            if required_snippets:
-                                required_snippet_counts = required_snippet_profile(
-                                    candidate,
-                                    required_snippets,
-                                    language=language_norm,
+                            holdout_ok = True
+                            holdout_reason = "skipped"
+                            holdout_details: dict[str, Any] = {}
+                            holdout_observed: dict[str, float] = {}
+                            if holdout_targets:
+                                holdout_ok, holdout_details, holdout_observed, holdout_reason = evaluate_stage_targets(
+                                    stage_name="holdout",
+                                    stage_targets=holdout_targets,
+                                    stage_baselines=holdout_baselines,
+                                    targets_catalog=targets,
+                                    allow_drop_abs=holdout_allow_drop_abs,
+                                    allow_drop_rel=holdout_allow_drop_rel,
                                 )
-                            if validation_observed:
-                                validation_baselines.update(validation_observed)
-                            notes = f"accepted:{notes};{confirm_reason};{ab_reason};validation={validation_reason}"
+                                diagnostics["holdout_targets"] = holdout_details
+
+                            if holdout_ok:
+                                reward_audit_ok = True
+                                reward_audit_reason = "skipped"
+                                reward_audit_details: dict[str, Any] = {}
+                                reward_audit_observed: dict[str, float] = {}
+                                if reward_audit_targets:
+                                    reward_audit_ok, reward_audit_details, reward_audit_observed, reward_audit_reason = (
+                                        evaluate_stage_targets(
+                                            stage_name="reward_audit",
+                                            stage_targets=reward_audit_targets,
+                                            stage_baselines=reward_audit_baselines,
+                                            targets_catalog=targets,
+                                            allow_drop_abs=reward_audit_allow_drop_abs,
+                                            allow_drop_rel=reward_audit_allow_drop_rel,
+                                        )
+                                    )
+                                    diagnostics["reward_audit_targets"] = reward_audit_details
+
+                                if reward_audit_ok:
+                                    accepted += 1
+                                    blocked_mutations_until.clear()
+                                    best_metric = float(metric_value) if confirmed_metric is None else confirmed_metric
+                                    best_source = candidate
+                                    if confirmed_metric is not None:
+                                        metric_for_row = confirmed_metric
+                                    accepted_series = ab_details.get("candidate_values") if ab_details else None
+                                    if isinstance(accepted_series, list) and accepted_series:
+                                        best_metric_series = [float(v) for v in accepted_series]
+                                    elif confirmed_values:
+                                        best_metric_series = [float(v) for v in confirmed_values]
+                                    elif metric_series is not None and metric_series:
+                                        best_metric_series = metric_series
+                                    if required_snippets:
+                                        required_snippet_counts = required_snippet_profile(
+                                            candidate,
+                                            required_snippets,
+                                            language=language_norm,
+                                        )
+                                    if validation_observed:
+                                        validation_baselines.update(validation_observed)
+                                    if holdout_observed:
+                                        holdout_baselines.update(holdout_observed)
+                                    if reward_audit_observed:
+                                        reward_audit_baselines.update(reward_audit_observed)
+                                    diagnostics["promotion"] = {"status": "verified"}
+                                    notes = (
+                                        f"accepted:{notes};{confirm_reason};{ab_reason};validation={validation_reason};"
+                                        f"holdout={holdout_reason};reward_audit={reward_audit_reason};promotion=verified"
+                                    )
+                                else:
+                                    improved = False
+                                    validation_blocked = True
+                                    source_path.write_text(best_source)
+                                    diagnostics["promotion"] = {"status": "rejected_reward_audit"}
+                                    notes = (
+                                        f"rejected_reward_audit_{reward_audit_reason}:{notes};"
+                                        f"{confirm_reason};{ab_reason};validation={validation_reason};holdout={holdout_reason}"
+                                    )
+                            else:
+                                improved = False
+                                validation_blocked = True
+                                source_path.write_text(best_source)
+                                diagnostics["promotion"] = {"status": "rejected_holdout"}
+                                notes = (
+                                    f"rejected_holdout_{holdout_reason}:{notes};"
+                                    f"{confirm_reason};{ab_reason};validation={validation_reason}"
+                                )
                         else:
                             improved = False
                             validation_blocked = True
                             source_path.write_text(best_source)
+                            diagnostics["promotion"] = {"status": "rejected_validation"}
                             notes = f"rejected_validation_{validation_reason}:{notes};{confirm_reason};{ab_reason}"
                     else:
                         improved = False
@@ -6559,11 +6815,13 @@ def run_loop(args: argparse.Namespace) -> int:
                         timestamp=prepare.now_iso(),
                         notes=notes,
                         max_entries=population_max_entries,
+                        promotion_status="verified" if improved else None,
                     )
                     if population_entry is not None:
                         diagnostics["population_recorded"] = {
                             "source_sha256": str(population_entry.get("source_sha256", ""))[:12],
                             "accepted_total": int(population_entry.get("accepted_total", 0)),
+                            "verified_total": population_entry_verified_total(population_entry),
                             "rejected_total": int(population_entry.get("rejected_total", 0)),
                         }
                 except Exception as exc:  # noqa: BLE001
@@ -6845,6 +7103,10 @@ def run_loop(args: argparse.Namespace) -> int:
                 "operator_ucb_explore": operator_ucb_explore,
                 "validation_targets": validation_targets,
                 "validation_baselines": validation_baselines,
+                "holdout_targets": holdout_targets,
+                "holdout_baselines": holdout_baselines,
+                "reward_audit_targets": reward_audit_targets,
+                "reward_audit_baselines": reward_audit_baselines,
                 "elapsed_seconds": elapsed_seconds,
                 "stop_reason": stop_reason,
             },

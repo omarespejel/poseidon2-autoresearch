@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -338,6 +339,52 @@ def helper():
             source_file="attack_kernels.py",
         )
         self.assertEqual(refs, ["attack_kernels.py"])
+
+    def test_mutable_evaluator_guard_error_rejects_stage_target_self_reference(self) -> None:
+        message = train.mutable_evaluator_guard_error(
+            target_config={
+                "type": "command",
+                "source_file": "attack_kernels.py",
+                "benchmark_command": ["python3", "attack_kernels.py"],
+            },
+            target_name="holdout_lane",
+            stage_name="holdout",
+        )
+        self.assertIsNotNone(message)
+        self.assertIn("Unsafe holdout target config", str(message))
+        self.assertIn("holdout_lane", str(message))
+
+    def test_load_target_overrides_accepts_holdout_and_reward_audit_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            overrides_path = Path(tmpdir) / "overrides.json"
+            overrides_path.write_text(
+                json.dumps(
+                    {
+                        "poseidon2_cryptanalysis_trackb_kernel_fast": {
+                            "holdout_targets": ["poseidon2_cryptanalysis_trackb_kernel_verified_fast"],
+                            "holdout_allow_drop_abs": 0.25,
+                            "reward_audit_targets": ["poseidon2_cryptanalysis_trackb_kernel_poseidon256_signal_fast"],
+                            "reward_audit_allow_drop_rel": 0.1,
+                            "ignored_key": True,
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            loaded = train.load_target_overrides(
+                str(overrides_path),
+                target_name="poseidon2_cryptanalysis_trackb_kernel_fast",
+            )
+
+        self.assertEqual(
+            loaded,
+            {
+                "holdout_targets": ["poseidon2_cryptanalysis_trackb_kernel_verified_fast"],
+                "holdout_allow_drop_abs": 0.25,
+                "reward_audit_targets": ["poseidon2_cryptanalysis_trackb_kernel_poseidon256_signal_fast"],
+                "reward_audit_allow_drop_rel": 0.1,
+            },
+        )
 
     def test_executable_source_detection_distinguishes_json(self) -> None:
         self.assertTrue(train.source_file_is_executable_code("attack_kernels.py"))
@@ -761,6 +808,87 @@ def helper():
         self.assertEqual(reason, "degraded:v_lane")
         self.assertEqual(metrics["v_lane"], 9.0)
         self.assertEqual(details["v_lane"]["status"], "rejected")
+
+    def test_configured_stage_targets_skips_primary_and_duplicates(self) -> None:
+        stage_targets = train.configured_stage_targets(
+            {
+                "holdout_targets": [
+                    "poseidon2_cryptanalysis_trackb_kernel_fast",
+                    "poseidon2_cryptanalysis_trackb_kernel_verified_fast",
+                    "poseidon2_cryptanalysis_trackb_kernel_verified_fast",
+                    "  ",
+                ]
+            },
+            field_name="holdout_targets",
+            primary_target_name="poseidon2_cryptanalysis_trackb_kernel_fast",
+        )
+        self.assertEqual(stage_targets, ["poseidon2_cryptanalysis_trackb_kernel_verified_fast"])
+
+    def test_ensure_stage_targets_share_source_rejects_mismatch(self) -> None:
+        ok, message = train.ensure_stage_targets_share_source(
+            stage_name="holdout",
+            stage_targets=["holdout_lane"],
+            targets_catalog={"holdout_lane": {"source_file": "config/track_b_mutable_fast.json"}},
+            source_path=KERNEL_PATH,
+        )
+        self.assertFalse(ok)
+        self.assertIn("source_file mismatch", str(message))
+
+    def test_evaluate_stage_targets_marks_stage_name(self) -> None:
+        with patch(
+            "train.prepare.evaluate_target",
+            return_value={"status": "success", "metric_value": 10.0, "metric_name": "attack_score_verified"},
+        ):
+            ok, details, metrics, reason = train.evaluate_stage_targets(
+                stage_name="holdout",
+                stage_targets=["holdout_lane"],
+                stage_baselines={"holdout_lane": 10.0},
+                targets_catalog={"holdout_lane": {"higher_is_better": True}},
+                allow_drop_abs=0.0,
+                allow_drop_rel=0.0,
+            )
+        self.assertTrue(ok)
+        self.assertEqual(reason, "ok")
+        self.assertEqual(metrics["holdout_lane"], 10.0)
+        self.assertEqual(details["holdout_lane"]["stage"], "holdout")
+
+    def test_evaluate_stage_targets_marks_stage_name_on_degraded(self) -> None:
+        with patch(
+            "train.prepare.evaluate_target",
+            return_value={"status": "success", "metric_value": 9.0, "metric_name": "attack_score_verified"},
+        ):
+            ok, details, metrics, reason = train.evaluate_stage_targets(
+                stage_name="holdout",
+                stage_targets=["holdout_lane"],
+                stage_baselines={"holdout_lane": 10.0},
+                targets_catalog={"holdout_lane": {"higher_is_better": True}},
+                allow_drop_abs=0.0,
+                allow_drop_rel=0.0,
+            )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "degraded:holdout_lane")
+        self.assertEqual(metrics["holdout_lane"], 9.0)
+        self.assertEqual(details["holdout_lane"]["stage"], "holdout")
+        self.assertEqual(details["holdout_lane"]["status"], "rejected")
+
+    def test_evaluate_stage_targets_marks_stage_name_on_eval_failure(self) -> None:
+        with patch(
+            "train.prepare.evaluate_target",
+            return_value={"status": "failed", "notes": "boom"},
+        ):
+            ok, details, metrics, reason = train.evaluate_stage_targets(
+                stage_name="reward_audit",
+                stage_targets=["audit_lane"],
+                stage_baselines={"audit_lane": 10.0},
+                targets_catalog={"audit_lane": {"higher_is_better": True}},
+                allow_drop_abs=0.0,
+                allow_drop_rel=0.0,
+            )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "eval_failed:audit_lane")
+        self.assertEqual(metrics, {})
+        self.assertEqual(details["audit_lane"]["stage"], "reward_audit")
+        self.assertEqual(details["audit_lane"]["reason"], "evaluation_failed")
 
     def test_algorithmic_mitm_key_mutator_applies(self) -> None:
         source = harness_source()
