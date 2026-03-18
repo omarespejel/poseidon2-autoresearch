@@ -276,7 +276,7 @@ def build_codex_exec_prompt(*, system_prompt: str, task_instructions: str, user_
         f"{escape_codex_prompt_section_text(system_prompt)}\n"
         "</SYSTEM_PROMPT>\n\n"
         "<TASK_INSTRUCTIONS>\n"
-        f"{task_instructions.strip()}\n"
+        f"{escape_codex_prompt_section_text(task_instructions).strip()}\n"
         "</TASK_INSTRUCTIONS>\n\n"
         "<USER_PROMPT>\n"
         f"{escape_codex_prompt_section_text(user_prompt)}\n"
