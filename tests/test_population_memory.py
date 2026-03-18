@@ -112,6 +112,53 @@ class PopulationMemoryTests(unittest.TestCase):
         self.assertEqual(entry["verified_total"], 0)
         self.assertEqual(entry["last_promotion_status"], "accepted")
 
+    def test_population_entry_verified_total_falls_back_to_accepted_total_for_legacy_entry(self) -> None:
+        verified_total = train.population_entry_verified_total(
+            {
+                "accepted_total": 3,
+                "last_promotion_status": "rejected",
+            }
+        )
+        self.assertEqual(verified_total, 3)
+
+    def test_upsert_population_entry_backfills_verified_total_for_legacy_entry(self) -> None:
+        source = "def f():\n    return 1\n"
+        memory = {
+            "version": 1,
+            "entries": [
+                {
+                    "target": "poseidon2_cryptanalysis_trackb_kernel_fast",
+                    "language": "python",
+                    "source_sha256": train.source_sha256(source),
+                    "source_code": source,
+                    "metric_value": 12.5,
+                    "higher_is_better": True,
+                    "accepted_total": 2,
+                    "rejected_total": 0,
+                    "sampled_total": 0,
+                    "last_promotion_status": "accepted",
+                }
+            ],
+        }
+
+        entry = train.upsert_population_entry(
+            memory,
+            target_name="poseidon2_cryptanalysis_trackb_kernel_fast",
+            language="python",
+            source_code=source,
+            metric_value=12.4,
+            higher_is_better=True,
+            accepted=False,
+            timestamp="2026-03-17T00:00:02+00:00",
+            notes="rejected_not_better:legacy",
+            max_entries=32,
+        )
+
+        self.assertEqual(entry["accepted_total"], 2)
+        self.assertEqual(entry["verified_total"], 2)
+        self.assertEqual(entry["rejected_total"], 1)
+        self.assertEqual(train.population_entry_verified_total(entry), 2)
+
     def test_select_population_parent_uses_ranked_candidates(self) -> None:
         best_source = "def f():\n    return 0\n"
         alt_a = "def f():\n    return 1\n"

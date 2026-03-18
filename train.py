@@ -82,6 +82,12 @@ ALLOWED_TARGET_OVERRIDE_KEYS = {
     "validation_targets",
     "validation_allow_drop_abs",
     "validation_allow_drop_rel",
+    "holdout_targets",
+    "holdout_allow_drop_abs",
+    "holdout_allow_drop_rel",
+    "reward_audit_targets",
+    "reward_audit_allow_drop_abs",
+    "reward_audit_allow_drop_rel",
 }
 DEFAULT_MUTATION_MEMORY_FILE = ROOT / "work" / "mutation_memory.json"
 DEFAULT_MUTATION_MEMORY_MAX_ENTRIES = 512
@@ -2772,8 +2778,6 @@ def population_entry_verified_total(entry: dict[str, Any]) -> int:
             return max(0, int(entry.get("verified_total", 0)))
         except Exception:  # noqa: BLE001
             return 0
-    if "last_promotion_status" in entry:
-        return 0
     try:
         return max(0, int(entry.get("accepted_total", 0)))
     except Exception:  # noqa: BLE001
@@ -2834,6 +2838,11 @@ def upsert_population_entry(
     else:
         # Keep freshest source and best observed metric for this source hash/target.
         existing["source_code"] = source_code
+        if "verified_total" not in existing:
+            try:
+                existing["verified_total"] = max(0, int(existing.get("accepted_total", 0)))
+            except Exception:  # noqa: BLE001
+                existing["verified_total"] = 0
         old_metric = existing.get("metric_value")
         replace_metric = metric_value is not None and old_metric is None
         if metric_value is not None and old_metric is not None:
@@ -5024,6 +5033,10 @@ def configured_stage_targets(
     return stage_targets
 
 
+def stage_label(stage_name: str) -> str:
+    return stage_name.replace("_", " ").strip()
+
+
 def ensure_stage_targets_share_source(
     *,
     stage_name: str,
@@ -5031,7 +5044,7 @@ def ensure_stage_targets_share_source(
     targets_catalog: dict[str, dict[str, Any]],
     source_path: Path,
 ) -> tuple[bool, str | None]:
-    label = stage_name.replace("_", " ")
+    label = stage_label(stage_name)
     for stage_target in stage_targets:
         if stage_target not in targets_catalog:
             return False, f"Unknown {label} target: {stage_target}"
@@ -5051,9 +5064,46 @@ def ensure_stage_targets_share_source(
     return True, None
 
 
+def mutable_evaluator_guard_error(
+    *,
+    target_config: dict[str, Any],
+    target_name: str | None = None,
+    stage_name: str | None = None,
+) -> str | None:
+    source_file = str(target_config.get("source_file", "")).strip()
+    if str(target_config.get("type", "")).strip().lower() != "command":
+        return None
+    if not source_file or not source_file_is_executable_code(source_file):
+        return None
+
+    self_scoring_refs = benchmark_references_source_file(
+        target_config=target_config,
+        source_file=source_file,
+    )
+    allow_self_modifying_evaluator = parse_flag_bool(
+        target_config.get("allow_self_modifying_evaluator"),
+        default=False,
+    )
+    if not self_scoring_refs or allow_self_modifying_evaluator:
+        return None
+
+    joined = ", ".join(self_scoring_refs)
+    if stage_name is not None:
+        label = stage_label(stage_name)
+        return (
+            f"Unsafe {label} target config: benchmark command references mutable source_file "
+            f"({source_file}) via tokens [{joined}] for target {target_name}. "
+            "Set allow_self_modifying_evaluator=true to override."
+        )
+    return (
+        "Unsafe target config: benchmark command references mutable source_file "
+        f"({source_file}) via tokens [{joined}]. "
+        "Set allow_self_modifying_evaluator=true to override."
+    )
+
+
 def establish_stage_baselines(
     *,
-    stage_name: str,
     stage_targets: list[str],
 ) -> tuple[dict[str, float], dict[str, Any] | None, str | None]:
     baselines: dict[str, float] = {}
@@ -5377,28 +5427,10 @@ def run_loop(args: argparse.Namespace) -> int:
         print(str(trackb_base_guard_details.get("message", "Track B base config mutation is disabled")), file=sys.stderr)
         return 2
 
-    if str(target.get("type", "")).strip().lower() == "command" and source_file_is_executable_code(
-        str(target["source_file"])
-    ):
-        self_scoring_refs = benchmark_references_source_file(
-            target_config=target,
-            source_file=str(target["source_file"]),
-        )
-        allow_self_modifying_evaluator = parse_flag_bool(
-            target.get("allow_self_modifying_evaluator"),
-            default=False,
-        )
-        if self_scoring_refs and not allow_self_modifying_evaluator:
-            joined = ", ".join(self_scoring_refs)
-            print(
-                (
-                    "Unsafe target config: benchmark command references mutable source_file "
-                    f"({target['source_file']}) via tokens [{joined}]. "
-                    "Set allow_self_modifying_evaluator=true to override."
-                ),
-                file=sys.stderr,
-            )
-            return 2
+    primary_guard_error = mutable_evaluator_guard_error(target_config=target)
+    if primary_guard_error is not None:
+        print(primary_guard_error, file=sys.stderr)
+        return 2
 
     validation_targets = configured_stage_targets(
         target,
@@ -5438,6 +5470,15 @@ def run_loop(args: argparse.Namespace) -> int:
         if not ok:
             print(error, file=sys.stderr)
             return 2
+        for stage_target in stage_targets:
+            guard_error = mutable_evaluator_guard_error(
+                target_config=targets.get(stage_target, {}),
+                target_name=stage_target,
+                stage_name=stage_name,
+            )
+            if guard_error is not None:
+                print(guard_error, file=sys.stderr)
+                return 2
 
     template = load_prompt_template()
     if "language" in target:
@@ -5707,18 +5748,16 @@ def run_loop(args: argparse.Namespace) -> int:
     for stage_name, stage_targets, stage_baselines in (
         ("validation", validation_targets, validation_baselines),
         ("holdout", holdout_targets, holdout_baselines),
-        ("reward audit", reward_audit_targets, reward_audit_baselines),
+        ("reward_audit", reward_audit_targets, reward_audit_baselines),
     ):
         if not stage_targets:
             continue
-        baselines, failed_payload, failed_target = establish_stage_baselines(
-            stage_name=stage_name,
-            stage_targets=stage_targets,
-        )
+        baselines, failed_payload, failed_target = establish_stage_baselines(stage_targets=stage_targets)
         if failed_payload is not None or failed_target is not None:
+            label = stage_label(stage_name)
             print(
                 (
-                    f"{stage_name.capitalize()} baseline evaluation failed; aborting optimization loop "
+                    f"{label.capitalize()} baseline evaluation failed; aborting optimization loop "
                     f"(target={failed_target})"
                 ),
                 file=sys.stderr,
@@ -5726,10 +5765,11 @@ def run_loop(args: argparse.Namespace) -> int:
             print(json.dumps(failed_payload, indent=2, sort_keys=True), file=sys.stderr)
             return 1
         stage_baselines.update(baselines)
+        label = stage_label(stage_name)
         train_log(
             args,
             (
-                f"{stage_name} baselines "
+                f"{label} baselines "
                 + ", ".join(f"{name}={stage_baselines[name]:.6f}" for name in stage_targets)
             ),
             level=1,
