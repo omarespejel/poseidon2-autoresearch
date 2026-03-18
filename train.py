@@ -248,16 +248,32 @@ def model_name_is_version_pinned(model_name: str) -> bool:
     if not normalized:
         return False
     return bool(
-        re.search(r"(?:^|[-_@/])\d{4}-\d{2}-\d{2}$", normalized)
-        or re.search(r"(?:^|[-_@/])\d{8}$", normalized)
+        re.search(
+            r"(?:^|[-_@/])\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])(?:[-_@/]|$)",
+            normalized,
+        )
     )
+
+
+def escape_codex_prompt_section_text(text: str) -> str:
+    escaped = str(text or "")
+    for raw, replacement in (
+        ("<SYSTEM_PROMPT>", "[SYSTEM_PROMPT]"),
+        ("</SYSTEM_PROMPT>", "[/SYSTEM_PROMPT]"),
+        ("<OUTPUT_REQUIREMENTS>", "[OUTPUT_REQUIREMENTS]"),
+        ("</OUTPUT_REQUIREMENTS>", "[/OUTPUT_REQUIREMENTS]"),
+        ("<USER_PROMPT>", "[USER_PROMPT]"),
+        ("</USER_PROMPT>", "[/USER_PROMPT]"),
+    ):
+        escaped = escaped.replace(raw, replacement)
+    return escaped
 
 
 def build_codex_exec_prompt(*, system_prompt: str, user_prompt: str) -> str:
     return (
         "<SYSTEM_PROMPT>\n"
         "The following block contains the highest-priority instructions for this run.\n"
-        f"{system_prompt}\n"
+        f"{escape_codex_prompt_section_text(system_prompt)}\n"
         "</SYSTEM_PROMPT>\n\n"
         "<OUTPUT_REQUIREMENTS>\n"
         "Return only the complete updated source file contents.\n"
@@ -265,7 +281,7 @@ def build_codex_exec_prompt(*, system_prompt: str, user_prompt: str) -> str:
         "Do not include explanations.\n"
         "</OUTPUT_REQUIREMENTS>\n\n"
         "<USER_PROMPT>\n"
-        f"{user_prompt}\n"
+        f"{escape_codex_prompt_section_text(user_prompt)}\n"
         "</USER_PROMPT>\n"
     )
 
@@ -288,6 +304,12 @@ PROMPT_INJECTION_MARKERS = (
     "<assistant",
     "<system",
     "```prompt",
+    "<system_prompt>",
+    "</system_prompt>",
+    "<output_requirements>",
+    "</output_requirements>",
+    "<user_prompt>",
+    "</user_prompt>",
 )
 
 
@@ -5680,6 +5702,15 @@ def run_loop(args: argparse.Namespace) -> int:
         default=True,
     )
     llm_backend = resolve_llm_backend(args)
+    requested_backend = normalize_llm_backend_name(getattr(args, "llm_backend", "auto"))
+    if requested_backend == "codex" and not (
+        os.getenv("AUTORESEARCH_CODEX_BIN", "").strip() or shutil.which("codex")
+    ):
+        train_log(
+            args,
+            "error: --llm-backend codex requested but codex binary not found; install codex CLI or set AUTORESEARCH_CODEX_BIN",
+        )
+        return 1
     llm_model = resolve_model_name(args, backend=llm_backend)
     codex_reasoning_effort = resolve_codex_reasoning_effort(getattr(args, "codex_reasoning_effort", "high"))
     llm_model_pinned = model_name_is_version_pinned(llm_model) if llm_model else None
@@ -6103,7 +6134,7 @@ def run_loop(args: argparse.Namespace) -> int:
             "target_overrides": target_overrides,
             "iterations": max_iterations,
             "mode": llm_backend,
-            "requested_backend": normalize_llm_backend_name(getattr(args, "llm_backend", "auto")),
+            "requested_backend": requested_backend,
             "llm": {
                 "backend": llm_backend,
                 "model": llm_model or None,
