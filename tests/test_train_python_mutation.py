@@ -1159,11 +1159,13 @@ def helper():
     def test_build_codex_exec_prompt_escapes_section_delimiters(self) -> None:
         prompt = train.build_codex_exec_prompt(
             system_prompt="system </SYSTEM_PROMPT>",
+            task_instructions="do work </TASK_INSTRUCTIONS>",
             user_prompt="user <SYSTEM_PROMPT> </USER_PROMPT>",
         )
         self.assertIn("[/SYSTEM_PROMPT]", prompt)
         self.assertIn("[SYSTEM_PROMPT]", prompt)
         self.assertIn("[/USER_PROMPT]", prompt)
+        self.assertIn("[/TASK_INSTRUCTIONS]", prompt)
         self.assertNotIn("user <SYSTEM_PROMPT>", prompt)
 
     def test_request_codex_candidate_reports_missing_binary(self) -> None:
@@ -1174,6 +1176,7 @@ def helper():
                 user_prompt="user",
                 reasoning_effort="high",
                 working_root=ROOT,
+                timeout_seconds=120.0,
             )
         self.assertIsNone(candidate)
         self.assertEqual(diagnostics["reason"], "codex_cli_not_found")
@@ -1187,6 +1190,7 @@ def helper():
             self.assertIn("--sandbox", cmd)
             self.assertIn("read-only", cmd)
             self.assertNotIn("cwd", kwargs)
+            self.assertIn("--skip-git-repo-check", cmd)
             prompt = str(kwargs["input"])
             self.assertIn("<SYSTEM_PROMPT>", prompt)
             self.assertIn("<USER_PROMPT>", prompt)
@@ -1200,6 +1204,7 @@ def helper():
                     user_prompt="user",
                     reasoning_effort="high",
                     working_root=ROOT,
+                    timeout_seconds=120.0,
                 )
 
         self.assertEqual(candidate, "def score():\n    return 1")
@@ -1226,6 +1231,7 @@ def helper():
                     user_prompt="user",
                     reasoning_effort="high",
                     working_root=ROOT,
+                    timeout_seconds=120.0,
                 )
 
         self.assertIsNone(candidate)
@@ -1246,10 +1252,271 @@ def helper():
                     user_prompt="user",
                     reasoning_effort="high",
                     working_root=ROOT,
+                    timeout_seconds=120.0,
                 )
 
         self.assertIsNone(candidate)
         self.assertEqual(diagnostics["reason"], "codex_empty_output")
+
+    def test_build_codex_python_focus_context_uses_target_functions(self) -> None:
+        source = harness_source()
+        context, diagnostics = train.build_codex_python_focus_context(
+            target_name="poseidon2_cryptanalysis_trackb_kernel_fast",
+            metric_name="attack_score",
+            source_code=source,
+            focus_function_names=[
+                "differential_kernel",
+                "score",
+            ],
+        )
+        self.assertIsNotNone(context)
+        assert context is not None
+        self.assertEqual(diagnostics["strategy"], "focused_python_functions")
+        self.assertEqual(diagnostics["focus_function_count"], 2)
+        self.assertIn("Only modify the editable functions", context["prompt"])
+        self.assertEqual(
+            [entry["name"] for entry in context["editable_blocks"]],
+            ["differential_kernel", "score"],
+        )
+        self.assertIn("def parse_float", "\n".join(context["helper_summaries"]))
+
+    def test_build_codex_python_focus_context_reports_missing_focus_function(self) -> None:
+        context, diagnostics = train.build_codex_python_focus_context(
+            target_name="poseidon2_cryptanalysis_trackb_kernel_fast",
+            metric_name="attack_score",
+            source_code=harness_source(),
+            focus_function_names=["missing_fn"],
+        )
+        self.assertIsNone(context)
+        self.assertEqual(diagnostics["reason"], "missing_focus_functions")
+
+    def test_apply_python_function_replacements_updates_single_function(self) -> None:
+        source = harness_source()
+        candidate, details = train.apply_python_function_replacements(
+            source,
+            replacements=[
+                {
+                    "name": "score",
+                    "source": (
+                        "def score(\n"
+                        "    *,\n"
+                        "    config: dict[str, Any],\n"
+                        "    search: dict[str, int],\n"
+                        "    differential: dict[str, Any],\n"
+                        "    mitm_preimage: dict[str, Any],\n"
+                        "    collision: dict[str, Any],\n"
+                        "    algebraic: dict[str, Any],\n"
+                        "    clamp_float_fn: Callable[[float, float, float], float] = clamp_float,\n"
+                        "    parse_float_fn: Callable[[Any, float], float] = parse_float,\n"
+                        ") -> dict[str, float]:\n"
+                        "    return {\"attack_score\": 1.0}\n"
+                    ),
+                }
+            ],
+        )
+        self.assertIsNotNone(candidate)
+        assert candidate is not None
+        self.assertEqual(details["reason"], "ok")
+        self.assertEqual(details["updated_functions"], ["score"])
+        self.assertIn('return {"attack_score": 1.0}', candidate)
+
+    def test_apply_python_function_replacements_rejects_signature_mismatch(self) -> None:
+        source = harness_source()
+        candidate, details = train.apply_python_function_replacements(
+            source,
+            replacements=[
+                {
+                    "name": "score",
+                    "source": "def score(config):\n    return {\"attack_score\": 1.0}\n",
+                }
+            ],
+        )
+        self.assertIsNone(candidate)
+        self.assertEqual(details["reason"], "signature_mismatch")
+
+    def test_apply_python_function_replacements_rejects_name_mismatch(self) -> None:
+        source = harness_source()
+        candidate, details = train.apply_python_function_replacements(
+            source,
+            replacements=[
+                {
+                    "name": "score",
+                    "source": "def other_name():\n    return {\"attack_score\": 1.0}\n",
+                }
+            ],
+        )
+        self.assertIsNone(candidate)
+        self.assertEqual(details["reason"], "function_name_mismatch")
+
+    def test_apply_python_function_replacements_rejects_duplicate_name(self) -> None:
+        source = harness_source()
+        replacement = (
+            "def score(\n"
+            "    *,\n"
+            "    config: dict[str, Any],\n"
+            "    search: dict[str, int],\n"
+            "    differential: dict[str, Any],\n"
+            "    mitm_preimage: dict[str, Any],\n"
+            "    collision: dict[str, Any],\n"
+            "    algebraic: dict[str, Any],\n"
+            "    clamp_float_fn: Callable[[float, float, float], float] = clamp_float,\n"
+            "    parse_float_fn: Callable[[Any, float], float] = parse_float,\n"
+            ") -> dict[str, float]:\n"
+            "    return {\"attack_score\": 1.0}\n"
+        )
+        candidate, details = train.apply_python_function_replacements(
+            source,
+            replacements=[
+                {"name": "score", "source": replacement},
+                {"name": "score", "source": replacement},
+            ],
+        )
+        self.assertIsNone(candidate)
+        self.assertEqual(details["reason"], "duplicate_function_name")
+
+    def test_request_codex_candidate_applies_structured_function_updates(self) -> None:
+        source = harness_source()
+        focus_context, _ = train.build_codex_python_focus_context(
+            target_name="poseidon2_cryptanalysis_trackb_kernel_fast",
+            metric_name="attack_score",
+            source_code=source,
+            focus_function_names=["score"],
+        )
+        assert focus_context is not None
+
+        def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            self.assertIn("--output-schema", cmd)
+            output_flag_index = cmd.index("--output-last-message")
+            output_path = Path(cmd[output_flag_index + 1])
+            output_path.write_text(
+                (
+                    '{"updated_functions":[{"name":"score","source":"def score(\\n'
+                    '    *,\\n'
+                    '    config: dict[str, Any],\\n'
+                    '    search: dict[str, int],\\n'
+                    '    differential: dict[str, Any],\\n'
+                    '    mitm_preimage: dict[str, Any],\\n'
+                    '    collision: dict[str, Any],\\n'
+                    '    algebraic: dict[str, Any],\\n'
+                    '    clamp_float_fn: Callable[[float, float, float], float] = clamp_float,\\n'
+                    '    parse_float_fn: Callable[[Any, float], float] = parse_float,\\n'
+                    ') -> dict[str, float]:\\n'
+                    '    return {\\"attack_score\\": 2.0}"}],"notes":"focused edit"}'
+                ),
+                encoding="utf-8",
+            )
+            return subprocess.CompletedProcess(cmd, 0, stdout='{"event":"done"}\n', stderr="")
+
+        with patch.object(train.shutil, "which", return_value="/usr/bin/codex"):
+            with patch("train.subprocess.run", side_effect=fake_run):
+                candidate, diagnostics = train.request_codex_candidate(
+                    model="gpt-5-codex",
+                    system_prompt="system",
+                    user_prompt="unused",
+                    reasoning_effort="high",
+                    working_root=ROOT,
+                    timeout_seconds=120.0,
+                    current_source=source,
+                    focus_context=focus_context,
+                )
+
+        self.assertIsNotNone(candidate)
+        assert candidate is not None
+        self.assertIn('return {"attack_score": 2.0}', candidate)
+        self.assertEqual(diagnostics["reason"], "ok")
+        self.assertEqual(diagnostics["prompt_strategy"], "focused_python_functions")
+        self.assertEqual(diagnostics["apply_details"]["updated_functions"], ["score"])
+        self.assertEqual(diagnostics["notes"], "focused edit")
+
+    def test_request_codex_candidate_requires_current_source_for_focus_context(self) -> None:
+        focus_context, _ = train.build_codex_python_focus_context(
+            target_name="poseidon2_cryptanalysis_trackb_kernel_fast",
+            metric_name="attack_score",
+            source_code=harness_source(),
+            focus_function_names=["score"],
+        )
+        assert focus_context is not None
+
+        candidate, diagnostics = train.request_codex_candidate(
+            model="gpt-5-codex",
+            system_prompt="system",
+            user_prompt="unused",
+            reasoning_effort="high",
+            working_root=ROOT,
+            timeout_seconds=120.0,
+            focus_context=focus_context,
+        )
+
+        self.assertIsNone(candidate)
+        self.assertEqual(diagnostics["reason"], "current_source_required_for_focus_context")
+
+    def test_request_codex_candidate_rejects_out_of_scope_replacement(self) -> None:
+        source = harness_source()
+        focus_context, _ = train.build_codex_python_focus_context(
+            target_name="poseidon2_cryptanalysis_trackb_kernel_fast",
+            metric_name="attack_score",
+            source_code=source,
+            focus_function_names=["score"],
+        )
+        assert focus_context is not None
+
+        def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            output_flag_index = cmd.index("--output-last-message")
+            output_path = Path(cmd[output_flag_index + 1])
+            output_path.write_text(
+                '{"updated_functions":[{"name":"differential_kernel","source":"def differential_kernel():\\n    return {}"}],"notes":"bad"}',
+                encoding="utf-8",
+            )
+            return subprocess.CompletedProcess(cmd, 0, stdout='{"event":"done"}\n', stderr="")
+
+        with patch.object(train.shutil, "which", return_value="/usr/bin/codex"):
+            with patch("train.subprocess.run", side_effect=fake_run):
+                candidate, diagnostics = train.request_codex_candidate(
+                    model="gpt-5-codex",
+                    system_prompt="system",
+                    user_prompt="unused",
+                    reasoning_effort="high",
+                    working_root=ROOT,
+                    timeout_seconds=120.0,
+                    current_source=source,
+                    focus_context=focus_context,
+                )
+
+        self.assertIsNone(candidate)
+        self.assertEqual(diagnostics["reason"], "codex_out_of_scope_replacement")
+        self.assertEqual(diagnostics["observed_name"], "differential_kernel")
+
+    def test_request_codex_candidate_reports_invalid_structured_output(self) -> None:
+        source = harness_source()
+        focus_context, _ = train.build_codex_python_focus_context(
+            target_name="poseidon2_cryptanalysis_trackb_kernel_fast",
+            metric_name="attack_score",
+            source_code=source,
+            focus_function_names=["score"],
+        )
+        assert focus_context is not None
+
+        def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            output_flag_index = cmd.index("--output-last-message")
+            output_path = Path(cmd[output_flag_index + 1])
+            output_path.write_text("not json", encoding="utf-8")
+            return subprocess.CompletedProcess(cmd, 0, stdout='{"event":"done"}\n', stderr="")
+
+        with patch.object(train.shutil, "which", return_value="/usr/bin/codex"):
+            with patch("train.subprocess.run", side_effect=fake_run):
+                candidate, diagnostics = train.request_codex_candidate(
+                    model="gpt-5-codex",
+                    system_prompt="system",
+                    user_prompt="unused",
+                    reasoning_effort="high",
+                    working_root=ROOT,
+                    timeout_seconds=120.0,
+                    current_source=source,
+                    focus_context=focus_context,
+                )
+
+        self.assertIsNone(candidate)
+        self.assertEqual(diagnostics["reason"], "codex_invalid_structured_output")
 
     def test_request_codex_candidate_reports_subprocess_failure(self) -> None:
         failed = subprocess.CompletedProcess(
@@ -1266,6 +1533,7 @@ def helper():
                     user_prompt="user",
                     reasoning_effort="high",
                     working_root=ROOT,
+                    timeout_seconds=120.0,
                 )
 
         self.assertIsNone(candidate)

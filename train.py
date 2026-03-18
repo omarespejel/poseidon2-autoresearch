@@ -117,6 +117,7 @@ DEFAULT_OPERATOR_VALIDATION_BLOCK_PENALTY_MAX = 0.25
 DEFAULT_OPERATOR_VALIDATION_BLOCK_DISABLE_STREAK = 0
 DEFAULT_OPERATOR_UCB_EXPLORE = 0.0
 DEFAULT_CODEX_REASONING_EFFORT = "high"
+DEFAULT_CODEX_TIMEOUT_SECONDS = 180.0
 TRACKB_BASE_CONFIG_NAME = "track_b_attack_config.json"
 TRACKB_MUTABLE_CONFIG_PREFIX = "track_b_mutable_"
 TRACKB_CONFIG_DIR = (ROOT / "config").resolve()
@@ -254,14 +255,13 @@ def model_name_is_version_pinned(model_name: str) -> bool:
         )
     )
 
-
 def escape_codex_prompt_section_text(text: str) -> str:
     escaped = str(text or "")
     for raw, replacement in (
         ("<SYSTEM_PROMPT>", "[SYSTEM_PROMPT]"),
         ("</SYSTEM_PROMPT>", "[/SYSTEM_PROMPT]"),
-        ("<OUTPUT_REQUIREMENTS>", "[OUTPUT_REQUIREMENTS]"),
-        ("</OUTPUT_REQUIREMENTS>", "[/OUTPUT_REQUIREMENTS]"),
+        ("<TASK_INSTRUCTIONS>", "[TASK_INSTRUCTIONS]"),
+        ("</TASK_INSTRUCTIONS>", "[/TASK_INSTRUCTIONS]"),
         ("<USER_PROMPT>", "[USER_PROMPT]"),
         ("</USER_PROMPT>", "[/USER_PROMPT]"),
     ):
@@ -269,17 +269,15 @@ def escape_codex_prompt_section_text(text: str) -> str:
     return escaped
 
 
-def build_codex_exec_prompt(*, system_prompt: str, user_prompt: str) -> str:
+def build_codex_exec_prompt(*, system_prompt: str, task_instructions: str, user_prompt: str) -> str:
     return (
         "<SYSTEM_PROMPT>\n"
         "The following block contains the highest-priority instructions for this run.\n"
         f"{escape_codex_prompt_section_text(system_prompt)}\n"
         "</SYSTEM_PROMPT>\n\n"
-        "<OUTPUT_REQUIREMENTS>\n"
-        "Return only the complete updated source file contents.\n"
-        "Do not use Markdown fences.\n"
-        "Do not include explanations.\n"
-        "</OUTPUT_REQUIREMENTS>\n\n"
+        "<TASK_INSTRUCTIONS>\n"
+        f"{escape_codex_prompt_section_text(task_instructions).strip()}\n"
+        "</TASK_INSTRUCTIONS>\n\n"
         "<USER_PROMPT>\n"
         f"{escape_codex_prompt_section_text(user_prompt)}\n"
         "</USER_PROMPT>\n"
@@ -291,6 +289,14 @@ def resolve_codex_reasoning_effort(raw_effort: Any) -> str:
     if effort not in {"low", "medium", "high"}:
         return DEFAULT_CODEX_REASONING_EFFORT
     return effort
+
+
+def resolve_codex_timeout_seconds(raw_timeout: Any) -> float:
+    try:
+        timeout_seconds = float(raw_timeout)
+    except (TypeError, ValueError):
+        timeout_seconds = DEFAULT_CODEX_TIMEOUT_SECONDS
+    return max(30.0, timeout_seconds)
 
 
 PROMPT_INJECTION_MARKERS = (
@@ -306,8 +312,8 @@ PROMPT_INJECTION_MARKERS = (
     "```prompt",
     "<system_prompt>",
     "</system_prompt>",
-    "<output_requirements>",
-    "</output_requirements>",
+    "<task_instructions>",
+    "</task_instructions>",
     "<user_prompt>",
     "</user_prompt>",
 )
@@ -3179,6 +3185,235 @@ def python_function_blocks(source_code: str) -> tuple[dict[str, tuple[int, int, 
     return out, "ok"
 
 
+def python_module_preamble(source_code: str) -> tuple[str, str]:
+    try:
+        tree = ast.parse(source_code)
+    except SyntaxError:
+        return "", "parse_failed:SyntaxError"
+    except Exception as exc:  # noqa: BLE001
+        return "", f"parse_failed:{type(exc).__name__}"
+    lines = source_code.splitlines(keepends=True)
+    first_def_line: int | None = None
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            first_def_line = max(0, int(node.lineno) - 1)
+            break
+    if first_def_line is None:
+        return source_code, "ok"
+    return "".join(lines[:first_def_line]), "ok"
+
+
+def python_top_level_function_summaries(
+    source_code: str,
+    *,
+    exclude_names: list[str] | None = None,
+) -> tuple[list[str] | None, str]:
+    try:
+        tree = ast.parse(source_code)
+    except SyntaxError:
+        return None, "parse_failed:SyntaxError"
+    except Exception as exc:  # noqa: BLE001
+        return None, f"parse_failed:{type(exc).__name__}"
+
+    excluded = set(exclude_names or [])
+    summaries: list[str] = []
+    for node in tree.body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name in excluded:
+            continue
+        arg_names: list[str] = []
+        for arg in list(node.args.posonlyargs) + list(node.args.args):
+            arg_names.append(arg.arg)
+        if node.args.vararg is not None:
+            arg_names.append(f"*{node.args.vararg.arg}")
+        for arg in node.args.kwonlyargs:
+            arg_names.append(arg.arg)
+        if node.args.kwarg is not None:
+            arg_names.append(f"**{node.args.kwarg.arg}")
+        prefix = "async def" if isinstance(node, ast.AsyncFunctionDef) else "def"
+        summaries.append(f"{prefix} {node.name}({', '.join(arg_names)})")
+    return summaries, "ok"
+
+
+def build_codex_python_focus_context(
+    *,
+    target_name: str,
+    metric_name: str,
+    source_code: str,
+    focus_function_names: list[str],
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    if not focus_function_names:
+        return None, {"strategy": "full_source", "reason": "no_focus_functions"}
+    blocks, status = python_function_blocks(source_code)
+    if blocks is None:
+        return None, {"strategy": "full_source", "reason": status}
+    missing = [name for name in focus_function_names if name not in blocks]
+    if missing:
+        return None, {"strategy": "full_source", "reason": "missing_focus_functions", "missing": missing}
+
+    preamble, preamble_status = python_module_preamble(source_code)
+    if preamble_status != "ok":
+        return None, {"strategy": "full_source", "reason": preamble_status}
+    helper_summaries, helper_status = python_top_level_function_summaries(
+        source_code,
+        exclude_names=focus_function_names,
+    )
+    if helper_summaries is None:
+        return None, {"strategy": "full_source", "reason": helper_status}
+
+    editable_blocks = [
+        {
+            "name": name,
+            "source": blocks[name][2].rstrip(),
+        }
+        for name in focus_function_names
+    ]
+    helper_summary_text = "\n".join(f"- {entry}" for entry in helper_summaries) or "- none"
+    editable_text = "\n\n".join(
+        f"## {entry['name']}\n```python\n{entry['source']}\n```" for entry in editable_blocks
+    )
+    focus_prompt = (
+        f"Target: {target_name}\n"
+        f"Metric: {metric_name}\n"
+        "Mode: focused Python function editing\n\n"
+        "Objective:\n"
+        f"- Improve {metric_name} for {target_name}.\n"
+        "- Keep functional behavior exactly equivalent.\n"
+        "- Keep the file valid Python syntax.\n\n"
+        "Hard constraints:\n"
+        "- Do not change public function signatures.\n"
+        "- Do not remove security-relevant transformations.\n"
+        "- Do not add unconstrained blocks.\n"
+        "- Keep deterministic behavior for the same input.\n\n"
+        "Only modify the editable functions listed below. "
+        "All non-listed code stays exactly unchanged. "
+        "Preserve function names and signatures.\n\n"
+        "Module preamble (non-editable imports/constants):\n"
+        "```python\n"
+        f"{preamble.rstrip()}\n"
+        "```\n\n"
+        "Non-editable helper function summaries:\n"
+        f"{helper_summary_text}\n\n"
+        "Editable functions:\n"
+        f"{editable_text}\n"
+    )
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "updated_functions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "name": {"type": "string", "enum": focus_function_names},
+                        "source": {"type": "string"},
+                    },
+                    "required": ["name", "source"],
+                },
+            },
+            "notes": {"type": "string"},
+        },
+        "required": ["updated_functions", "notes"],
+    }
+    return {
+        "strategy": "focused_python_functions",
+        "focus_function_names": list(focus_function_names),
+        "editable_blocks": editable_blocks,
+        "prompt": focus_prompt,
+        "schema": schema,
+        "helper_summaries": helper_summaries,
+        "preamble_chars": len(preamble),
+        "prompt_chars": len(focus_prompt),
+    }, {
+        "strategy": "focused_python_functions",
+        "focus_function_count": len(focus_function_names),
+        "helper_summary_count": len(helper_summaries),
+        "preamble_chars": len(preamble),
+        "prompt_chars": len(focus_prompt),
+    }
+
+
+def validate_python_function_replacement(
+    *,
+    name: str,
+    replacement_source: str,
+    expected_signature: str | None = None,
+) -> tuple[str | None, dict[str, Any]]:
+    normalized = extract_source_from_llm_response(replacement_source).strip()
+    if not normalized:
+        return None, {"function": name, "reason": "empty_replacement"}
+    try:
+        tree = ast.parse(normalized)
+    except SyntaxError as exc:
+        return None, {"function": name, "reason": f"parse_error:{exc.msg}:line={exc.lineno}"}
+    except Exception as exc:  # noqa: BLE001
+        return None, {"function": name, "reason": f"parse_error:{type(exc).__name__}"}
+    if len(tree.body) != 1 or not isinstance(tree.body[0], (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return None, {"function": name, "reason": "replacement_must_be_single_function"}
+    node = tree.body[0]
+    if node.name != name:
+        return None, {"function": name, "reason": "function_name_mismatch", "observed": node.name}
+    observed_signature = python_function_signature_fingerprint(node)
+    if expected_signature is not None and observed_signature != expected_signature:
+        return None, {"function": name, "reason": "signature_mismatch"}
+    return normalized + "\n", {"function": name, "reason": "ok"}
+
+
+def apply_python_function_replacements(
+    source_code: str,
+    *,
+    replacements: list[dict[str, str]],
+) -> tuple[str | None, dict[str, Any]]:
+    blocks, status = python_function_blocks(source_code)
+    if blocks is None:
+        return None, {"reason": status}
+    expected_signatures, parse_error = extract_python_function_signatures(
+        source_code,
+        required_names=list(blocks.keys()),
+    )
+    if parse_error is not None:
+        return None, {"reason": parse_error}
+
+    validated: list[tuple[int, int, str, str]] = []
+    seen: set[str] = set()
+    for item in replacements:
+        name = str(item.get("name", "")).strip()
+        if not name:
+            return None, {"reason": "missing_function_name"}
+        if name in seen:
+            return None, {"reason": "duplicate_function_name", "function": name}
+        seen.add(name)
+        if name not in blocks:
+            return None, {"reason": "unknown_function_name", "function": name}
+        replacement_source = str(item.get("source", ""))
+        normalized, details = validate_python_function_replacement(
+            name=name,
+            replacement_source=replacement_source,
+            expected_signature=expected_signatures.get(name),
+        )
+        if normalized is None:
+            return None, details
+        start, end, _ = blocks[name]
+        validated.append((start, end, name, normalized))
+
+    if not validated:
+        return source_code, {"reason": "no_updates", "updated_functions": []}
+
+    lines = source_code.splitlines(keepends=True)
+    updated_names: list[str] = []
+    for start, end, name, normalized in sorted(validated, key=lambda item: item[0], reverse=True):
+        lines[start : end + 1] = [normalized]
+        updated_names.append(name)
+    candidate = "".join(lines)
+    return candidate, {
+        "reason": "ok",
+        "updated_functions": sorted(updated_names),
+    }
+
+
 def recombine_python_parent_block(
     best_source: str,
     parent_source: str,
@@ -5042,42 +5277,72 @@ def request_codex_candidate(
     user_prompt: str,
     reasoning_effort: str,
     working_root: Path,
+    timeout_seconds: float,
+    current_source: str = "",
+    focus_context: dict[str, Any] | None = None,
 ) -> tuple[str | None, dict[str, Any]]:
     codex_bin = os.getenv("AUTORESEARCH_CODEX_BIN", "").strip() or shutil.which("codex")
     if not codex_bin:
         return None, {"reason": "codex_cli_not_found", "backend": "codex"}
 
-    timeout_raw = os.getenv("AUTORESEARCH_CODEX_TIMEOUT_SECONDS", "180").strip()
-    try:
-        timeout_seconds = max(30.0, float(timeout_raw))
-    except ValueError:
-        timeout_seconds = 180.0
-
     effort = resolve_codex_reasoning_effort(reasoning_effort)
-    final_prompt = build_codex_exec_prompt(system_prompt=system_prompt, user_prompt=user_prompt)
+    prompt_strategy = str((focus_context or {}).get("strategy", "full_source"))
     model_pinned = model_name_is_version_pinned(model)
+    if focus_context is not None and not current_source:
+        return None, {"reason": "current_source_required_for_focus_context", "backend": "codex"}
+    if focus_context is not None:
+        task_instructions = (
+            "Use only the supplied context. Do not inspect repositories, read additional files, or run shell commands.\n"
+            "Return JSON matching the provided schema.\n"
+            "Only include changed functions in updated_functions.\n"
+            "Each source must be a complete top-level Python function definition with the same function name and signature.\n"
+            "Do not include Markdown fences."
+        )
+        prompt_body = str(focus_context["prompt"])
+    else:
+        task_instructions = (
+            "Use only the supplied context. Do not inspect repositories, read additional files, or run shell commands.\n"
+            "Return only the complete updated source file contents.\n"
+            "Do not use Markdown fences.\n"
+            "Do not include explanations."
+        )
+        prompt_body = user_prompt
+    final_prompt = build_codex_exec_prompt(
+        system_prompt=system_prompt,
+        task_instructions=task_instructions,
+        user_prompt=prompt_body,
+    )
 
     with tempfile.TemporaryDirectory(prefix="autoresearch-codex-") as tmpdir:
-        output_path = Path(tmpdir) / "last_message.txt"
+        temp_root = Path(tmpdir)
+        session_root = temp_root / "workspace"
+        session_root.mkdir(parents=True, exist_ok=True)
+        output_path = temp_root / "last_message.txt"
+        schema_path = temp_root / "output_schema.json"
+        if focus_context is not None:
+            schema_path.write_text(json.dumps(focus_context["schema"], indent=2, sort_keys=True), encoding="utf-8")
         cmd = [
             codex_bin,
             "exec",
             "--ephemeral",
+            "--skip-git-repo-check",
             "--json",
             "--color",
             "never",
             "--sandbox",
             "read-only",
             "--cd",
-            str(working_root),
+            str(session_root),
             "--output-last-message",
             str(output_path),
             "--model",
             model,
             "-c",
             f'model_reasoning_effort="{effort}"',
-            "-",
         ]
+        if focus_context is not None:
+            cmd.extend(["--output-schema", str(schema_path)])
+        cmd.append("-")
         try:
             proc = subprocess.run(
                 cmd,
@@ -5110,9 +5375,20 @@ def request_codex_candidate(
             "model_version_pinned": model_pinned,
             "model_warning": "non_version_pinned_model" if model and not model_pinned else None,
             "reasoning_effort": effort,
+            "prompt_strategy": prompt_strategy,
+            "timeout_seconds": timeout_seconds,
             "system_prompt_transport": "flat_text_sections",
             "system_prompt_privileged": False,
         }
+        if focus_context is not None:
+            diagnostics.update(
+                {
+                    "focus_function_count": int(len(focus_context.get("focus_function_names", []))),
+                    "focus_prompt_chars": int(focus_context.get("prompt_chars", 0)),
+                    "focus_preamble_chars": int(focus_context.get("preamble_chars", 0)),
+                    "focus_helper_summary_count": int(len(focus_context.get("helper_summaries", []))),
+                }
+            )
         if proc.returncode != 0:
             return None, diagnostics
         if not output_path.exists():
@@ -5123,6 +5399,46 @@ def request_codex_candidate(
         if not content.strip():
             diagnostics["reason"] = "codex_empty_output"
             return None, diagnostics
+        if focus_context is not None:
+            try:
+                payload = json.loads(content)
+            except json.JSONDecodeError:
+                diagnostics["reason"] = "codex_invalid_structured_output"
+                diagnostics["structured_output"] = content[:2000]
+                return None, diagnostics
+            replacements = payload.get("updated_functions")
+            if not isinstance(replacements, list):
+                diagnostics["reason"] = "codex_missing_updated_functions"
+                diagnostics["structured_output"] = payload
+                return None, diagnostics
+            allowed_names = {
+                str(name).strip()
+                for name in focus_context.get("focus_function_names", [])
+                if str(name).strip()
+            }
+            for item in replacements:
+                if not isinstance(item, dict):
+                    diagnostics["reason"] = "codex_invalid_replacement_entry"
+                    diagnostics["structured_output"] = payload
+                    return None, diagnostics
+                observed_name = str(item.get("name", "")).strip()
+                if observed_name not in allowed_names:
+                    diagnostics["reason"] = "codex_out_of_scope_replacement"
+                    diagnostics["observed_name"] = observed_name
+                    diagnostics["structured_output"] = payload
+                    return None, diagnostics
+            candidate, apply_details = apply_python_function_replacements(
+                current_source,
+                replacements=replacements,
+            )
+            diagnostics["apply_details"] = apply_details
+            notes = payload.get("notes")
+            if isinstance(notes, str) and notes.strip():
+                diagnostics["notes"] = notes[:500]
+            if candidate is None:
+                diagnostics["reason"] = "codex_apply_failed"
+                return None, diagnostics
+            return candidate, diagnostics
         return extract_source_from_llm_response(content), diagnostics
 
 
@@ -5720,6 +6036,7 @@ def run_loop(args: argparse.Namespace) -> int:
             args,
             f"warning: model {llm_model!r} is not version-pinned; experiment traces may not be reproducible",
         )
+    codex_timeout_seconds = resolve_codex_timeout_seconds(getattr(args, "codex_timeout_seconds", DEFAULT_CODEX_TIMEOUT_SECONDS))
 
     git_checkpoint_mode = str(args.git_checkpoint_mode).strip().lower()
     if git_checkpoint_mode not in {"off", "accepted", "all"}:
@@ -6142,6 +6459,7 @@ def run_loop(args: argparse.Namespace) -> int:
                 "model_warning": llm_model_warning,
                 "temperature": args.temperature if llm_backend == "openai" else None,
                 "codex_reasoning_effort": codex_reasoning_effort if llm_backend == "codex" else None,
+                "codex_timeout_seconds": codex_timeout_seconds if llm_backend == "codex" else None,
             },
             "mutation_memory": {
                 "enabled": mutation_memory is not None,
@@ -6399,21 +6717,38 @@ def run_loop(args: argparse.Namespace) -> int:
         diagnostics["threshold"] = threshold_diag
 
         if llm_backend in {"openai", "codex"}:
-            prompt_source, prompt_source_diagnostics = sanitize_source_for_prompt(
-                current_source,
-                sanitize_comments=prompt_sanitize_comments,
-                max_chars=prompt_max_chars,
-                language=language_norm,
-            )
-            diagnostics["prompt_source"] = prompt_source_diagnostics
-            prompt = build_prompt(
-                template,
-                target_name=args.target,
-                metric_name=target["metric_name"],
-                language=language,
-                source_code=prompt_source,
-            )
             system_prompt = build_llm_system_prompt(language)
+            codex_focus_context: dict[str, Any] | None = None
+            if llm_backend == "codex":
+                codex_focus_context, codex_focus_diagnostics = build_codex_python_focus_context(
+                    target_name=args.target,
+                    metric_name=target["metric_name"],
+                    source_code=current_source,
+                    focus_function_names=signature_guard_names,
+                )
+                diagnostics["codex_prompt"] = codex_focus_diagnostics
+            if llm_backend == "codex" and codex_focus_context is not None:
+                prompt = codex_focus_context["prompt"]
+                diagnostics["prompt_source"] = {
+                    "strategy": "focused_python_functions",
+                    "prompt_chars": int(codex_focus_context.get("prompt_chars", 0)),
+                    "focus_function_count": int(len(codex_focus_context.get("focus_function_names", []))),
+                }
+            else:
+                prompt_source, prompt_source_diagnostics = sanitize_source_for_prompt(
+                    current_source,
+                    sanitize_comments=prompt_sanitize_comments,
+                    max_chars=prompt_max_chars,
+                    language=language_norm,
+                )
+                diagnostics["prompt_source"] = prompt_source_diagnostics
+                prompt = build_prompt(
+                    template,
+                    target_name=args.target,
+                    metric_name=target["metric_name"],
+                    language=language,
+                    source_code=prompt_source,
+                )
             if llm_backend == "openai":
                 candidate, llm_diagnostics = request_openai_candidate(
                     model=llm_model,
@@ -6428,6 +6763,9 @@ def run_loop(args: argparse.Namespace) -> int:
                     user_prompt=prompt,
                     reasoning_effort=codex_reasoning_effort,
                     working_root=ROOT,
+                    timeout_seconds=codex_timeout_seconds,
+                    current_source=current_source,
+                    focus_context=codex_focus_context,
                 )
             diagnostics["llm"] = llm_diagnostics
             if candidate is None:
@@ -7398,6 +7736,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--codex-reasoning-effort",
         default=os.getenv("AUTORESEARCH_CODEX_REASONING_EFFORT", DEFAULT_CODEX_REASONING_EFFORT),
         help="Reasoning effort for Codex CLI mode: low, medium, or high",
+    )
+    parser.add_argument(
+        "--codex-timeout-seconds",
+        type=float,
+        default=resolve_codex_timeout_seconds(
+            os.getenv("AUTORESEARCH_CODEX_TIMEOUT_SECONDS", DEFAULT_CODEX_TIMEOUT_SECONDS)
+        ),
+        help="Timeout for a single Codex CLI proposal request",
     )
     parser.add_argument(
         "--artifacts",
