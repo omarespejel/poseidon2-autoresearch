@@ -3274,14 +3274,14 @@ def python_top_level_function_summaries(
         return None, f"parse_failed:{type(exc).__name__}"
 
     excluded = set(exclude_names or [])
-    included = set(include_names or [])
+    included = None if include_names is None else set(include_names)
     summaries: list[str] = []
     for node in tree.body:
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         if node.name in excluded:
             continue
-        if included and node.name not in included:
+        if included is not None and node.name not in included:
             continue
         arg_names: list[str] = []
         for arg in list(node.args.posonlyargs) + list(node.args.args):
@@ -3648,6 +3648,7 @@ def collect_codex_function_signature_archive(
     memory: dict[str, Any] | None,
     *,
     function_names: list[str],
+    active_target: str | None = None,
 ) -> dict[str, set[str]]:
     archive = {name: set() for name in function_names}
     if not isinstance(memory, dict):
@@ -3657,6 +3658,9 @@ def collect_codex_function_signature_archive(
         return archive
     for raw in entries:
         if not isinstance(raw, dict):
+            continue
+        entry_target = str(raw.get("target", "")).strip()
+        if active_target is not None and entry_target and entry_target != active_target:
             continue
         if str(raw.get("language", "")).strip().lower() != "python":
             continue
@@ -6878,6 +6882,7 @@ def run_loop(args: argparse.Namespace) -> int:
     codex_focus_seen_signatures = collect_codex_function_signature_archive(
         population_memory,
         function_names=available_codex_focus_names,
+        active_target=args.target,
     )
     for name in available_codex_focus_names:
         signature = python_named_function_semantic_signature(best_source, name)

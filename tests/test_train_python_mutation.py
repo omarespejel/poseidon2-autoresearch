@@ -1321,6 +1321,15 @@ def helper():
         self.assertIn("target-lane differential concentration", context["prompt"])
         self.assertLessEqual(diagnostics["helper_summary_count"], 3)
 
+    def test_python_top_level_function_summaries_preserves_empty_include_list(self) -> None:
+        summaries, status = train.python_top_level_function_summaries(
+            harness_source(),
+            exclude_names=["differential_kernel"],
+            include_names=[],
+        )
+        self.assertEqual(status, "ok")
+        self.assertEqual(summaries, [])
+
     def test_codex_focus_function_names_excludes_score_for_attack_kernels(self) -> None:
         selected = train.codex_focus_function_names(
             source_path=KERNEL_PATH,
@@ -1523,6 +1532,7 @@ def helper():
                 "version": 1,
                 "entries": [
                     {
+                        "target": "poseidon2_cryptanalysis_trackb_kernel_fast",
                         "accepted_total": 1,
                         "language": "python",
                         "source_code": candidate,
@@ -1530,6 +1540,7 @@ def helper():
                 ],
             },
             function_names=["differential_kernel", "mitm_truncated_preimage_kernel"],
+            active_target="poseidon2_cryptanalysis_trackb_kernel_fast",
         )
         self.assertIn(
             train.python_named_function_semantic_signature(candidate, "differential_kernel"),
@@ -1556,6 +1567,26 @@ def helper():
                 ],
             },
             function_names=["differential_kernel"],
+        )
+        self.assertEqual(archive["differential_kernel"], set())
+
+    def test_collect_codex_function_signature_archive_scopes_to_active_target(self) -> None:
+        source = harness_source()
+        candidate = source.replace("        if rng.random() < 0.35:\n", "        if rng.random() < 0.5:\n", 1)
+        archive = train.collect_codex_function_signature_archive(
+            {
+                "version": 1,
+                "entries": [
+                    {
+                        "target": "other_target",
+                        "accepted_total": 1,
+                        "language": "python",
+                        "source_code": candidate,
+                    }
+                ],
+            },
+            function_names=["differential_kernel"],
+            active_target="poseidon2_cryptanalysis_trackb_kernel_fast",
         )
         self.assertEqual(archive["differential_kernel"], set())
 
@@ -1743,19 +1774,21 @@ def helper():
             output_path.write_text('{"updated_functions":[],"notes":"no concrete attack improvement"}', encoding="utf-8")
             return subprocess.CompletedProcess(cmd, 0, stdout='{"event":"done"}\n', stderr="")
 
-        with patch.object(train.shutil, "which", return_value="/usr/bin/codex"):
-            with patch("train.subprocess.run", side_effect=fake_run):
-                candidate, diagnostics = train.request_codex_candidate(
-                    model="gpt-5-codex",
-                    system_prompt="system",
-                    user_prompt="unused",
-                    reasoning_effort="high",
-                    working_root=ROOT,
-                    timeout_seconds=120.0,
-                    timeout_attempts=[120.0, 300.0],
-                    current_source=source,
-                    focus_context=focus_context,
-                )
+        with (
+            patch.object(train.shutil, "which", return_value="/usr/bin/codex"),
+            patch("train.subprocess.run", side_effect=fake_run),
+        ):
+            candidate, diagnostics = train.request_codex_candidate(
+                model="gpt-5-codex",
+                system_prompt="system",
+                user_prompt="unused",
+                reasoning_effort="high",
+                working_root=ROOT,
+                timeout_seconds=120.0,
+                timeout_attempts=[120.0, 300.0],
+                current_source=source,
+                focus_context=focus_context,
+            )
 
         self.assertEqual(candidate, source)
         self.assertEqual(timeouts, [120.0, 300.0])
